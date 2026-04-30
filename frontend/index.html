@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chess Sandbox</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-piece">♛</span>
+        <span class="brand-name">Chess Sandbox</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="btn-flip" type="button" title="Перевернуть доску">⇅ Flip</button>
+        <button id="btn-reset" type="button" title="Стартовая позиция">⟲ Start</button>
+        <button id="btn-clear" type="button" title="Очистить доску">⌫ Clear</button>
+        <label class="mode-toggle">
+          <input type="checkbox" id="erase-mode" />
+          <span>Erase mode</span>
+        </label>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="board-area">
+        <div id="board" class="board" aria-label="Chess board"></div>
+        <div class="board-meta">
+          <label>
+            Ход:
+            <select id="side-to-move">
+              <option value="w">Белые</option>
+              <option value="b">Чёрные</option>
+            </select>
+          </label>
+          <fieldset class="castling">
+            <legend>Рокировки</legend>
+            <label><input type="checkbox" id="cr-K" checked /> K</label>
+            <label><input type="checkbox" id="cr-Q" checked /> Q</label>
+            <label><input type="checkbox" id="cr-k" checked /> k</label>
+            <label><input type="checkbox" id="cr-q" checked /> q</label>
+          </fieldset>
+          <label>
+            En-passant:
+            <input type="text" id="ep-square" placeholder="-" maxlength="2" size="3" />
+          </label>
+          <label>
+            Halfmove:
+            <input type="number" id="halfmove" min="0" value="0" size="3" />
+          </label>
+          <label>
+            Fullmove:
+            <input type="number" id="fullmove" min="1" value="1" size="3" />
+          </label>
+        </div>
+        <div class="fen-row">
+          <input type="text" id="fen-input" spellcheck="false" />
+          <button id="btn-load-fen" type="button">Load FEN</button>
+          <button id="btn-copy-fen" type="button">Copy</button>
+        </div>
+        <div class="status" id="status-line">Готов</div>
+      </section>
+
+      <aside class="sidebar">
+        <section class="palette">
+          <h2>Палитра фигур <small>перетащи на доску</small></h2>
+          <div class="palette-row" data-color="w" id="palette-white"></div>
+          <div class="palette-row" data-color="b" id="palette-black"></div>
+        </section>
+
+        <section class="panel" id="panel-engine">
+          <h2>Движок Stockfish</h2>
+          <div class="row">
+            <label>
+              Path:
+              <input
+                type="text"
+                id="engine-path"
+                placeholder="C:\\stockfish\\stockfish-windows-x86-64-avx2.exe"
+              />
+            </label>
+          </div>
+          <div class="row">
+            <label>Threads <input type="number" id="engine-threads" min="1" max="64" value="2" /></label>
+            <label>Hash MB <input type="number" id="engine-hash" min="16" max="8192" value="256" /></label>
+            <label>Skill <input type="number" id="engine-skill" min="0" max="20" value="20" /></label>
+          </div>
+          <div class="row">
+            <button id="btn-engine-configure" type="button">Запустить движок</button>
+            <button id="btn-engine-stop" type="button">Остановить</button>
+            <span id="engine-status" class="muted">не настроен</span>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-play">
+          <h2>Игра против Stockfish из этой позиции</h2>
+          <div class="row">
+            <label>
+              Ваш цвет:
+              <select id="player-color">
+                <option value="w">Белые</option>
+                <option value="b">Чёрные</option>
+              </select>
+            </label>
+            <label>
+              Время на ход (мс):
+              <input type="number" id="movetime" min="50" max="60000" value="1000" />
+            </label>
+          </div>
+          <div class="row">
+            <button id="btn-play-start" type="button">Играть отсюда</button>
+            <button id="btn-play-stop" type="button" disabled>Прервать</button>
+            <button id="btn-engine-think" type="button">Подсказать ход</button>
+          </div>
+          <div id="play-status" class="muted">Не активна</div>
+          <ol id="move-history" class="move-history"></ol>
+        </section>
+
+        <section class="panel" id="panel-recognize">
+          <h2>Распознать со скриншота</h2>
+          <div class="row">
+            <input type="file" id="recognize-file" accept="image/*" />
+            <button id="btn-recognize" type="button">Распознать</button>
+          </div>
+          <div id="recognize-output" class="muted">Загрузите изображение шахматной доски.</div>
+        </section>
+
+        <section class="panel" id="panel-about">
+          <h2>Подсказки</h2>
+          <ul class="hints">
+            <li>Перетащи фигуру с палитры на любую клетку, чтобы добавить.</li>
+            <li>Включи <em>Erase mode</em> — клик по клетке удаляет фигуру.</li>
+            <li>В режиме игры легальность ходов проверяется по правилам.</li>
+            <li>В свободной редакции (когда игра не запущена) можно ставить любую фигуру в любое место — даже невозможные позиции.</li>
+          </ul>
+        </section>
+      </aside>
+    </main>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
