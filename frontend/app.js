@@ -678,12 +678,17 @@ async function refreshEngineStatus() {
   }
 }
 
+function intOrDefault(value, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 document.getElementById("btn-engine-configure").addEventListener("click", async () => {
   const body = {
     path: document.getElementById("engine-path").value || null,
-    threads: parseInt(document.getElementById("engine-threads").value, 10) || 2,
-    hash_mb: parseInt(document.getElementById("engine-hash").value, 10) || 256,
-    skill_level: parseInt(document.getElementById("engine-skill").value, 10) || 20,
+    threads: intOrDefault(document.getElementById("engine-threads").value, 2),
+    hash_mb: intOrDefault(document.getElementById("engine-hash").value, 256),
+    skill_level: intOrDefault(document.getElementById("engine-skill").value, 20),
   };
   setStatus("Запускаю Stockfish…");
   try {
