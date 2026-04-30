@@ -946,7 +946,6 @@ function handlePasteEvent(e) {
   recognizeFile(f, { autoApply: true });
 }
 document.addEventListener("paste", handlePasteEvent);
-window.addEventListener("paste", handlePasteEvent);
 
 async function pasteFromClipboardAPI() {
   if (!navigator.clipboard || !navigator.clipboard.read) {

@@ -186,7 +186,7 @@ def _load_all_templates() -> list[PieceTemplate]:
             piece_letter = piece_token[1].upper()
             if color not in ("w", "b") or piece_letter not in ("K", "Q", "R", "B", "N", "P"):
                 continue
-        except ValueError:
+        except (ValueError, IndexError):
             continue
         bgra = _load_sprite_rgba(path)
         if bgra is None:
