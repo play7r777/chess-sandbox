@@ -1,6 +1,7 @@
 """FastAPI application exposing the sandbox UI and the engine/recognition APIs."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -218,7 +219,7 @@ async def recognize_endpoint(image: UploadFile = _DEFAULT_FILE) -> dict[str, Any
     if not raw:
         raise HTTPException(status_code=400, detail="Empty image upload.")
     try:
-        result = recognize_position(raw)
+        result = await asyncio.to_thread(recognize_position, raw)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Recognition failed: {exc}") from exc
     return {
