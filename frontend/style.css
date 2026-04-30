@@ -134,13 +134,22 @@ input:focus, select:focus, button:focus-visible {
 
 .piece {
   cursor: grab;
-  display: inline-block;
-  line-height: 1;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
 }
-.piece.white { color: #fdfcf9; text-shadow: 0 0 1px #1a1a1a, 0 0 2px #1a1a1a, 0 0 3px #1a1a1a; }
-.piece.black { color: #14110b; text-shadow: 0 0 1px #f1ecdf, 0 0 2px #f1ecdf, 0 0 3px #f1ecdf; }
+.piece-img {
+  width: 88%;
+  height: 88%;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
 .piece.dragging { opacity: 0.4; }
+.palette-cell .piece-img { width: 36px; height: 36px; }
 
 .board-meta {
   display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: center;

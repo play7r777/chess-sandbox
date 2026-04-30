@@ -37,7 +37,25 @@ class Settings(BaseSettings):
             on_path = shutil.which(name)
             if on_path:
                 return on_path
+        for default in DEFAULT_WINDOWS_STOCKFISH_PATHS + DEFAULT_UNIX_STOCKFISH_PATHS:
+            candidate = Path(default).expanduser()
+            if candidate.exists():
+                return str(candidate)
         return None
+
+
+DEFAULT_WINDOWS_STOCKFISH_PATHS: list[str] = [
+    r"C:\stockfish\stockfish-windows-x86-64-avx2.exe",
+    r"C:\stockfish\stockfish.exe",
+    r"C:\Program Files\Stockfish\stockfish.exe",
+    r"C:\Program Files\Stockfish\stockfish-windows-x86-64-avx2.exe",
+]
+
+DEFAULT_UNIX_STOCKFISH_PATHS: list[str] = [
+    "/usr/games/stockfish",
+    "/usr/local/bin/stockfish",
+    "/opt/homebrew/bin/stockfish",
+]
 
 
 settings = Settings()

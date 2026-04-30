@@ -1,34 +1,34 @@
 """Position recognition from a screenshot.
 
-We support two modes, picked automatically:
+Pipeline (best-to-worst):
 
-1. **chesscog** — if a local install of `chesscog` and its trained weights are
-   available we delegate to it. This is the most accurate path and is designed
-   for arbitrary chessboard photos. Optional install: ``pip install
-   "chess-sandbox[recognize]"`` plus the chesscog package itself.
+1. **Multi-set template matching** — pre-loaded RGBA piece sprites from many
+   piece sets (lichess SVGs, chess.com PNGs). For each detected square we
+   estimate the background colour, build a binary "piece mask" by thresholding
+   pixel deviation from background, and compare to each sprite's alpha mask
+   via IoU + grayscale correlation on the silhouette. The piece set with the
+   best aggregate score across the board "wins" and its votes determine the
+   final position. Background-invariant by construction, so it works on
+   chess.com / lichess / dark / blue / green / wood themes.
 
-2. **Template-match (default)** — a self-contained pipeline that:
-     a. detects the chessboard bounding box in the input image,
-     b. splits it into 64 squares,
-     c. compares each square against pre-rendered piece templates (generated
-        once with `python-chess`'s SVG piece set, which is the well-known
-        Cburnett set used by lichess and many other sites).
+2. **chesscog** (optional) — if `chesscog` and its trained CNN weights are
+   installed, we delegate to it first. It targets photographs of physical
+   boards.
 
-   Template matching uses normalized cross-correlation on the foreground
-   silhouette of each square, which makes it robust to slight colour /
-   contrast differences between the input image and our reference renders.
-   Accuracy is best for clean digital screenshots; messy photos benefit from
-   installing `chesscog`.
+3. **Single-set template matching** (legacy fallback) — the original Cburnett-
+   only pipeline, kept for completeness.
 
-In both modes we return a fully-formed FEN. Side-to-move and castling rights
-are not derivable from the picture alone — they default to "white to move,
-no rights" and the user can correct them in the UI.
+4. **Occupancy only** — last resort when no templates can be loaded.
+
+Side-to-move and castling rights cannot be derived from a picture; they
+default to "white to move, no rights" and the user fixes them in the UI.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -37,7 +37,9 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 PIECE_FEN_CHARS: tuple[str, ...] = ("P", "N", "B", "R", "Q", "K", "p", "n", "b", "r", "q", "k")
-TEMPLATE_SIZE = 64  # pixels per side; templates are square
+TEMPLATE_SIZE = 96  # pixels per side; square crop the user image is resized to
+
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates_data"
 
 
 @dataclass
@@ -84,134 +86,182 @@ def _try_chesscog(image_bgr: np.ndarray) -> RecognitionResult | None:
         return None
 
 
-# ---------- Template generation ----------
-
-
-def _render_reference_board() -> np.ndarray | None:
-    """Render a known starting position with python-chess + cairosvg.
-
-    The resulting image (512x512) gives us 32 square renderings: 16 pieces on
-    rank 1, 2, 7, 8 against light and dark squares. We use this as the ground
-    truth template set.
-    """
-    try:
-        import cairosvg
-        import chess
-        import chess.svg
-    except Exception as exc:  # pragma: no cover - optional dep at runtime
-        logger.info("Cannot generate reference templates (cairosvg missing): %s", exc)
-        return None
-    board = chess.Board()
-    svg = chess.svg.board(board, size=TEMPLATE_SIZE * 8, coordinates=False)
-    png = cairosvg.svg2png(bytestring=svg.encode(), output_width=TEMPLATE_SIZE * 8)
-    arr = np.frombuffer(png, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    return img
-
-
-PIECE_TYPES_NEUTRAL: tuple[str, ...] = ("k", "q", "r", "b", "n", "p")
-
-
-def _render_board(fen: str) -> np.ndarray | None:
-    try:
-        import cairosvg
-        import chess
-        import chess.svg
-    except Exception as exc:  # pragma: no cover - optional dep at runtime
-        logger.info("Cannot render reference board: %s", exc)
-        return None
-    board = chess.Board(fen)
-    svg = chess.svg.board(board, size=TEMPLATE_SIZE * 8, coordinates=False)
-    png = cairosvg.svg2png(bytestring=svg.encode(), output_width=TEMPLATE_SIZE * 8)
-    arr = np.frombuffer(png, dtype=np.uint8)
-    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-
-
-@lru_cache(maxsize=1)
-def _piece_templates() -> dict[str, list[np.ndarray]] | None:
-    """Build {piece_char: [grayscale templates]}.
-
-    We render two reference boards. The first is the standard starting
-    position; the second swaps the king and queen onto the *other* square
-    colour so every piece × square-colour combination is captured. Each
-    template is the grayscale render of the square, normalised to zero
-    mean and unit variance. Matching is done by ``cv2.matchTemplate`` with
-    ``TM_CCORR_NORMED`` which is invariant to overall brightness scaling
-    but still distinguishes white from black pieces.
-    """
-    boards: list[tuple[np.ndarray, dict[int, list[str]]]] = []
-    # Board 1: starting position
-    ref1 = _render_board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1")
-    if ref1 is None:
-        return None
-    boards.append((ref1, {
-        0: ["r", "n", "b", "q", "k", "b", "n", "r"],
-        1: ["p"] * 8,
-        6: ["P"] * 8,
-        7: ["R", "N", "B", "Q", "K", "B", "N", "R"],
-    }))
-    # Board 2: queens and kings swapped so they appear on the missing
-    # square colours. d/e files get swapped: white K to d1 (light),
-    # white Q to e1 (dark); same for black on rank 8.
-    ref2 = _render_board("rnbkqbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBKQBNR w - - 0 1")
-    if ref2 is not None:
-        boards.append((ref2, {
-            0: ["r", "n", "b", "k", "q", "b", "n", "r"],
-            7: ["R", "N", "B", "K", "Q", "B", "N", "R"],
-        }))
-    templates: dict[str, list[np.ndarray]] = {p: [] for p in PIECE_FEN_CHARS}
-    for ref, rows in boards:
-        h = ref.shape[0]
-        sq = h // 8
-        for r, pieces in rows.items():
-            for c, piece in enumerate(pieces):
-                sq_img = ref[r * sq : (r + 1) * sq, c * sq : (c + 1) * sq]
-                sq_img = cv2.resize(sq_img, (TEMPLATE_SIZE, TEMPLATE_SIZE))
-                gray = cv2.cvtColor(sq_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                gray -= gray.mean()
-                norm = float(np.linalg.norm(gray))
-                if norm > 0:
-                    gray /= norm
-                templates[piece].append(gray)
-    return templates
+# ---------- Multi-set templates ----------
 
 
 @dataclass
-class SquareFeatures:
-    """Compact representation of a square for template matching."""
+class PieceTemplate:
+    """One sprite for one piece in one piece set, normalised to TEMPLATE_SIZE."""
 
-    normalized: np.ndarray      # grayscale, mean-subtracted, unit-norm
-    coverage: float             # fraction of square pixels far from background
-    bg_intensity: float         # background grayscale intensity (0..255)
+    set_name: str
+    piece_char: str            # 'P','N','B','R','Q','K','p','n','b','r','q','k'
+    rgb: np.ndarray            # (S,S,3) uint8
+    gray: np.ndarray           # (S,S) float32 — absolute grayscale 0..255
+    alpha: np.ndarray          # (S,S) uint8 — sprite alpha mask
+    mask_bin: np.ndarray       # (S,S) bool — alpha > MASK_THRESHOLD
+    mask_area: int             # popcount of mask_bin
+    inside_mean_lum: float     # mean grayscale inside mask
+    silhouette_gray: np.ndarray  # (S,S) float32 — mean-subtracted, masked, unit-norm
 
 
-def _square_to_features(sq_bgr: np.ndarray) -> SquareFeatures:
-    """Resize the square, normalise it for template matching and report
-    a coverage estimate so we can short-circuit empty squares cheaply.
-    """
-    sq = cv2.resize(sq_bgr, (TEMPLATE_SIZE, TEMPLATE_SIZE))
-    gray = cv2.cvtColor(sq, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    h, _w = gray.shape
-    margin = max(2, h // 12)
-    corners = np.concatenate(
-        [
-            gray[:margin, :margin].flatten(),
-            gray[:margin, -margin:].flatten(),
-            gray[-margin:, :margin].flatten(),
-            gray[-margin:, -margin:].flatten(),
-        ]
+SPRITE_ALPHA_THRESHOLD = 96  # alpha values above this count as foreground
+
+
+def _load_sprite_rgba(path: Path) -> np.ndarray | None:
+    """Load a PNG or SVG sprite and return RGBA at TEMPLATE_SIZE×TEMPLATE_SIZE."""
+    if path.suffix.lower() == ".svg":
+        try:
+            import cairosvg
+        except Exception:
+            return None
+        try:
+            png = cairosvg.svg2png(
+                bytestring=path.read_bytes(),
+                output_width=TEMPLATE_SIZE,
+                output_height=TEMPLATE_SIZE,
+            )
+        except Exception as exc:
+            logger.debug("cairosvg failed for %s: %s", path, exc)
+            return None
+        arr = np.frombuffer(png, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+    else:
+        img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+    elif img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+    if img.shape[0] != TEMPLATE_SIZE or img.shape[1] != TEMPLATE_SIZE:
+        img = cv2.resize(img, (TEMPLATE_SIZE, TEMPLATE_SIZE), interpolation=cv2.INTER_AREA)
+    return img  # BGRA
+
+
+def _make_piece_template(set_name: str, piece_char: str, bgra: np.ndarray) -> PieceTemplate:
+    bgr = bgra[:, :, :3]
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    alpha = bgra[:, :, 3]
+    mask_bin = alpha > SPRITE_ALPHA_THRESHOLD
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    if mask_bin.any():
+        mean_inside = float(gray[mask_bin].mean())
+        sil = (gray - mean_inside) * mask_bin
+        norm = float(np.linalg.norm(sil))
+        if norm > 0:
+            sil = sil / norm
+    else:
+        mean_inside = 0.0
+        sil = np.zeros_like(gray)
+    return PieceTemplate(
+        set_name=set_name,
+        piece_char=piece_char,
+        rgb=rgb,
+        gray=gray,
+        alpha=alpha,
+        mask_bin=mask_bin,
+        mask_area=int(mask_bin.sum()),
+        inside_mean_lum=mean_inside,
+        silhouette_gray=sil,
     )
-    bg_med = float(np.median(corners))
-    coverage = float((np.abs(gray - bg_med) > 25.0).mean())
 
-    norm_img = gray - gray.mean()
-    norm = float(np.linalg.norm(norm_img))
-    if norm > 0:
-        norm_img = norm_img / norm
-    return SquareFeatures(
-        normalized=norm_img,
+
+@lru_cache(maxsize=1)
+def _load_all_templates() -> list[PieceTemplate]:
+    """Discover every sprite in TEMPLATES_DIR and build PieceTemplates.
+
+    Naming convention:  ``{set_name}_{c}{P}.{ext}``
+    where ``c`` is "w" or "b" and ``P`` is one of K Q R B N P (uppercase).
+    """
+    out: list[PieceTemplate] = []
+    if not TEMPLATES_DIR.exists():
+        return out
+    for path in sorted(TEMPLATES_DIR.iterdir()):
+        if path.suffix.lower() not in (".png", ".svg"):
+            continue
+        try:
+            stem = path.stem  # e.g. 'chesscom-neo_wK' or 'lichess-cburnett_bN'
+            set_name, piece_token = stem.rsplit("_", 1)
+            color = piece_token[0]
+            piece_letter = piece_token[1].upper()
+            if color not in ("w", "b") or piece_letter not in ("K", "Q", "R", "B", "N", "P"):
+                continue
+        except ValueError:
+            continue
+        bgra = _load_sprite_rgba(path)
+        if bgra is None:
+            continue
+        piece_char = piece_letter if color == "w" else piece_letter.lower()
+        out.append(_make_piece_template(set_name, piece_char, bgra))
+    logger.info("Loaded %d piece templates from %s", len(out), TEMPLATES_DIR)
+    return out
+
+
+# ---------- Square feature extraction ----------
+
+
+@dataclass
+class SquareCandidate:
+    """A user-supplied square ready for multi-set matching."""
+
+    rgb: np.ndarray            # (S,S,3) uint8 RGB at TEMPLATE_SIZE
+    gray: np.ndarray           # (S,S) uint8
+    gray_f: np.ndarray         # (S,S) float32 — for math
+    mask_bin: np.ndarray       # (S,S) bool — pixels deviating from background
+    mask_area: int
+    coverage: float
+    bg_rgb: tuple[float, float, float]
+    bg_lum: float
+    inside_mean_lum: float
+    silhouette_gray: np.ndarray  # (S,S) float32 — mean-subtracted, masked, unit-norm
+
+
+def _square_candidate(sq_bgr: np.ndarray) -> SquareCandidate:
+    sq_bgr = cv2.resize(sq_bgr, (TEMPLATE_SIZE, TEMPLATE_SIZE), interpolation=cv2.INTER_AREA)
+    rgb = cv2.cvtColor(sq_bgr, cv2.COLOR_BGR2RGB)
+    gray = cv2.cvtColor(sq_bgr, cv2.COLOR_BGR2GRAY)
+    h = TEMPLATE_SIZE
+    margin = max(3, h // 12)
+    corners_bgr = np.concatenate(
+        [
+            sq_bgr[:margin, :margin].reshape(-1, 3),
+            sq_bgr[:margin, -margin:].reshape(-1, 3),
+            sq_bgr[-margin:, :margin].reshape(-1, 3),
+            sq_bgr[-margin:, -margin:].reshape(-1, 3),
+        ]
+    ).astype(np.float32)
+    bg_med_bgr = tuple(float(v) for v in np.median(corners_bgr, axis=0))
+    bg_rgb = (bg_med_bgr[2], bg_med_bgr[1], bg_med_bgr[0])
+    bg_lum = 0.114 * bg_med_bgr[0] + 0.587 * bg_med_bgr[1] + 0.299 * bg_med_bgr[2]
+    diff = np.linalg.norm(sq_bgr.astype(np.float32) - np.array(bg_med_bgr), axis=2)
+    threshold = max(28.0, float(diff.max()) * 0.18)
+    mask_bin = diff > threshold
+    if mask_bin.sum() < (TEMPLATE_SIZE * TEMPLATE_SIZE * 0.005):
+        mask_bin[:] = False
+    mask_area = int(mask_bin.sum())
+    coverage = mask_area / float(TEMPLATE_SIZE * TEMPLATE_SIZE)
+
+    gf = gray.astype(np.float32)
+    if mask_area > 0:
+        mean_inside = float(gf[mask_bin].mean())
+        sil = (gf - mean_inside) * mask_bin
+        norm = float(np.linalg.norm(sil))
+        if norm > 0:
+            sil = sil / norm
+    else:
+        mean_inside = 0.0
+        sil = np.zeros_like(gf)
+    return SquareCandidate(
+        rgb=rgb,
+        gray=gray,
+        gray_f=gf,
+        mask_bin=mask_bin,
+        mask_area=mask_area,
         coverage=coverage,
-        bg_intensity=bg_med,
+        bg_rgb=bg_rgb,
+        bg_lum=float(bg_lum),
+        inside_mean_lum=mean_inside,
+        silhouette_gray=sil,
     )
 
 
@@ -219,11 +269,10 @@ def _square_to_features(sq_bgr: np.ndarray) -> SquareFeatures:
 
 
 def _trim_uniform_border(img: np.ndarray) -> np.ndarray:
-    """Crop solid-colour borders by detecting rows/columns with low variance."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     row_std = gray.std(axis=1)
     col_std = gray.std(axis=0)
-    threshold = 5.0  # very smooth = uniform border
+    threshold = 5.0
     rows = np.where(row_std > threshold)[0]
     cols = np.where(col_std > threshold)[0]
     if len(rows) < 8 or len(cols) < 8:
@@ -234,7 +283,6 @@ def _trim_uniform_border(img: np.ndarray) -> np.ndarray:
 
 
 def _crop_to_square(img: np.ndarray) -> np.ndarray:
-    """Centre-crop the image to a square aspect ratio."""
     h, w = img.shape[:2]
     if h == w:
         return img
@@ -245,19 +293,11 @@ def _crop_to_square(img: np.ndarray) -> np.ndarray:
 
 
 def _detect_board_by_grid(img: np.ndarray) -> tuple[int, int, int, int] | None:
-    """Locate the chessboard by finding 9 evenly spaced lines in each axis.
-
-    A chessboard produces 9 strong horizontal and 9 strong vertical lines
-    (the borders + 7 internal dividers). We use Canny + Hough to detect line
-    segments, project them onto each axis, and look for the densest cluster
-    of 9 roughly-equispaced peaks. Returns (x, y, w, h) of the bounding box.
-    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 40, 140, apertureSize=3)
     h, w = gray.shape
 
     def _peaks(projection: np.ndarray, axis_len: int) -> list[int] | None:
-        # Smooth and pick local maxima above a fraction of the global max.
         if projection.max() == 0:
             return None
         smoothed = cv2.blur(projection.astype(np.float32).reshape(-1, 1), (5, 1)).flatten()
@@ -271,8 +311,6 @@ def _detect_board_by_grid(img: np.ndarray) -> tuple[int, int, int, int] | None:
                 cands.append(int(i))
         if len(cands) < 9:
             return None
-        # Try to pick 9 peaks that are roughly evenly spaced.
-        # We iterate over candidate spacings and starting positions.
         best: tuple[float, list[int]] | None = None
         for start_i in range(min(20, len(cands))):
             start = cands[start_i]
@@ -306,20 +344,18 @@ def _detect_board_by_grid(img: np.ndarray) -> tuple[int, int, int, int] | None:
 
 
 def _detect_board(img: np.ndarray) -> np.ndarray:
-    """Best-effort detection of the chessboard region.
-
-    Strategy:
-      1. Try to detect the 9-line grid directly (most accurate, even when
-         coordinate labels surround the board).
-      2. Otherwise, trim solid borders and look for the largest square-ish
-         contour.
-      3. Fall back to a centre square crop.
-    """
+    h_full, w_full = img.shape[:2]
     grid = _detect_board_by_grid(img)
     if grid is not None:
         x, y, gw, gh = grid
-        side = min(gw, gh)
-        return img[y : y + side, x : x + side]
+        # Sanity: the grid box must be mostly-square, span most of the image,
+        # and not produce a crop that loses more than ~15% of either axis.
+        aspect = gw / gh if gh else 0
+        big_enough = gw >= 0.7 * w_full and gh >= 0.7 * h_full
+        squarish = 0.92 < aspect < 1.08
+        if big_enough and squarish:
+            side = min(gw, gh)
+            return img[y : y + side, x : x + side]
 
     trimmed = _trim_uniform_border(img)
     h, w = trimmed.shape[:2]
@@ -347,75 +383,112 @@ def _detect_board(img: np.ndarray) -> np.ndarray:
     return _crop_to_square(trimmed)
 
 
-# ---------- Classification ----------
+# ---------- Multi-set classification ----------
 
 
-EMPTY_COVERAGE_THRESHOLD = 0.05  # below this fraction we treat a square as empty
-WEAK_MATCH_THRESHOLD = 0.30  # template score below which we don't trust the match
+EMPTY_COVERAGE_THRESHOLD = 0.025  # fraction of square pixels deviating from bg
 
 
-def _classify_square(
-    features: SquareFeatures,
-    templates: dict[str, list[np.ndarray]],
-) -> tuple[str, float]:
-    """Classify a single square as empty or one of 12 pieces.
-
-    Pipeline:
-    1. If the square has very little contrast against its corners, declare
-       it empty without running template matching.
-    2. Otherwise correlate the normalised square against every template
-       (12 pieces × 1+ samples per piece). The best score wins, but only
-       if it clears ``WEAK_MATCH_THRESHOLD`` — a clean piece in cburnett
-       or a similar style scores well above it.
+def _score_candidate(cand: SquareCandidate, tmpl: PieceTemplate) -> float:
+    """Score = shape match (IoU + silhouette NCC) gated by a tone factor.
+    Tone factor goes 1.0 → 0.4 as |Δinside_mean_lum| grows from 0 to ~120,
+    so colour matches dominate but other shape similarities still matter.
     """
-    if features.coverage < EMPTY_COVERAGE_THRESHOLD:
-        return ".", 1.0 - features.coverage
-    best_piece = "."
-    best_score = -1.0
-    sq = features.normalized
-    for piece, mats in templates.items():
-        for tmpl in mats:
-            score = float(np.tensordot(sq, tmpl))
-            if score > best_score:
-                best_score = score
-                best_piece = piece
-    if best_score < WEAK_MATCH_THRESHOLD or best_piece == ".":
-        return ".", 1.0 - features.coverage
-    return best_piece, best_score
+    inter = int(np.logical_and(cand.mask_bin, tmpl.mask_bin).sum())
+    union = int(np.logical_or(cand.mask_bin, tmpl.mask_bin).sum())
+    if union == 0:
+        return 0.0
+    iou = inter / union
+    ncc = max(0.0, float(np.tensordot(cand.silhouette_gray, tmpl.silhouette_gray)))
+    shape_score = 0.55 * iou + 0.45 * ncc
+
+    tone_diff = abs(cand.inside_mean_lum - tmpl.inside_mean_lum)
+    tone_factor = 0.4 + 0.6 * float(np.exp(-(tone_diff * tone_diff) / 2500.0))
+
+    return shape_score * tone_factor
 
 
-# ---------- Public pipeline ----------
+def _multi_set_recognize(image: np.ndarray) -> RecognitionResult | None:
+    templates = _load_all_templates()
+    if not templates:
+        return None
 
-
-def _template_recognize(image: np.ndarray) -> RecognitionResult:
-    templates = _piece_templates()
-    if templates is None:
-        notes = [
-            "Could not initialize reference templates (cairosvg unavailable).",
-            "Falling back to occupancy-only detection.",
-        ]
-        return _occupancy_only_fallback(image, notes)
+    # group by set
+    sets: dict[str, list[PieceTemplate]] = {}
+    for t in templates:
+        sets.setdefault(t.set_name, []).append(t)
 
     board_img = _detect_board(image)
     h, w = board_img.shape[:2]
     sq_h = h / 8
     sq_w = w / 8
 
-    rows: list[str] = []
-    confidences: list[float] = []
+    candidates: list[list[SquareCandidate]] = []
+    occupancy: list[list[bool]] = []
     for r in range(8):
-        chars: list[str] = []
+        row_cands: list[SquareCandidate] = []
+        row_occ: list[bool] = []
         for c in range(8):
             sx = int(c * sq_w)
             sy = int(r * sq_h)
             ex = int((c + 1) * sq_w)
             ey = int((r + 1) * sq_h)
-            square = board_img[sy:ey, sx:ex]
-            features = _square_to_features(square)
-            piece, conf = _classify_square(features, templates)
-            confidences.append(conf)
-            chars.append(piece)
-        # Compress empty runs per FEN.
+            sq = board_img[sy:ey, sx:ex]
+            cand = _square_candidate(sq)
+            row_cands.append(cand)
+            row_occ.append(cand.coverage >= EMPTY_COVERAGE_THRESHOLD)
+        candidates.append(row_cands)
+        occupancy.append(row_occ)
+
+    # Pick the best set first: for each occupied square, score against each
+    # set's best piece template and aggregate.
+    set_scores: dict[str, float] = {name: 0.0 for name in sets}
+    occupied_count = 0
+    for r in range(8):
+        for c in range(8):
+            if not occupancy[r][c]:
+                continue
+            occupied_count += 1
+            cand = candidates[r][c]
+            for name, tmpls in sets.items():
+                best = max((_score_candidate(cand, t) for t in tmpls), default=0.0)
+                set_scores[name] += best
+    if occupied_count == 0:
+        return RecognitionResult(
+            fen="8/8/8/8/8/8/8/8 w - - 0 1",
+            confidence=0.5,
+            method="multi-set",
+            notes=["Доска пустая или фигуры не различимы."],
+        )
+
+    best_set_name = max(set_scores.items(), key=lambda kv: kv[1])[0]
+    best_set_tmpls = sets[best_set_name]
+    avg_set_score = set_scores[best_set_name] / occupied_count
+
+    # Now classify each square using only the winning set.
+    rows: list[str] = []
+    confidences: list[float] = []
+    for r in range(8):
+        chars: list[str] = []
+        for c in range(8):
+            cand = candidates[r][c]
+            if not occupancy[r][c]:
+                chars.append(".")
+                confidences.append(1.0 - cand.coverage)
+                continue
+            best_score = -1.0
+            best_piece = "."
+            for tmpl in best_set_tmpls:
+                s = _score_candidate(cand, tmpl)
+                if s > best_score:
+                    best_score = s
+                    best_piece = tmpl.piece_char
+            if best_score < 0.20:
+                chars.append(".")
+                confidences.append(0.4)
+            else:
+                chars.append(best_piece)
+                confidences.append(best_score)
         compressed = ""
         empties = 0
         for ch in chars:
@@ -432,12 +505,20 @@ def _template_recognize(image: np.ndarray) -> RecognitionResult:
 
     fen = f"{'/'.join(rows)} w - - 0 1"
     avg_conf = float(np.mean(confidences)) if confidences else 0.0
+    pretty_set = best_set_name.replace("chesscom-", "chess.com ").replace(
+        "lichess-", "lichess "
+    )
     notes = [
-        "Использованы шаблоны набора Cburnett (lichess / python-chess).",
-        "Лучше всего работает для чистых цифровых скриншотов; с фотографий доски точность ниже.",
-        "Сторона хода и права на рокировку — недоступны из картинки и выставлены по умолчанию (белые, без прав). Поправь вручную.",
+        f"Распознан набор фигур: {pretty_set} (агрегатный score {avg_set_score:.2f}).",
+        f"Загружено наборов: {len(sets)} (chess.com Neo/Wood/Classic и др., "
+        f"lichess Cburnett/Merida/Alpha и др.).",
+        "Сторона хода и права на рокировку — недоступны из картинки и выставлены "
+        "по умолчанию (белые, без прав). Поправь вручную.",
     ]
-    return RecognitionResult(fen=fen, confidence=avg_conf, method="template", notes=notes)
+    return RecognitionResult(fen=fen, confidence=avg_conf, method="multi-set", notes=notes)
+
+
+# ---------- Legacy single-set fallback (kept for safety) ----------
 
 
 def _occupancy_only_fallback(image: np.ndarray, notes: list[str]) -> RecognitionResult:
@@ -453,9 +534,8 @@ def _occupancy_only_fallback(image: np.ndarray, notes: list[str]) -> Recognition
                 int(r * sq_h) : int((r + 1) * sq_h),
                 int(c * sq_w) : int((c + 1) * sq_w),
             ]
-            features = _square_to_features(square)
-            empty = features.coverage < EMPTY_COVERAGE_THRESHOLD
-            chars.append("." if empty else "P")
+            cand = _square_candidate(square)
+            chars.append("." if cand.coverage < EMPTY_COVERAGE_THRESHOLD else "P")
         compressed = ""
         empties = 0
         for ch in chars:
@@ -477,13 +557,21 @@ def _occupancy_only_fallback(image: np.ndarray, notes: list[str]) -> Recognition
     )
 
 
+# ---------- Public pipeline ----------
+
+
 def recognize(image_bytes: bytes) -> RecognitionResult:
-    """Top-level entry point: bytes → RecognitionResult."""
     image = _decode_image(image_bytes)
     cc = _try_chesscog(image)
     if cc is not None:
         return cc
-    return _template_recognize(image)
+    multi = _multi_set_recognize(image)
+    if multi is not None:
+        return multi
+    return _occupancy_only_fallback(
+        image,
+        ["Templates directory missing or empty; only occupancy is detected."],
+    )
 
 
 def diagnostics() -> dict[str, Any]:
@@ -491,6 +579,8 @@ def diagnostics() -> dict[str, Any]:
         "chesscog_available": False,
         "torch_available": False,
         "templates_available": False,
+        "templates_count": 0,
+        "templates_sets": 0,
     }
     try:
         import torch  # type: ignore[import-not-found]  # noqa: F401
@@ -504,12 +594,10 @@ def diagnostics() -> dict[str, Any]:
         info["chesscog_available"] = True
     except Exception:
         pass
-    try:
-        import cairosvg  # type: ignore[import-not-found]  # noqa: F401
-
-        info["templates_available"] = True
-    except Exception:
-        pass
+    tmpls = _load_all_templates()
+    info["templates_count"] = len(tmpls)
+    info["templates_sets"] = len({t.set_name for t in tmpls})
+    info["templates_available"] = len(tmpls) > 0
     return info
 
 

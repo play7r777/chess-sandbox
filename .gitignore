@@ -24,3 +24,5 @@ models/
 *.pt
 *.pth
 *.onnx
+test-plan.md
+test-report.md

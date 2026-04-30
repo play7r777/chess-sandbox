@@ -10,10 +10,26 @@
 
 import { Chess } from "/static/lib/chess.js";
 
-const PIECE_GLYPHS = {
-  K: "♔", Q: "♕", R: "♖", B: "♗", N: "♘", P: "♙",
-  k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟",
-};
+const PIECE_SET = "cburnett";
+
+function pieceSvgUrl(piece) {
+  const color = piece === piece.toUpperCase() ? "w" : "b";
+  return `/static/pieces/${PIECE_SET}/${color}${piece.toUpperCase()}.svg`;
+}
+
+function makePieceImg(piece, options = {}) {
+  const img = document.createElement("img");
+  img.src = pieceSvgUrl(piece);
+  img.alt = piece;
+  img.draggable = true;
+  img.className = "piece-img " + (piece === piece.toUpperCase() ? "white" : "black");
+  if (options.size) {
+    img.style.width = options.size;
+    img.style.height = options.size;
+  }
+  return img;
+}
+
 const PIECE_TYPES_WHITE = ["K", "Q", "R", "B", "N", "P"];
 const PIECE_TYPES_BLACK = ["k", "q", "r", "b", "n", "p"];
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
@@ -169,10 +185,13 @@ function renderBoard() {
       if (piece) {
         const pieceEl = document.createElement("span");
         pieceEl.className = "piece " + (piece === piece.toUpperCase() ? "white" : "black");
-        pieceEl.textContent = PIECE_GLYPHS[piece];
         pieceEl.draggable = true;
         pieceEl.dataset.piece = piece;
         pieceEl.dataset.fromSquare = sqName;
+        const img = makePieceImg(piece);
+        img.draggable = false;
+        img.style.pointerEvents = "none";
+        pieceEl.appendChild(img);
         cell.appendChild(pieceEl);
       }
 
@@ -304,7 +323,10 @@ function renderPalette() {
 function makePaletteCell(piece) {
   const div = document.createElement("div");
   div.className = "palette-cell piece " + (piece === piece.toUpperCase() ? "white" : "black");
-  div.textContent = PIECE_GLYPHS[piece];
+  const img = makePieceImg(piece);
+  img.draggable = false;
+  img.style.pointerEvents = "none";
+  div.appendChild(img);
   div.draggable = true;
   div.dataset.piece = piece;
   div.title = piece;
@@ -775,7 +797,7 @@ function imageFileFromDataTransfer(dt) {
   return null;
 }
 
-window.addEventListener("paste", (e) => {
+function handlePasteEvent(e) {
   const target = e.target;
   if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
     return;
@@ -784,7 +806,37 @@ window.addEventListener("paste", (e) => {
   if (!f) return;
   e.preventDefault();
   recognizeFile(f, { autoApply: true });
-});
+}
+document.addEventListener("paste", handlePasteEvent);
+window.addEventListener("paste", handlePasteEvent);
+
+async function pasteFromClipboardAPI() {
+  if (!navigator.clipboard || !navigator.clipboard.read) {
+    setStatus("Браузер не поддерживает чтение буфера. Используй Ctrl+V напрямую.", "error");
+    return;
+  }
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      for (const t of item.types) {
+        if (t.startsWith("image/")) {
+          const blob = await item.getType(t);
+          const file = new File([blob], "clipboard.png", { type: t });
+          await recognizeFile(file, { autoApply: true });
+          return;
+        }
+      }
+    }
+    setStatus("В буфере нет изображения.", "error");
+  } catch (err) {
+    setStatus("Не удалось прочитать буфер: " + err.message, "error");
+  }
+}
+
+const pasteBtn = document.getElementById("btn-paste-clipboard");
+if (pasteBtn) {
+  pasteBtn.addEventListener("click", pasteFromClipboardAPI);
+}
 
 const dropzone = document.getElementById("recognize-dropzone");
 if (dropzone) {
