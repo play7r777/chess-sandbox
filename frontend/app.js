@@ -54,6 +54,8 @@ const state = {
   freeplay: {
     chess: null,    // chess.js instance for off-engine legal play
   },
+  history: [],      // FEN snapshots for undo stack
+  redoStack: [],    // FEN snapshots for redo stack
   game: {
     active: false,
     chess: null,        // Chess instance from chess.js
@@ -217,6 +219,9 @@ function renderBoard() {
 
 function syncMetaInputs() {
   document.getElementById("side-to-move").value = state.sideToMove;
+  const turnSel = document.getElementById("turn-select");
+  if (turnSel) turnSel.value = state.sideToMove;
+  if (typeof refreshUndoRedoButtons === "function") refreshUndoRedoButtons();
   document.getElementById("cr-K").checked = state.castling.K;
   document.getElementById("cr-Q").checked = state.castling.Q;
   document.getElementById("cr-k").checked = state.castling.k;
@@ -293,9 +298,11 @@ function handleDrop(e, cell) {
   if (payload.fromSquare) {
     const fromIdx = idxFromSquareName(payload.fromSquare);
     if (fromIdx === targetIdx) return;
+    snapshotForUndo();
     state.board[targetIdx] = state.board[fromIdx];
     state.board[fromIdx] = null;
   } else {
+    snapshotForUndo();
     state.board[targetIdx] = payload.piece;
   }
   state.lastMove = null;
@@ -321,6 +328,7 @@ function tryFreeplayMove(from, to) {
     renderBoard();
     return;
   }
+  snapshotForUndo();
   loadFen(c.fen());
   state.lastMove = { from: move.from, to: move.to };
   state.selectedSquare = null;
@@ -356,6 +364,7 @@ function handleSquareClick(squareName) {
   const idx = idxFromSquareName(squareName);
   if (state.eraseMode && !state.game.active && !state.legalMode) {
     if (state.board[idx]) {
+      snapshotForUndo();
       state.board[idx] = null;
       renderBoard();
     }
@@ -456,25 +465,71 @@ document.getElementById("btn-flip").addEventListener("click", () => {
   state.flipped = !state.flipped;
   renderBoard();
 });
+document.getElementById("btn-phys-flip").addEventListener("click", () => {
+  if (state.game.active) {
+    setStatus("Сначала остановите партию против движка.", "error");
+    return;
+  }
+  snapshotForUndo();
+  loadFen(physicallyFlippedFen(buildFen()));
+  state.lastMove = null;
+  renderBoard();
+  setStatus("Позиция физически перевёрнута.");
+});
 document.getElementById("btn-reset").addEventListener("click", () => {
   if (state.game.active) stopGame();
+  snapshotForUndo();
   loadFen(STARTPOS_FEN);
   renderBoard();
   setStatus("Стартовая позиция загружена.");
 });
 document.getElementById("btn-clear").addEventListener("click", () => {
   if (state.game.active) stopGame();
+  snapshotForUndo();
   loadFen(EMPTY_FEN);
   renderBoard();
   setStatus("Доска очищена.");
 });
+
+function physicallyFlippedFen(fen) {
+  const parts = fen.split(/\s+/);
+  const placement = parts[0];
+  const ranks = placement.split("/");
+  const flipped = ranks.slice().reverse().map((r) => {
+    const chars = [];
+    for (const ch of r) {
+      if (/\d/.test(ch)) for (let i = 0; i < parseInt(ch, 10); i++) chars.push("1");
+      else chars.push(ch);
+    }
+    chars.reverse();
+    let out = "";
+    let run = 0;
+    for (const ch of chars) {
+      if (ch === "1") { run++; }
+      else { if (run) { out += String(run); run = 0; } out += ch; }
+    }
+    if (run) out += String(run);
+    return out;
+  });
+  parts[0] = flipped.join("/");
+  return parts.join(" ");
+}
 document.getElementById("erase-mode").addEventListener("change", (e) => {
   state.eraseMode = e.target.checked;
 });
 
 // Meta inputs
 document.getElementById("side-to-move").addEventListener("change", (e) => {
+  snapshotForUndo();
   state.sideToMove = e.target.value;
+  const turnSel = document.getElementById("turn-select");
+  if (turnSel) turnSel.value = state.sideToMove;
+  renderBoard();
+});
+document.getElementById("turn-select").addEventListener("change", (e) => {
+  snapshotForUndo();
+  state.sideToMove = e.target.value;
+  document.getElementById("side-to-move").value = state.sideToMove;
   renderBoard();
 });
 for (const k of ["K", "Q", "k", "q"]) {
@@ -500,12 +555,84 @@ document.getElementById("fullmove").addEventListener("change", (e) => {
 document.getElementById("btn-load-fen").addEventListener("click", () => {
   const v = document.getElementById("fen-input").value;
   try {
+    snapshotForUndo();
     loadFen(v);
     renderBoard();
     setStatus("FEN загружен.", "ok");
   } catch (err) {
     setStatus("Ошибка FEN: " + err.message, "error");
   }
+});
+
+// ---------- Undo / Redo ----------
+
+const MAX_HISTORY = 200;
+
+function snapshotForUndo() {
+  if (state.game.active) return;
+  try {
+    const fen = buildFen();
+    const last = state.history[state.history.length - 1];
+    if (last === fen) return;
+    state.history.push(fen);
+    if (state.history.length > MAX_HISTORY) state.history.shift();
+    state.redoStack.length = 0;
+    refreshUndoRedoButtons();
+  } catch { /* ignore */ }
+}
+
+function refreshUndoRedoButtons() {
+  const u = document.getElementById("btn-undo");
+  const r = document.getElementById("btn-redo");
+  if (u) u.disabled = state.history.length === 0 || state.game.active;
+  if (r) r.disabled = state.redoStack.length === 0 || state.game.active;
+}
+
+function doUndo() {
+  if (state.game.active) return;
+  if (!state.history.length) return;
+  const current = buildFen();
+  const prev = state.history.pop();
+  state.redoStack.push(current);
+  if (state.redoStack.length > MAX_HISTORY) state.redoStack.shift();
+  applyFenFromHistory(prev);
+  setStatus("Отменено.");
+}
+
+function doRedo() {
+  if (state.game.active) return;
+  if (!state.redoStack.length) return;
+  const current = buildFen();
+  const next = state.redoStack.pop();
+  state.history.push(current);
+  if (state.history.length > MAX_HISTORY) state.history.shift();
+  applyFenFromHistory(next);
+  setStatus("Повторено.");
+}
+
+function applyFenFromHistory(fen) {
+  try {
+    loadFen(fen);
+    state.lastMove = null;
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+  } catch (err) {
+    setStatus("Не удалось применить FEN из истории: " + err.message, "error");
+  }
+  refreshUndoRedoButtons();
+}
+
+document.getElementById("btn-undo").addEventListener("click", doUndo);
+document.getElementById("btn-redo").addEventListener("click", doRedo);
+
+document.addEventListener("keydown", (e) => {
+  const tag = e.target && e.target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || (e.target && e.target.isContentEditable)) return;
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase();
+  if (k === "z" && !e.shiftKey) { e.preventDefault(); doUndo(); }
+  else if ((k === "z" && e.shiftKey) || k === "y") { e.preventDefault(); doRedo(); }
 });
 document.getElementById("btn-copy-fen").addEventListener("click", async () => {
   const fen = buildFen();

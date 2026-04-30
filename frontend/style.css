@@ -66,7 +66,7 @@ input:focus, select:focus, button:focus-visible {
   font-size: 18px; font-weight: 600;
 }
 .brand-piece { font-size: 28px; color: var(--accent); }
-.topbar-actions { display: flex; gap: 8px; align-items: center; }
+.topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
 .mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }
 .mode-btn {

@@ -13,7 +13,10 @@
         <span class="brand-name">Chess Sandbox</span>
       </div>
       <div class="topbar-actions">
-        <button id="btn-flip" type="button" title="Перевернуть доску">⇅ Flip</button>
+        <button id="btn-undo" type="button" title="Отменить (Ctrl+Z)" disabled>↶</button>
+        <button id="btn-redo" type="button" title="Повторить (Ctrl+Shift+Z)" disabled>↷</button>
+        <button id="btn-flip" type="button" title="Визуально перевернуть доску">⇅ Flip</button>
+        <button id="btn-phys-flip" type="button" title="Физический разворот позиции 180°">⟳ Phys</button>
         <button id="btn-reset" type="button" title="Стартовая позиция">⟲ Start</button>
         <button id="btn-clear" type="button" title="Очистить доску">⌫ Clear</button>
         <label class="mode-toggle">
@@ -103,6 +106,13 @@
             <label>
               Ваш цвет:
               <select id="player-color">
+                <option value="w">Белые</option>
+                <option value="b">Чёрные</option>
+              </select>
+            </label>
+            <label>
+              Сейчас ходит:
+              <select id="turn-select">
                 <option value="w">Белые</option>
                 <option value="b">Чёрные</option>
               </select>
