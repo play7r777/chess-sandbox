@@ -158,6 +158,23 @@ input:focus, select:focus, button:focus-visible {
 }
 .fen-row input { flex: 1; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
 
+.dropzone {
+  border: 1.5px dashed #555;
+  border-radius: 8px;
+  padding: 14px 12px;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: 13px;
+  margin-bottom: 8px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.dropzone:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dropzone.is-active {
+  border-color: var(--accent);
+  background: rgba(109, 167, 255, 0.08);
+  color: var(--fg);
+}
+
 .status {
   margin-top: 8px; color: var(--fg-muted); font-size: 13px; min-height: 18px;
 }

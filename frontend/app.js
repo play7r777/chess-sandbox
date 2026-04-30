@@ -676,16 +676,19 @@ function tryMakePlayerMove(from, to) {
 
 // ---------- Recognize ----------
 
-document.getElementById("btn-recognize").addEventListener("click", async () => {
-  const f = document.getElementById("recognize-file").files[0];
-  if (!f) {
-    setStatus("Выберите файл изображения.", "error");
+async function recognizeFile(file, { autoApply = false } = {}) {
+  const out = document.getElementById("recognize-output");
+  if (!file) {
+    setStatus("Нет изображения для распознавания.", "error");
     return;
   }
-  const out = document.getElementById("recognize-output");
+  if (!file.type || !file.type.startsWith("image/")) {
+    setStatus("Это не изображение: " + (file.type || "unknown"), "error");
+    return;
+  }
   out.textContent = "Распознаю…";
   const fd = new FormData();
-  fd.append("image", f);
+  fd.append("image", file, file.name || "clipboard.png");
   try {
     const resp = await fetch("/api/recognize", { method: "POST", body: fd });
     const j = await resp.json();
@@ -726,10 +729,91 @@ document.getElementById("btn-recognize").addEventListener("click", async () => {
       }
       out.appendChild(ul);
     }
+    if (autoApply) {
+      try {
+        loadFen(fen);
+        renderBoard();
+        setStatus(`Позиция применена (распознано, ${(j.confidence * 100).toFixed(0)}%).`, "ok");
+      } catch (err) {
+        setStatus("Распознано, но FEN не применён: " + err.message, "error");
+      }
+    }
   } catch (err) {
     out.textContent = "Ошибка: " + err.message;
   }
+}
+
+document.getElementById("btn-recognize").addEventListener("click", () => {
+  const f = document.getElementById("recognize-file").files[0];
+  if (!f) {
+    setStatus("Выберите файл изображения.", "error");
+    return;
+  }
+  recognizeFile(f);
 });
+
+document.getElementById("recognize-file").addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) recognizeFile(f);
+});
+
+function imageFileFromDataTransfer(dt) {
+  if (!dt) return null;
+  if (dt.files && dt.files.length) {
+    for (const f of dt.files) {
+      if (f.type && f.type.startsWith("image/")) return f;
+    }
+  }
+  if (dt.items && dt.items.length) {
+    for (const it of dt.items) {
+      if (it.kind === "file") {
+        const f = it.getAsFile();
+        if (f && f.type && f.type.startsWith("image/")) return f;
+      }
+    }
+  }
+  return null;
+}
+
+window.addEventListener("paste", (e) => {
+  const target = e.target;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+    return;
+  }
+  const f = imageFileFromDataTransfer(e.clipboardData);
+  if (!f) return;
+  e.preventDefault();
+  recognizeFile(f, { autoApply: true });
+});
+
+const dropzone = document.getElementById("recognize-dropzone");
+if (dropzone) {
+  for (const evt of ["dragenter", "dragover"]) {
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      dropzone.classList.add("is-active");
+    });
+  }
+  for (const evt of ["dragleave", "dragend"]) {
+    dropzone.addEventListener(evt, () => dropzone.classList.remove("is-active"));
+  }
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropzone.classList.remove("is-active");
+    const f = imageFileFromDataTransfer(e.dataTransfer);
+    if (f) recognizeFile(f, { autoApply: true });
+    else setStatus("В буфере / на drop'е нет изображения.", "error");
+  });
+  dropzone.addEventListener("paste", (e) => {
+    const f = imageFileFromDataTransfer(e.clipboardData);
+    if (!f) return;
+    e.preventDefault();
+    recognizeFile(f, { autoApply: true });
+  });
+}
 
 // ---------- Boot ----------
 
