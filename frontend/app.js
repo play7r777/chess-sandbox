@@ -50,6 +50,10 @@ const state = {
   selectedSquare: null,
   legalTargets: [], // squares (e.g., "e4") highlighted as legal moves
   lastMove: null,   // { from: "e2", to: "e4" }
+  legalMode: true,  // true = enforce legal chess moves; false = freeform sandbox
+  freeplay: {
+    chess: null,    // chess.js instance for off-engine legal play
+  },
   game: {
     active: false,
     chess: null,        // Chess instance from chess.js
@@ -276,6 +280,15 @@ function handleDrop(e, cell) {
     return;
   }
 
+  if (state.legalMode) {
+    if (!payload.fromSquare) {
+      setStatus("В легальном режиме нельзя ставить фигуры с палитры. Переключитесь в Песочницу.", "error");
+      return;
+    }
+    tryFreeplayMove(payload.fromSquare, targetSquare);
+    return;
+  }
+
   const targetIdx = idxFromSquareName(targetSquare);
   if (payload.fromSquare) {
     const fromIdx = idxFromSquareName(payload.fromSquare);
@@ -291,9 +304,57 @@ function handleDrop(e, cell) {
   renderBoard();
 }
 
+function tryFreeplayMove(from, to) {
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  const moveTo = freeplayCastlingTarget(c, from, to) || to;
+  let move;
+  try {
+    move = c.move({ from, to: moveTo, promotion: "q" });
+  } catch {
+    move = null;
+  }
+  if (!move) {
+    setStatus("Нелегальный ход.", "error");
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  renderBoard();
+  setStatus(`Ход: ${move.san}.`);
+}
+
+function ensureFreeplayChess() {
+  try {
+    state.freeplay.chess = new Chess(buildFen());
+    return state.freeplay.chess;
+  } catch (err) {
+    setStatus("Позиция нелегальна для легального режима: " + err.message, "error");
+    return null;
+  }
+}
+
+function freeplayCastlingTarget(c, from, to) {
+  const fromPiece = c.get(from);
+  const toPiece = c.get(to);
+  if (!fromPiece || !toPiece) return null;
+  if (fromPiece.type !== "k") return null;
+  if (toPiece.type !== "r" || toPiece.color !== fromPiece.color) return null;
+  const rank = fromPiece.color === "w" ? "1" : "8";
+  if (from !== "e" + rank) return null;
+  if (to === "h" + rank) return "g" + rank;
+  if (to === "a" + rank) return "c" + rank;
+  return null;
+}
+
 function handleSquareClick(squareName) {
   const idx = idxFromSquareName(squareName);
-  if (state.eraseMode && !state.game.active) {
+  if (state.eraseMode && !state.game.active && !state.legalMode) {
     if (state.board[idx]) {
       state.board[idx] = null;
       renderBoard();
@@ -302,7 +363,56 @@ function handleSquareClick(squareName) {
   }
   if (state.game.active) {
     handleGameSquareClick(squareName);
+    return;
   }
+  if (state.legalMode) {
+    handleFreeplaySquareClick(squareName);
+  }
+}
+
+function handleFreeplaySquareClick(squareName) {
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  const piece = c.get(squareName);
+  if (state.selectedSquare) {
+    if (state.selectedSquare === squareName) {
+      state.selectedSquare = null;
+      state.legalTargets = [];
+      renderBoard();
+      return;
+    }
+    if (state.legalTargets.includes(squareName) || freeplayCastlingTarget(c, state.selectedSquare, squareName)) {
+      tryFreeplayMove(state.selectedSquare, squareName);
+      return;
+    }
+    if (piece && piece.color === c.turn()) {
+      selectFreeplaySquare(squareName);
+      return;
+    }
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  if (piece && piece.color === c.turn()) {
+    selectFreeplaySquare(squareName);
+  }
+}
+
+function selectFreeplaySquare(squareName) {
+  const c = state.freeplay.chess;
+  state.selectedSquare = squareName;
+  const moves = c.moves({ square: squareName, verbose: true });
+  const targets = moves.map((m) => m.to);
+  for (const m of moves) {
+    if (m.flags && (m.flags.includes("k") || m.flags.includes("q"))) {
+      const rank = m.color === "w" ? "1" : "8";
+      const rookSq = m.flags.includes("k") ? "h" + rank : "a" + rank;
+      if (!targets.includes(rookSq)) targets.push(rookSq);
+    }
+  }
+  state.legalTargets = targets;
+  renderBoard();
 }
 
 // ---------- Palette ----------
@@ -895,11 +1005,48 @@ if (dropzone) {
   });
 }
 
+// ---------- Mode switch ----------
+
+function setBoardMode(legal) {
+  state.legalMode = !!legal;
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  document.body.classList.toggle("mode-legal", state.legalMode);
+  document.body.classList.toggle("mode-sandbox", !state.legalMode);
+  document.getElementById("btn-mode-legal").classList.toggle("is-active", state.legalMode);
+  document.getElementById("btn-mode-sandbox").classList.toggle("is-active", !state.legalMode);
+  if (state.legalMode) {
+    state.eraseMode = false;
+    const eraseEl = document.getElementById("erase-mode");
+    if (eraseEl) eraseEl.checked = false;
+    ensureFreeplayChess();
+  }
+  renderBoard();
+}
+
+document.getElementById("btn-mode-legal").addEventListener("click", () => {
+  if (state.game.active) {
+    setStatus("Сначала остановите партию против движка.", "error");
+    return;
+  }
+  setBoardMode(true);
+  setStatus("Режим: легальный — только ходы по правилам.");
+});
+document.getElementById("btn-mode-sandbox").addEventListener("click", () => {
+  if (state.game.active) {
+    setStatus("Сначала остановите партию против движка.", "error");
+    return;
+  }
+  setBoardMode(false);
+  setStatus("Режим: песочница — фигуры можно ставить и двигать как угодно.");
+});
+
 // ---------- Boot ----------
 
 loadFen(STARTPOS_FEN);
 renderPalette();
 renderBoard();
+setBoardMode(true);
 refreshEngineStatus();
 
 // Expose for debugging.

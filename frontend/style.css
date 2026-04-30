@@ -68,6 +68,17 @@ input:focus, select:focus, button:focus-visible {
 .brand-piece { font-size: 28px; color: var(--accent); }
 .topbar-actions { display: flex; gap: 8px; align-items: center; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
+.mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }
+.mode-btn {
+  background: #1d2230; color: #cfd5de; border: none; padding: 7px 12px;
+  font-size: 13px; cursor: pointer; transition: background 0.15s;
+}
+.mode-btn:hover { background: #262d3c; }
+.mode-btn.is-active { background: var(--accent); color: #0c1018; font-weight: 600; }
+.mode-btn + .mode-btn { border-left: 1px solid #2a3140; }
+
+body.mode-legal .palette,
+body.mode-legal .mode-toggle { display: none !important; }
 
 .layout {
   display: grid;
