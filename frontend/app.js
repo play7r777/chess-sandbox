@@ -651,6 +651,10 @@ function handleGameSquareClick(squareName) {
       tryMakePlayerMove(state.selectedSquare, squareName);
       return;
     }
+    if (castlingTargetIfKingOnRook(state.selectedSquare, squareName)) {
+      tryMakePlayerMove(state.selectedSquare, squareName);
+      return;
+    }
     if (piece && piece.color === state.game.playerColor) {
       selectSquare(squareName);
       return;
@@ -668,7 +672,16 @@ function handleGameSquareClick(squareName) {
 function selectSquare(squareName) {
   state.selectedSquare = squareName;
   const moves = state.game.chess.moves({ square: squareName, verbose: true });
-  state.legalTargets = moves.map((m) => m.to);
+  const targets = moves.map((m) => m.to);
+  // Also let the user drop the king onto the rook to castle.
+  for (const m of moves) {
+    if (m.flags && (m.flags.includes("k") || m.flags.includes("q"))) {
+      const rank = m.color === "w" ? "1" : "8";
+      const rookSq = m.flags.includes("k") ? "h" + rank : "a" + rank;
+      if (!targets.includes(rookSq)) targets.push(rookSq);
+    }
+  }
+  state.legalTargets = targets;
   renderBoard();
 }
 
@@ -676,9 +689,10 @@ function tryMakePlayerMove(from, to) {
   if (!state.game.active) return;
   const c = state.game.chess;
   if (c.turn() !== state.game.playerColor) return;
+  const moveTo = castlingTargetIfKingOnRook(from, to) || to;
   let move;
   try {
-    move = c.move({ from, to, promotion: "q" });
+    move = c.move({ from, to: moveTo, promotion: "q" });
   } catch {
     move = null;
   }
@@ -694,6 +708,20 @@ function tryMakePlayerMove(from, to) {
   applyChessMoveToBoard(move);
   if (checkGameOver()) return;
   setTimeout(engineMove, 50);
+}
+
+function castlingTargetIfKingOnRook(from, to) {
+  const c = state.game.chess;
+  const fromPiece = c.get(from);
+  const toPiece = c.get(to);
+  if (!fromPiece || !toPiece) return null;
+  if (fromPiece.type !== "k") return null;
+  if (toPiece.type !== "r" || toPiece.color !== fromPiece.color) return null;
+  const rank = fromPiece.color === "w" ? "1" : "8";
+  if (from !== "e" + rank) return null;
+  if (to === "h" + rank) return "g" + rank;  // short
+  if (to === "a" + rank) return "c" + rank;  // long
+  return null;
 }
 
 // ---------- Recognize ----------
