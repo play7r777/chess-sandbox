@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 
 import chess
 import chess.pgn
-import requests
+import requests  # type: ignore[import-untyped]
 
 from .stockfish_engine import engine
 
@@ -414,8 +414,8 @@ async def analyse_game(
         )
     board = chess.Board(starting_fen)
     analyses: list[MoveAnalysis] = []
-    accuracies = {chess.WHITE: [], chess.BLACK: []}
-    cpls = {chess.WHITE: [], chess.BLACK: []}
+    accuracies: dict[chess.Color, list[float]] = {chess.WHITE: [], chess.BLACK: []}
+    cpls: dict[chess.Color, list[int]] = {chess.WHITE: [], chess.BLACK: []}
     counts: dict[str, int] = {label: 0 for label in CLASS_LABELS}
 
     for ply_index, uci in enumerate(moves_uci):
@@ -505,7 +505,7 @@ async def analyse_game(
         if progress_cb is not None:
             await progress_cb(ply_index + 1, len(moves_uci))
 
-    def _avg(xs: list[float]) -> float:
+    def _avg(xs: list[float] | list[int]) -> float:
         return float(sum(xs) / len(xs)) if xs else 0.0
 
     summary = {
