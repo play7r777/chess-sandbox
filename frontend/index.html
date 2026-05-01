@@ -131,6 +131,23 @@
           <ol id="move-history" class="move-history"></ol>
         </section>
 
+        <section class="panel" id="panel-review">
+          <h2>Анализ партии (как chess.com)</h2>
+          <div class="row">
+            <input id="review-source" type="text" placeholder="https://www.chess.com/game/live/... или https://lichess.org/... или PGN" style="flex:1; min-width:260px;" />
+            <button id="btn-review-import" type="button">Загрузить</button>
+          </div>
+          <div class="row">
+            <label>Время на ход (мс):
+              <input id="review-movetime" type="number" min="50" max="5000" value="250" />
+            </label>
+            <button id="btn-review-analyse" type="button" disabled>Анализировать</button>
+            <span id="review-progress" class="muted"></span>
+          </div>
+          <div id="review-summary" class="review-summary"></div>
+          <ol id="review-moves" class="review-moves"></ol>
+        </section>
+
         <section class="panel" id="panel-recognize">
           <h2>Распознать со скриншота</h2>
           <div id="recognize-dropzone" class="dropzone" tabindex="0">

@@ -1172,6 +1172,133 @@ document.getElementById("btn-mode-sandbox").addEventListener("click", () => {
   setStatus("Режим: песочница — фигуры можно ставить и двигать как угодно.");
 });
 
+// ---------- Game review (chess.com-style) ----------
+
+const REVIEW_ICONS = {
+  brilliant: "!!", great: "!", best: "★", excellent: "✓",
+  good: "✓", book: "📖", inaccuracy: "?!", mistake: "?",
+  blunder: "??", miss: "✗",
+};
+const REVIEW_LABELS = {
+  brilliant: "Бриллиант", great: "Великолепный", best: "Лучший",
+  excellent: "Превосходный", good: "Хороший", book: "Теория",
+  inaccuracy: "Неточность", mistake: "Ошибка",
+  blunder: "Грубая ошибка", miss: "Упущенная победа",
+};
+
+const review = { game: null, analysis: null, activeIdx: -1 };
+
+function fmtCp(cp) {
+  if (cp >= 99000) return `#+${100000 - cp}`;
+  if (cp <= -99000) return `#-${cp + 100000}`;
+  const v = (cp / 100).toFixed(2);
+  return cp > 0 ? `+${v}` : v;
+}
+
+document.getElementById("btn-review-import").addEventListener("click", async () => {
+  const src = document.getElementById("review-source").value.trim();
+  if (!src) { setStatus("Вставьте ссылку или PGN.", "error"); return; }
+  document.getElementById("btn-review-import").disabled = true;
+  document.getElementById("review-progress").textContent = "Загрузка партии…";
+  try {
+    const r = await api("/api/game/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: src }),
+    });
+    review.game = r;
+    review.analysis = null;
+    document.getElementById("review-progress").textContent =
+      `${r.headers.White || "?"} vs ${r.headers.Black || "?"} — ${r.moves_uci.length} полуходов. Жми «Анализировать».`;
+    document.getElementById("btn-review-analyse").disabled = false;
+    renderReviewMoves();
+    document.getElementById("review-summary").innerHTML = "";
+  } catch (err) {
+    document.getElementById("review-progress").textContent = "Ошибка: " + err.message;
+  } finally {
+    document.getElementById("btn-review-import").disabled = false;
+  }
+});
+
+document.getElementById("btn-review-analyse").addEventListener("click", async () => {
+  if (!review.game) return;
+  const movetime = intOrDefault(document.getElementById("review-movetime").value, 250);
+  const total = review.game.moves_uci.length;
+  document.getElementById("btn-review-analyse").disabled = true;
+  document.getElementById("review-progress").textContent =
+    `Анализ… ~${Math.ceil(total * movetime * 2 / 1000)} сек`;
+  try {
+    const r = await api("/api/game/analyse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        moves_uci: review.game.moves_uci,
+        starting_fen: review.game.starting_fen,
+        movetime_ms: movetime,
+        multipv: 2,
+      }),
+    });
+    review.analysis = r;
+    renderReviewSummary(r.summary);
+    renderReviewMoves();
+    document.getElementById("review-progress").textContent =
+      `Готово — ${r.moves.length} ходов проанализировано.`;
+  } catch (err) {
+    document.getElementById("review-progress").textContent = "Ошибка анализа: " + err.message;
+  } finally {
+    document.getElementById("btn-review-analyse").disabled = false;
+  }
+});
+
+function renderReviewSummary(s) {
+  const counts = s.counts || {};
+  const pillFor = (k) => `<span class="pill cls-${k}">${REVIEW_ICONS[k]} ${REVIEW_LABELS[k]}: ${counts[k] || 0}</span>`;
+  const order = ["brilliant","great","best","excellent","good","book","inaccuracy","mistake","blunder","miss"];
+  const pills = order.map(pillFor).join("");
+  document.getElementById("review-summary").innerHTML = `
+    <div class="col"><h4>Белые</h4><div class="acc">${s.white.accuracy}%</div><div class="muted">ACPL ${s.white.acpl}</div></div>
+    <div class="col"><h4>Чёрные</h4><div class="acc">${s.black.accuracy}%</div><div class="muted">ACPL ${s.black.acpl}</div></div>
+    <div class="col" style="flex:1; min-width:280px;"><h4>Категории</h4><div class="counts">${pills}</div></div>
+  `;
+}
+
+function renderReviewMoves() {
+  const ol = document.getElementById("review-moves");
+  ol.innerHTML = "";
+  const moves = review.analysis ? review.analysis.moves : null;
+  const game = review.game;
+  if (!game) return;
+  const list = moves || game.moves_uci.map((u, i) => ({
+    ply: i + 1, side: i % 2 === 0 ? "w" : "b",
+    move_uci: u, move_san: u, classification: "", note: "",
+    eval_after_cp: 0,
+  }));
+  list.forEach((m, idx) => {
+    const li = document.createElement("li");
+    li.className = `cls-${m.classification || "good"}`;
+    if (idx === review.activeIdx) li.classList.add("is-active");
+    const moveNum = Math.ceil(m.ply / 2) + ".";
+    const dots = m.side === "b" ? "…" : "";
+    li.innerHTML = `
+      <span class="ply">${moveNum}${dots}</span>
+      <span class="icon">${REVIEW_ICONS[m.classification] || ""}</span>
+      <span class="san">${m.move_san}</span>
+      <span class="note">${m.note || ""}</span>
+      <span class="eval">${moves ? fmtCp(m.eval_after_cp) : ""}</span>
+    `;
+    li.addEventListener("click", () => {
+      review.activeIdx = idx;
+      renderReviewMoves();
+      try {
+        loadFen(m.fen_after || game.starting_fen);
+        state.lastMove = m.move_uci ? { from: m.move_uci.slice(0, 2), to: m.move_uci.slice(2, 4) } : null;
+        renderBoard();
+      } catch { /* ignore */ }
+    });
+    ol.appendChild(li);
+  });
+}
+
 // ---------- Boot ----------
 
 loadFen(STARTPOS_FEN);

@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .analysis import analyse_game, import_game_async
 from .recognize import diagnostics as recognize_diagnostics
 from .recognize import recognize as recognize_position
 from .settings import settings
@@ -44,6 +45,20 @@ class AnalyseRequest(BestMoveRequest):
 class ApplyMoveRequest(BaseModel):
     fen: str
     move_uci: str
+
+
+class GameImportRequest(BaseModel):
+    source: str = Field(
+        ...,
+        description="A chess.com / lichess.org game URL, or a raw PGN.",
+    )
+
+
+class GameAnalyseRequest(BaseModel):
+    moves_uci: list[str] = Field(..., min_length=1)
+    starting_fen: str = Field(default=chess.STARTING_FEN)
+    movetime_ms: int = Field(default=250, ge=50, le=5000)
+    multipv: int = Field(default=2, ge=1, le=4)
 
 
 @asynccontextmanager
@@ -228,6 +243,35 @@ async def recognize_endpoint(image: UploadFile = _DEFAULT_FILE) -> dict[str, Any
         "method": result.method,
         "notes": result.notes,
     }
+
+
+@app.post("/api/game/import")
+async def game_import(req: GameImportRequest) -> dict[str, Any]:
+    try:
+        imported = await import_game_async(req.source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Import failed: {exc}") from exc
+    return imported.to_dict()
+
+
+@app.post("/api/game/analyse")
+async def game_analyse(req: GameAnalyseRequest) -> dict[str, Any]:
+    if not engine.is_running:
+        raise HTTPException(status_code=409, detail="Engine not configured.")
+    try:
+        result = await analyse_game(
+            moves_uci=req.moves_uci,
+            starting_fen=req.starting_fen,
+            movetime_ms=req.movetime_ms,
+            multipv=req.multipv,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return result
 
 
 def _result_to_dict(result: Any) -> dict[str, Any]:

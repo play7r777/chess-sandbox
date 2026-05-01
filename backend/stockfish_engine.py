@@ -155,6 +155,38 @@ class StockfishEngine:
             pv=[m.uci() for m in pv_moves],
         )
 
+    async def analyse_raw(
+        self,
+        fen: str,
+        movetime_ms: int | None = None,
+        depth: int | None = None,
+        multipv: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Run analyse and return the raw `info` dicts from python-chess.
+
+        The dicts contain `score` (a `chess.engine.PovScore`) and `pv`
+        (list of `chess.Move`), which is what callers like the game-review
+        analyser need. Unlike `analyse()` this does not pre-convert
+        scores into our `AnalysisResult` dataclass.
+        """
+        async with self._lock:
+            if self._engine is None:
+                raise RuntimeError("Engine is not configured. Call configure() first.")
+            board = chess.Board(fen)
+            limit = chess.engine.Limit(
+                time=(movetime_ms / 1000) if movetime_ms else None,
+                depth=depth,
+            )
+            engine = self._engine
+
+            def _analyse() -> list[dict[str, Any]]:
+                infos = engine.analyse(board, limit, multipv=multipv)
+                if isinstance(infos, dict):
+                    infos = [infos]
+                return [dict(i) for i in infos]
+
+            return await asyncio.to_thread(_analyse)
+
     async def analyse(
         self,
         fen: str,

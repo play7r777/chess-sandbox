@@ -270,3 +270,53 @@ body.mode-legal .mode-toggle { display: none !important; }
   display: flex; gap: 8px; margin-top: 6px;
 }
 .recognize-fen input { flex: 1; }
+
+/* Game-review panel */
+.review-summary {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.review-summary .col { background: var(--bg); padding: 8px 12px; border-radius: 6px; min-width: 110px; }
+.review-summary .col h4 { margin: 0 0 4px; font-size: 12px; color: var(--fg-muted); font-weight: 600; }
+.review-summary .col .acc { font-size: 18px; font-weight: 700; }
+.review-summary .counts { display: flex; gap: 6px; flex-wrap: wrap; }
+.review-summary .counts .pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; font-size: 12px;
+  background: #1c2230; border: 1px solid #2a3140;
+}
+
+.review-moves {
+  list-style: none; margin: 6px 0 0; padding: 0;
+  max-height: 320px; overflow-y: auto;
+  border: 1px solid #2a3140; border-radius: 6px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+}
+.review-moves li {
+  display: grid;
+  grid-template-columns: 36px 16px 70px 1fr 70px;
+  gap: 6px; align-items: center;
+  padding: 4px 8px;
+  border-bottom: 1px solid #1c2230;
+  cursor: pointer;
+}
+.review-moves li:hover { background: #1d2330; }
+.review-moves li.is-active { background: #243042; }
+.review-moves .ply { color: var(--fg-muted); }
+.review-moves .icon { font-weight: 700; }
+.review-moves .san { font-weight: 600; }
+.review-moves .note { color: var(--fg-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.review-moves .eval { text-align: right; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+
+.review-moves .cls-brilliant  .icon, .review-summary .pill.cls-brilliant  { color: #00d2ff; }
+.review-moves .cls-great      .icon, .review-summary .pill.cls-great      { color: #5fb6ff; }
+.review-moves .cls-best       .icon, .review-summary .pill.cls-best       { color: #41d77f; }
+.review-moves .cls-excellent  .icon, .review-summary .pill.cls-excellent  { color: #62de9b; }
+.review-moves .cls-good       .icon, .review-summary .pill.cls-good       { color: #b6e07c; }
+.review-moves .cls-book       .icon, .review-summary .pill.cls-book       { color: #c8a55b; }
+.review-moves .cls-inaccuracy .icon, .review-summary .pill.cls-inaccuracy { color: #f0c958; }
+.review-moves .cls-mistake    .icon, .review-summary .pill.cls-mistake    { color: #f08c4a; }
+.review-moves .cls-blunder    .icon, .review-summary .pill.cls-blunder    { color: #f15464; }
+.review-moves .cls-miss       .icon, .review-summary .pill.cls-miss       { color: #d65bd9; }
