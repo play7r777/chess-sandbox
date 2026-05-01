@@ -297,10 +297,12 @@ if frontend_dir.exists():
     async def root() -> FileResponse:
         return FileResponse(frontend_dir / "index.html")
 
+    _frontend_root = frontend_dir.resolve()
+
     @app.get("/{path:path}")
     async def serve_frontend(path: str) -> FileResponse:
-        candidate = frontend_dir / path
-        if candidate.is_file():
+        candidate = (frontend_dir / path).resolve()
+        if candidate.is_file() and candidate.is_relative_to(_frontend_root):
             return FileResponse(candidate)
         # SPA fallback: serve index.html for any non-asset path.
         return FileResponse(frontend_dir / "index.html")
