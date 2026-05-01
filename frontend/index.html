@@ -33,6 +33,13 @@
     <main class="layout">
       <section class="board-area">
         <div id="board" class="board" aria-label="Chess board"></div>
+        <div class="board-nav" id="board-nav">
+          <button id="nav-first" type="button" title="В начало партии" disabled>⏮</button>
+          <button id="nav-prev" type="button" title="Ход назад" disabled>◀</button>
+          <button id="nav-next" type="button" title="Ход вперёд" disabled>▶</button>
+          <button id="nav-last" type="button" title="В конец партии" disabled>⏭</button>
+        </div>
+        <div id="board-hint" class="board-hint muted"></div>
         <div class="board-meta">
           <label>
             Ход:
@@ -139,7 +146,7 @@
           </div>
           <div class="row">
             <label>Время на ход (мс):
-              <input id="review-movetime" type="number" min="50" max="5000" value="250" />
+              <input id="review-movetime" type="number" min="50" max="5000" value="50" />
             </label>
             <button id="btn-review-analyse" type="button" disabled>Анализировать</button>
             <span id="review-progress" class="muted"></span>

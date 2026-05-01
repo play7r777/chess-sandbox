@@ -153,6 +153,8 @@ function loadFen(fen) {
   state.selectedSquare = null;
   state.legalTargets = [];
   state.lastMove = null;
+  state.reviewBadge = null;
+  state.bestArrow = null;
 }
 
 // ---------- Rendering ----------
@@ -207,6 +209,18 @@ function renderBoard() {
       }
       if (state.lastMove && (state.lastMove.from === sqName || state.lastMove.to === sqName)) {
         cell.classList.add("last-move");
+      }
+
+      // Review-mode badges + best-move highlights.
+      if (state.reviewBadge && state.reviewBadge.square === sqName) {
+        const badge = document.createElement("span");
+        badge.className = "review-badge cls-" + state.reviewBadge.classification;
+        badge.textContent = REVIEW_ICONS[state.reviewBadge.classification] || "";
+        cell.appendChild(badge);
+      }
+      if (state.bestArrow) {
+        if (state.bestArrow.from === sqName) cell.classList.add("best-from");
+        if (state.bestArrow.to === sqName) cell.classList.add("best-to");
       }
 
       attachSquareHandlers(cell);
@@ -1186,7 +1200,17 @@ const REVIEW_LABELS = {
   blunder: "Грубая ошибка", miss: "Упущенная победа",
 };
 
-const review = { game: null, analysis: null, activeIdx: -1 };
+const REVIEW_ORDER = [
+  "brilliant","great","best","excellent","good","book",
+  "inaccuracy","mistake","blunder","miss",
+];
+
+const review = {
+  game: null,
+  analysis: null,
+  activeIdx: -1,
+  filter: new Set(),  // active classification filters; empty == show all
+};
 
 function fmtCp(cp) {
   if (cp >= 99000) return `#+${100000 - cp}`;
@@ -1222,7 +1246,7 @@ document.getElementById("btn-review-import").addEventListener("click", async () 
 
 document.getElementById("btn-review-analyse").addEventListener("click", async () => {
   if (!review.game) return;
-  const movetime = intOrDefault(document.getElementById("review-movetime").value, 250);
+  const movetime = intOrDefault(document.getElementById("review-movetime").value, 50);
   const total = review.game.moves_uci.length;
   document.getElementById("btn-review-analyse").disabled = true;
   document.getElementById("review-progress").textContent =
@@ -1252,14 +1276,37 @@ document.getElementById("btn-review-analyse").addEventListener("click", async ()
 
 function renderReviewSummary(s) {
   const counts = s.counts || {};
-  const pillFor = (k) => `<span class="pill cls-${k}">${REVIEW_ICONS[k]} ${REVIEW_LABELS[k]}: ${counts[k] || 0}</span>`;
-  const order = ["brilliant","great","best","excellent","good","book","inaccuracy","mistake","blunder","miss"];
-  const pills = order.map(pillFor).join("");
-  document.getElementById("review-summary").innerHTML = `
+  const root = document.getElementById("review-summary");
+  root.innerHTML = `
     <div class="col"><h4>Белые</h4><div class="acc">${s.white.accuracy}%</div><div class="muted">ACPL ${s.white.acpl}</div></div>
     <div class="col"><h4>Чёрные</h4><div class="acc">${s.black.accuracy}%</div><div class="muted">ACPL ${s.black.acpl}</div></div>
-    <div class="col" style="flex:1; min-width:280px;"><h4>Категории</h4><div class="counts">${pills}</div></div>
+    <div class="col" style="flex:1; min-width:280px;"><h4>Категории <span class="muted" id="review-filter-hint"></span></h4><div class="counts" id="review-pills"></div></div>
   `;
+  const pillsHost = document.getElementById("review-pills");
+  REVIEW_ORDER.forEach((k) => {
+    const n = counts[k] || 0;
+    const pill = document.createElement("span");
+    pill.className = `pill cls-${k}` + (n === 0 ? " is-disabled" : "") + (review.filter.has(k) ? " is-active" : "");
+    pill.dataset.cls = k;
+    const xVisible = review.filter.has(k);
+    pill.innerHTML = `${REVIEW_ICONS[k]} ${REVIEW_LABELS[k]}: ${n}${xVisible ? '<span class="x" title="Снять фильтр">×</span>' : ""}`;
+    if (n > 0) {
+      pill.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (review.filter.has(k)) review.filter.delete(k);
+        else review.filter.add(k);
+        renderReviewSummary(s);
+        renderReviewMoves();
+      });
+    }
+    pillsHost.appendChild(pill);
+  });
+  const hint = document.getElementById("review-filter-hint");
+  if (review.filter.size > 0) {
+    hint.textContent = `(показаны только: ${review.filter.size})`;
+  } else {
+    hint.textContent = "(клик — фильтр)";
+  }
 }
 
 function renderReviewMoves() {
@@ -1277,6 +1324,9 @@ function renderReviewMoves() {
     const li = document.createElement("li");
     li.className = `cls-${m.classification || "good"}`;
     if (idx === review.activeIdx) li.classList.add("is-active");
+    if (review.filter.size > 0 && !review.filter.has(m.classification)) {
+      li.classList.add("is-hidden");
+    }
     const moveNum = Math.ceil(m.ply / 2) + ".";
     const dots = m.side === "b" ? "…" : "";
     li.innerHTML = `
@@ -1287,17 +1337,108 @@ function renderReviewMoves() {
       <span class="eval">${moves ? fmtCp(m.eval_after_cp) : ""}</span>
     `;
     li.addEventListener("click", () => {
-      review.activeIdx = idx;
-      renderReviewMoves();
-      try {
-        loadFen(m.fen_after || game.starting_fen);
-        state.lastMove = m.move_uci ? { from: m.move_uci.slice(0, 2), to: m.move_uci.slice(2, 4) } : null;
-        renderBoard();
-      } catch { /* ignore */ }
+      jumpToReviewIdx(idx);
     });
     ol.appendChild(li);
   });
+  refreshNavButtons();
 }
+
+function jumpToReviewIdx(idx) {
+  const game = review.game;
+  if (!game) return;
+  const moves = review.analysis ? review.analysis.moves : null;
+  // idx == -1 means starting position; idx >= 0 means after that ply.
+  review.activeIdx = idx;
+  let fen, lastMove = null;
+  if (idx < 0) {
+    fen = game.starting_fen;
+  } else if (moves) {
+    const m = moves[idx];
+    fen = m.fen_after;
+    lastMove = m.move_uci ? { from: m.move_uci.slice(0, 2), to: m.move_uci.slice(2, 4) } : null;
+  } else {
+    // No analysis yet: replay PGN moves up to idx using chess.js if present.
+    fen = game.starting_fen;
+    if (typeof Chess === "function") {
+      try {
+        const c = new Chess(fen);
+        for (let i = 0; i <= idx; i++) {
+          const u = game.moves_uci[i];
+          c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u.slice(4) || undefined });
+        }
+        fen = c.fen();
+        const u = game.moves_uci[idx];
+        lastMove = { from: u.slice(0, 2), to: u.slice(2, 4) };
+      } catch { /* ignore */ }
+    }
+  }
+  try {
+    loadFen(fen);
+    state.lastMove = lastMove;
+    if (idx >= 0 && moves) {
+      const m = moves[idx];
+      state.reviewBadge = lastMove ? { square: lastMove.to, classification: m.classification } : null;
+      state.bestArrow = m.best_move_uci
+        ? { from: m.best_move_uci.slice(0, 2), to: m.best_move_uci.slice(2, 4) }
+        : null;
+    } else {
+      state.reviewBadge = null;
+      state.bestArrow = null;
+    }
+    renderBoard();
+    renderBoardHint();
+  } catch { /* ignore */ }
+  // Update active list highlighting without full re-render of summary.
+  document.querySelectorAll("#review-moves li").forEach((el, i) => {
+    el.classList.toggle("is-active", i === idx);
+  });
+  refreshNavButtons();
+}
+
+function renderBoardHint() {
+  const host = document.getElementById("board-hint");
+  if (!host) return;
+  const moves = review.analysis ? review.analysis.moves : null;
+  if (!moves || review.activeIdx < 0) {
+    host.textContent = "";
+    return;
+  }
+  const m = moves[review.activeIdx];
+  if (!m || !m.best_move_san) { host.textContent = ""; return; }
+  const sideLabel = m.side === "w" ? "Белые" : "Чёрные";
+  if (m.move_uci === m.best_move_uci) {
+    host.innerHTML = `<span class="label">${sideLabel} сыграли лучший ход:</span><span class="san">${m.move_san}</span><span class="eval">${fmtCp(m.eval_after_cp)}</span>`;
+  } else {
+    host.innerHTML = `<span class="label">${sideLabel} сыграли ${m.move_san} (${fmtCp(m.eval_after_cp)}). Лучше было:</span><span class="san">${m.best_move_san}</span><span class="eval">${fmtCp(m.eval_before_cp)}</span>`;
+  }
+}
+
+function refreshNavButtons() {
+  const game = review.game;
+  const total = game ? game.moves_uci.length : 0;
+  const idx = review.activeIdx;
+  const setDisabled = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = val;
+  };
+  setDisabled("nav-first", !game || idx < 0);
+  setDisabled("nav-prev", !game || idx < 0);
+  setDisabled("nav-next", !game || idx >= total - 1);
+  setDisabled("nav-last", !game || idx >= total - 1);
+}
+
+document.getElementById("nav-first").addEventListener("click", () => jumpToReviewIdx(-1));
+document.getElementById("nav-prev").addEventListener("click", () => {
+  if (review.activeIdx > -1) jumpToReviewIdx(review.activeIdx - 1);
+});
+document.getElementById("nav-next").addEventListener("click", () => {
+  const total = review.game ? review.game.moves_uci.length : 0;
+  if (review.activeIdx < total - 1) jumpToReviewIdx(review.activeIdx + 1);
+});
+document.getElementById("nav-last").addEventListener("click", () => {
+  if (review.game) jumpToReviewIdx(review.game.moves_uci.length - 1);
+});
 
 // ---------- Boot ----------
 
