@@ -88,6 +88,7 @@ class MoveAnalysis:
     cpl: int              # centipawn loss for the played move
     classification: str   # one of CLASS_LABELS
     note: str = ""
+    coach: list[str] | None = None  # additional Russian "coach" hints
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +105,7 @@ class MoveAnalysis:
             "cpl": self.cpl,
             "classification": self.classification,
             "note": self.note,
+            "coach": self.coach or [],
         }
 
 
@@ -336,6 +338,125 @@ def _is_sacrifice(board_before: chess.Board, move: chess.Move) -> bool:
     return net_loss >= 200
 
 
+def _looks_hanging(board: chess.Board, sq: chess.Square) -> bool:
+    """A piece on `sq` is 'hanging' if attacked by opponent more than defended,
+    or attacked by a strictly cheaper piece. Cheap heuristic, not perfect.
+    """
+    piece = board.piece_at(sq)
+    if piece is None or piece.piece_type == chess.KING:
+        return False
+    attackers = board.attackers(not piece.color, sq)
+    if not attackers:
+        return False
+    defenders = board.attackers(piece.color, sq)
+    own_value = _piece_value(piece)
+    cheapest_attacker = min(_piece_value(board.piece_at(s)) for s in attackers)
+    if cheapest_attacker < own_value:
+        # Opponent has a cheaper attacker — usually losing material even if defended.
+        return True
+    if not defenders:
+        # Attacked, undefended.
+        return True
+    return False
+
+
+def _coach_hints(
+    board_before: chess.Board,
+    move: chess.Move,
+    board_after: chess.Board,
+    best_move: chess.Move | None,
+    eval_before_cp: int,
+    eval_after_cp: int,
+    is_top1: bool,
+) -> list[str]:
+    """Produce optional Russian coach-style hints for one ply.
+
+    These run on top of the main classification and call out concrete
+    tactical mistakes / opportunities. All checks are local heuristics
+    so they are very fast (no extra engine calls).
+    """
+    hints: list[str] = []
+    mover = not board_after.turn  # board_after.turn is opponent's turn now
+
+    # 1) Hanging piece(s) left after the move.
+    hanging: list[str] = []
+    for sq in chess.SQUARES:
+        p = board_after.piece_at(sq)
+        if p is None or p.color != mover:
+            continue
+        if _looks_hanging(board_after, sq):
+            hanging.append(chess.piece_name(p.piece_type))
+    if hanging and not is_top1 and eval_after_cp < eval_before_cp - 100:
+        names = ", ".join(sorted(set(hanging)))
+        hints.append(f"Висят фигуры под боем: {names}")
+
+    # 2) Missed defence — before the move, *another* of mover's pieces
+    #    was hanging, and the played move didn't move/protect it.
+    pre_hanging: list[chess.Square] = []
+    for sq in chess.SQUARES:
+        p = board_before.piece_at(sq)
+        if p is None or p.color != mover:
+            continue
+        if _looks_hanging(board_before, sq):
+            pre_hanging.append(sq)
+    if pre_hanging and move.from_square not in pre_hanging:
+        # Did the played move actually defend any of them?
+        defended_now = [
+            sq for sq in pre_hanging
+            if board_after.piece_at(sq) is not None
+            and not _looks_hanging(board_after, sq)
+        ]
+        if not defended_now and not is_top1:
+            hints.append("Не защитил атакованную фигуру")
+
+    # 3) Best move would have created a fork (attacks 2+ pieces of value ≥ knight).
+    if best_move is not None and best_move != move:
+        sim = board_before.copy(stack=False)
+        sim.push(best_move)
+        moved_to = best_move.to_square
+        moved_piece = sim.piece_at(moved_to)
+        if moved_piece is not None:
+            attacked_targets: list[int] = []
+            for sq in sim.attacks(moved_to):
+                tgt = sim.piece_at(sq)
+                if tgt is None or tgt.color == moved_piece.color:
+                    continue
+                if _piece_value(tgt) >= 320:
+                    attacked_targets.append(_piece_value(tgt))
+            if len(attacked_targets) >= 2:
+                hints.append("Лучший ход создавал двойной удар")
+
+    # 4) King exposure — count opponent attackers on squares around our king.
+    king_sq = board_after.king(mover)
+    if king_sq is not None:
+        ring = chess.SquareSet(chess.BB_KING_ATTACKS[king_sq])
+        before_king = board_before.king(mover)
+        before_attackers = 0
+        if before_king is not None:
+            for sq in chess.SquareSet(chess.BB_KING_ATTACKS[before_king]):
+                if board_before.attackers(not mover, sq):
+                    before_attackers += 1
+        after_attackers = 0
+        for sq in ring:
+            if board_after.attackers(not mover, sq):
+                after_attackers += 1
+        if after_attackers >= before_attackers + 2 and eval_after_cp < eval_before_cp - 80:
+            hints.append("Ослабил позицию короля")
+
+    # 5) Tempo / activity loss when best move was a check or capture.
+    if best_move is not None and best_move != move and not is_top1:
+        sim = board_before.copy(stack=False)
+        sim.push(best_move)
+        if sim.is_check():
+            hints.append("Лучший ход был с шахом")
+        elif board_before.is_capture(best_move) and not board_before.is_capture(move):
+            captured = board_before.piece_at(best_move.to_square)
+            if captured is not None and _piece_value(captured) >= 320:
+                hints.append("Лучший ход выигрывал материал")
+
+    return hints
+
+
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
@@ -349,6 +470,7 @@ def _classify(
     is_top1: bool,
     only_move_gap_cp: int,
     is_sacrifice: bool,
+    is_hidden_sacrifice: bool,
     in_book: bool,
     wp_loss: float,
 ) -> tuple[str, str]:
@@ -402,14 +524,24 @@ def _classify(
     if eval_before_cp >= 300 and eval_after_cp < 100 and cpl >= 100:
         return "miss", f"Упущена победа ({_pretty_cp(eval_before_cp)} → {_pretty_cp(eval_after_cp)})"
 
-    # Brilliant: top-1 (or very close) + sacrifice + still winning.
-    if is_sacrifice and is_top1 and eval_after_cp >= 100 and eval_before_cp >= -200:
+    # Brilliant: top-1 + (material sacrifice OR hidden tactical
+    # sacrifice — apparent hanging piece that opponent can't take) +
+    # still winning + we weren't in a hopelessly lost position before.
+    if (
+        (is_sacrifice or is_hidden_sacrifice)
+        and is_top1
+        and eval_after_cp >= 100
+        and eval_before_cp >= -200
+    ):
+        if is_hidden_sacrifice and not is_sacrifice:
+            return "brilliant", "Бриллиантовый ход — скрытая жертва (тактика)"
         return "brilliant", "Бриллиантовый ход — жертва, остаётся выигрышной позиция"
 
-    # Great: only-good-move OR position turnaround.
-    if is_top1 and only_move_gap_cp >= 150 and abs(eval_before_cp) < 1000:
+    # Great: only-good-move (tighter — gap must be ≥ 250 cp, like chess.com)
+    # OR position turnaround from clearly losing to clearly winning.
+    if is_top1 and only_move_gap_cp >= 250 and abs(eval_before_cp) < 1000:
         return "great", "Великолепный ход — единственный спасительный"
-    if eval_before_cp <= -150 and eval_after_cp >= 100:
+    if eval_before_cp <= -200 and eval_after_cp >= 150:
         return "great", "Великолепный ход — переломил позицию"
 
     # Best: matches the engine's first line.
@@ -419,14 +551,20 @@ def _classify(
     # Win-percentage-loss (WP-loss) buckets, in % points (0..100).
     # These are calibrated to match chess.com's classifier for typical
     # equal positions; sacrificial / decisive positions are softened by
-    # the WP scale automatically.
+    # the WP scale automatically. We *also* require a minimum cpl for
+    # the "Mistake" label so a small cp drop in a clearly-decisive
+    # position doesn't get tagged Mistake — that matches chess.com.
     if wp_loss < 2.0:
         return "excellent", "Превосходный"
     if wp_loss < 5.0:
         return "good", "Хороший"
     if wp_loss < 10.0:
         return "inaccuracy", f"Неточность (−{cpl} cp)"
-    if wp_loss < 20.0:
+    if wp_loss < 20.0 or cpl < 200:
+        if cpl < 80:
+            return "good", "Хороший"
+        if cpl < 150:
+            return "inaccuracy", f"Неточность (−{cpl} cp)"
         return "mistake", f"Ошибка (−{cpl} cp)"
     return "blunder", f"Грубая ошибка (−{cpl} cp)"
 
@@ -528,6 +666,7 @@ async def analyse_game(
         # stalemate, draw) before consulting the engine — engines return
         # ambiguous mate(0) scores on already-finished positions.
         board.push(move)
+        infos_after: list[dict[str, Any]] = []
         if board.is_checkmate():
             # The mover just delivered mate.
             eval_after_cp = MATE_SCORE
@@ -548,6 +687,23 @@ async def analyse_game(
                 else eval_before_cp
             )
 
+        # Hidden-tactic sacrifice: piece that just moved looks "hanging"
+        # (could be captured by a cheaper attacker), but the engine's
+        # top reply for the opponent isn't to take it — meaning the
+        # capture loses to a tactic (pin / discovered / back-rank).
+        is_hidden_sac = False
+        if (
+            not is_sac
+            and board.piece_at(move.to_square) is not None
+            and _looks_hanging(board, move.to_square)
+            and infos_after
+        ):
+            opp_pv = infos_after[0].get("pv") or []
+            if opp_pv:
+                opp_best = opp_pv[0]
+                if opp_best.to_square != move.to_square:
+                    is_hidden_sac = True
+
         cpl = max(0, eval_before_cp - eval_after_cp)
 
         # Win-percentage loss for this ply, in % points (0..100).
@@ -566,10 +722,22 @@ async def analyse_game(
             is_top1=is_top1,
             only_move_gap_cp=only_move_gap_cp,
             is_sacrifice=is_sac,
+            is_hidden_sacrifice=is_hidden_sac,
             in_book=in_book,
             wp_loss=wp_loss_pct,
         )
         counts[label] = counts.get(label, 0) + 1
+
+        # Cheap, local-only coach hints (no extra engine call).
+        coach = _coach_hints(
+            board_before=pre_board,
+            move=move,
+            board_after=board,
+            best_move=best_move,
+            eval_before_cp=eval_before_cp,
+            eval_after_cp=eval_after_cp,
+            is_top1=is_top1,
+        )
 
         accuracies[side_color].append(_accuracy_for_pair(wp_before, wp_after))
         # Cap per-ply CPL for ACPL averaging — a single forced-mate
@@ -596,6 +764,7 @@ async def analyse_game(
                 cpl=cpl,
                 classification=label,
                 note=note,
+                coach=coach or None,
             )
         )
 

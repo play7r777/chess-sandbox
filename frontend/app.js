@@ -12,6 +12,12 @@ import { Chess } from "/static/lib/chess.js";
 
 const PIECE_SET = "cburnett";
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[ch]);
+}
+
 function pieceSvgUrl(piece) {
   const color = piece === piece.toUpperCase() ? "w" : "b";
   return `/static/pieces/${PIECE_SET}/${color}${piece.toUpperCase()}.svg`;
@@ -1344,11 +1350,13 @@ function renderReviewMoves() {
     }
     const moveNum = Math.ceil(m.ply / 2) + ".";
     const dots = m.side === "b" ? "…" : "";
+    const coachHtml = (m.coach && m.coach.length)
+      ? `<span class="coach">${m.coach.map(escapeHtml).join(" · ")}</span>` : "";
     li.innerHTML = `
       <span class="ply">${moveNum}${dots}</span>
       <span class="icon">${REVIEW_ICONS[m.classification] || ""}</span>
       <span class="san">${m.move_san}</span>
-      <span class="note">${m.note || ""}</span>
+      <span class="note">${m.note || ""}${coachHtml}</span>
       <span class="eval">${moves ? fmtCp(m.eval_after_cp) : ""}</span>
     `;
     li.addEventListener("click", () => {
@@ -1428,12 +1436,16 @@ function renderBoardHint() {
   const bestEval = fmtCp(m.eval_before_cp);
   const showPlayedEval = !/[+#]$/.test(playedSan);
   const showBestEval = !/[+#]$/.test(bestSan);
+  let main;
   if (m.move_uci === m.best_move_uci) {
-    host.innerHTML = `<span class="label">${sideLabel} сыграли лучший ход:</span><span class="san">${playedSan}</span>${showPlayedEval ? `<span class="eval">${playedEval}</span>` : ""}`;
+    main = `<span class="label">${sideLabel} сыграли лучший ход:</span><span class="san">${playedSan}</span>${showPlayedEval ? `<span class="eval">${playedEval}</span>` : ""}`;
   } else {
     const playedTail = showPlayedEval ? ` (${playedEval})` : "";
-    host.innerHTML = `<span class="label">${sideLabel} сыграли ${playedSan}${playedTail}. Лучше было:</span><span class="san">${bestSan}</span>${showBestEval ? `<span class="eval">${bestEval}</span>` : ""}`;
+    main = `<span class="label">${sideLabel} сыграли ${playedSan}${playedTail}. Лучше было:</span><span class="san">${bestSan}</span>${showBestEval ? `<span class="eval">${bestEval}</span>` : ""}`;
   }
+  const coachLine = (m.coach && m.coach.length)
+    ? `<div class="coach-line">💡 ${m.coach.map(escapeHtml).join(" · ")}</div>` : "";
+  host.innerHTML = main + coachLine;
 }
 
 function refreshNavButtons() {

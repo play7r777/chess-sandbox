@@ -309,6 +309,8 @@ body.mode-legal .mode-toggle { display: none !important; }
 .review-moves .san { font-weight: 600; }
 .review-moves .note { color: var(--fg-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .review-moves .eval { text-align: right; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.review-moves .coach { display: block; color: #9ec5ff; font-size: 11px; font-style: italic; margin-top: 2px; white-space: normal; }
+.coach-line { color: #9ec5ff; font-size: 12px; font-style: italic; margin-top: 4px; }
 
 .review-moves .cls-brilliant  .icon, .review-summary .pill.cls-brilliant  { color: #00d2ff; }
 .review-moves .cls-great      .icon, .review-summary .pill.cls-great      { color: #5fb6ff; }
