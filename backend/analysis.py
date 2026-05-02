@@ -35,6 +35,7 @@ import chess
 import chess.pgn
 import requests  # type: ignore[import-untyped]
 
+from .opening_book import is_book_position
 from .stockfish_engine import engine
 
 USER_AGENT = (
@@ -277,40 +278,62 @@ def _piece_value(piece: chess.Piece | None) -> int:
     return PIECE_VALUES.get(piece.piece_type, 0) if piece else 0
 
 
-def _is_sacrifice(board_before: chess.Board, move: chess.Move) -> bool:
-    """Return True if the played move appears to sacrifice material.
+def _see(board: chess.Board, square: chess.Square, side: chess.Color) -> int:
+    """Static Exchange Evaluation.
 
-    Heuristic: after applying the move, the moving piece sits on a square
-    attacked by an opponent piece of strictly lower value (a 'lower-value
-    attacker' picks it off for free or for unfavourable trade). This is a
-    loose but cheap proxy for chess.com's brilliancy criterion.
+    Returns the material gain/loss in centipawns for `side` if it
+    initiates a capture sequence on `square` (or zero if it can't or
+    shouldn't). Considers the cheapest attacker first and recursively
+    evaluates the recapture chain; a side that would lose material on
+    its turn declines the capture.
+    """
+    target = board.piece_at(square)
+    if target is None:
+        return 0
+    attackers = list(board.attackers(side, square))
+    if not attackers:
+        return 0
+    # Pick the cheapest attacker.
+    cheapest = min(attackers, key=lambda s: _piece_value(board.piece_at(s)))
+    # Make the capture; recurse for the opponent's reply.
+    sub_board = board.copy(stack=False)
+    captured_value = _piece_value(target)
+    sub_board.remove_piece_at(square)
+    moving_piece = sub_board.piece_at(cheapest)
+    sub_board.remove_piece_at(cheapest)
+    if moving_piece is not None:
+        sub_board.set_piece_at(square, moving_piece)
+    # Opponent's gain if they continue:
+    opp_gain = _see(sub_board, square, not side)
+    # Choose max(0, gain) — side won't capture if it loses material.
+    return max(0, captured_value - opp_gain)
+
+
+def _is_sacrifice(board_before: chess.Board, move: chess.Move) -> bool:
+    """Return True if the played move sacrifices material.
+
+    Uses static-exchange evaluation (SEE) on the destination square
+    after the move is played: if the opponent can win material from
+    the to-square via a capture sequence (and the move wasn't a
+    simple equal-or-better trade), it counts as a sacrifice.
     """
     moving_piece = board_before.piece_at(move.from_square)
     if moving_piece is None or moving_piece.piece_type == chess.PAWN:
         return False
-    captured_value = _piece_value(board_before.piece_at(move.to_square))
     moved_value = _piece_value(moving_piece)
-    # If we capture a piece of equal-or-greater value it's not a sacrifice.
+    captured_value = _piece_value(board_before.piece_at(move.to_square))
+    # If we capture a piece of equal-or-greater value the trade isn't a sac.
     if captured_value >= moved_value:
         return False
     after = board_before.copy(stack=False)
     after.push(move)
-    attackers = after.attackers(not moving_piece.color, move.to_square)
-    if not attackers:
-        return False
-    defenders = after.attackers(moving_piece.color, move.to_square)
-    min_attacker_value = min(
-        _piece_value(after.piece_at(sq)) for sq in attackers
-    )
-    # Even with defenders we treat it as a sacrifice if the piece is attacked
-    # by something cheaper than itself — recapture sequence will cost us
-    # material (the cheaper attacker wins).
-    if min_attacker_value < moved_value and not defenders:
-        return True
-    if defenders and min_attacker_value < moved_value:
-        # Loose: opponent can choose to take with the cheaper piece.
-        return True
-    return False
+    # SEE on the destination square: how much can the opponent win there?
+    opp_gain = _see(after, move.to_square, not moving_piece.color)
+    # Material lost = piece we placed minus what we already captured
+    # (pawn promotion/etc. ignored — close enough).
+    net_loss = opp_gain - captured_value
+    # Require a meaningful loss (≥ 200 cp ≈ minor piece) to count as Brilliant.
+    return net_loss >= 200
 
 
 # ---------------------------------------------------------------------------
@@ -320,15 +343,27 @@ def _is_sacrifice(board_before: chess.Board, move: chess.Move) -> bool:
 
 def _classify(
     *,
-    ply_index: int,
     cpl: int,
     eval_before_cp: int,
     eval_after_cp: int,
     is_top1: bool,
     only_move_gap_cp: int,
     is_sacrifice: bool,
+    in_book: bool,
+    wp_loss: float,
 ) -> tuple[str, str]:
-    """Pick a label + short note for one move."""
+    """Pick a label + short note for one move.
+
+    Mirrors chess.com's classification reasonably closely:
+    - Book lookup uses a real opening database (Lichess ECO data).
+    - Mistake/Inaccuracy/Blunder thresholds are based on win-percentage
+      loss rather than raw CPL — a 100-cp drop in an already winning
+      position is far less damaging than the same drop in an equal one.
+    - Brilliant requires (a) move is top-1 or near-top, (b) it's a true
+      material sacrifice, (c) the position is still winning after.
+    - Great is the only-move-that-works case (large gap to the second
+      best line) or a critical turn-around.
+    """
     # Checkmate delivered: always at least Best (Brilliant if sacrificial).
     if eval_after_cp >= MATE_SCORE - 1:
         if is_sacrifice:
@@ -340,11 +375,8 @@ def _classify(
         mate_in = max(1, MATE_SCORE + eval_after_cp)
         return "blunder", f"Подставился под мат в {mate_in}"
 
-    # Book: very early in the game and the move is essentially perfect.
-    # We don't have an opening DB, so this is a heuristic — limit to first
-    # few full moves and very small CPL so non-theoretical moves still get a
-    # proper Best/Excellent/etc. label.
-    if ply_index < 10 and cpl <= 10 and is_top1:
+    # Book: position is in the opening database.
+    if in_book:
         return "book", "Теория"
 
     # Mate-miss: had forced mate, no longer have it.
@@ -354,24 +386,31 @@ def _classify(
     if eval_before_cp >= 300 and eval_after_cp < 100 and cpl >= 100:
         return "miss", f"Упущена победа ({_pretty_cp(eval_before_cp)} → {_pretty_cp(eval_after_cp)})"
 
-    if is_top1 and is_sacrifice and eval_after_cp >= 100:
+    # Brilliant: top-1 (or very close) + sacrifice + still winning.
+    if is_sacrifice and is_top1 and eval_after_cp >= 100 and eval_before_cp >= -200:
         return "brilliant", "Бриллиантовый ход — жертва, остаётся выигрышной позиция"
 
-    # Great: only-move OR turning a losing position into a winning one.
-    if is_top1 and only_move_gap_cp >= 200:
+    # Great: only-good-move OR position turnaround.
+    if is_top1 and only_move_gap_cp >= 150 and abs(eval_before_cp) < 1000:
         return "great", "Великолепный ход — единственный спасительный"
-    if eval_before_cp <= -200 and eval_after_cp >= 100:
+    if eval_before_cp <= -150 and eval_after_cp >= 100:
         return "great", "Великолепный ход — переломил позицию"
 
+    # Best: matches the engine's first line.
     if is_top1:
         return "best", "Лучший ход"
-    if cpl <= 20:
+
+    # Win-percentage-loss (WP-loss) buckets, in % points (0..100).
+    # These are calibrated to match chess.com's classifier for typical
+    # equal positions; sacrificial / decisive positions are softened by
+    # the WP scale automatically.
+    if wp_loss < 2.0:
         return "excellent", "Превосходный"
-    if cpl <= 50:
+    if wp_loss < 5.0:
         return "good", "Хороший"
-    if cpl <= 100:
+    if wp_loss < 10.0:
         return "inaccuracy", f"Неточность (−{cpl} cp)"
-    if cpl <= 200:
+    if wp_loss < 20.0:
         return "mistake", f"Ошибка (−{cpl} cp)"
     return "blunder", f"Грубая ошибка (−{cpl} cp)"
 
@@ -487,21 +526,32 @@ async def analyse_game(
 
         cpl = max(0, eval_before_cp - eval_after_cp)
 
+        # Win-percentage loss for this ply, in % points (0..100).
+        wp_before = _winning_chances(eval_before_cp)
+        wp_after = _winning_chances(eval_after_cp)
+        wp_loss_pct = max(0.0, (wp_before - wp_after) * 100.0)
+
+        # Book lookup: position before the move must be in the book AND
+        # the move itself must keep us in the book (else it's a deviation).
+        in_book = is_book_position(fen_before) and is_book_position(board.fen())
+
         label, note = _classify(
-            ply_index=ply_index,
             cpl=cpl,
             eval_before_cp=eval_before_cp,
             eval_after_cp=eval_after_cp,
             is_top1=is_top1,
             only_move_gap_cp=only_move_gap_cp,
             is_sacrifice=is_sac,
+            in_book=in_book,
+            wp_loss=wp_loss_pct,
         )
         counts[label] = counts.get(label, 0) + 1
 
-        wp_before = _winning_chances(eval_before_cp)
-        wp_after = _winning_chances(eval_after_cp)
         accuracies[side_color].append(_accuracy_for_pair(wp_before, wp_after))
-        cpls[side_color].append(cpl)
+        # Cap per-ply CPL for ACPL averaging — a single forced-mate
+        # blowout otherwise dominates the average and makes the metric
+        # meaningless. chess.com does the same kind of capping.
+        cpls[side_color].append(min(cpl, 1000))
 
         best_san = None
         if best_move is not None:
