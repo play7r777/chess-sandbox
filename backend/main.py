@@ -57,7 +57,8 @@ class GameImportRequest(BaseModel):
 class GameAnalyseRequest(BaseModel):
     moves_uci: list[str] = Field(..., min_length=1)
     starting_fen: str = Field(default=chess.STARTING_FEN)
-    movetime_ms: int = Field(default=250, ge=50, le=5000)
+    movetime_ms: int | None = Field(default=None, ge=50, le=60_000)
+    depth: int | None = Field(default=22, ge=1, le=40)
     multipv: int = Field(default=2, ge=1, le=4)
 
 
@@ -265,6 +266,7 @@ async def game_analyse(req: GameAnalyseRequest) -> dict[str, Any]:
             moves_uci=req.moves_uci,
             starting_fen=req.starting_fen,
             movetime_ms=req.movetime_ms,
+            depth=req.depth,
             multipv=req.multipv,
         )
     except ValueError as exc:

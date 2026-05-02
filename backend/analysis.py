@@ -453,7 +453,8 @@ def _accuracy_for_pair(wp_before: float, wp_after: float) -> float:
 async def analyse_game(
     moves_uci: list[str],
     starting_fen: str = chess.STARTING_FEN,
-    movetime_ms: int = 250,
+    movetime_ms: int | None = None,
+    depth: int | None = 22,
     multipv: int = 2,
     progress_cb: Any = None,
 ) -> dict[str, Any]:
@@ -485,7 +486,7 @@ async def analyse_game(
         is_sac = _is_sacrifice(pre_board, move)
 
         infos_before = await engine.analyse_raw(
-            fen_before, movetime_ms=movetime_ms, multipv=multipv
+            fen_before, movetime_ms=movetime_ms, depth=depth, multipv=multipv
         )
         if not infos_before:
             break
@@ -516,7 +517,7 @@ async def analyse_game(
             eval_after_cp = 0
         else:
             infos_after = await engine.analyse_raw(
-                board.fen(), movetime_ms=movetime_ms, multipv=1
+                board.fen(), movetime_ms=movetime_ms, depth=depth, multipv=1
             )
             eval_after_cp = (
                 _score_to_cp(infos_after[0], side_color)

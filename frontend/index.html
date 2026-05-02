@@ -145,8 +145,11 @@
             <button id="btn-review-import" type="button">Загрузить</button>
           </div>
           <div class="row">
-            <label>Время на ход (мс):
-              <input id="review-movetime" type="number" min="50" max="5000" value="50" />
+            <label>Глубина (depth):
+              <input id="review-depth" type="number" min="6" max="40" value="22" title="Stockfish depth — chess.com Game Review uses ~22" />
+            </label>
+            <label class="muted">или время (мс):
+              <input id="review-movetime" type="number" min="50" max="60000" value="" placeholder="—" title="Если задано, используется вместо depth" />
             </label>
             <button id="btn-review-analyse" type="button" disabled>Анализировать</button>
             <span id="review-progress" class="muted"></span>

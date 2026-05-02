@@ -1252,11 +1252,15 @@ document.getElementById("btn-review-import").addEventListener("click", async () 
 
 document.getElementById("btn-review-analyse").addEventListener("click", async () => {
   if (!review.game) return;
-  const movetime = intOrDefault(document.getElementById("review-movetime").value, 50);
+  const depthRaw = document.getElementById("review-depth").value.trim();
+  const movetimeRaw = document.getElementById("review-movetime").value.trim();
+  const depth = depthRaw ? Math.max(6, Math.min(40, parseInt(depthRaw, 10) || 22)) : 22;
+  const movetime = movetimeRaw ? Math.max(50, Math.min(60000, parseInt(movetimeRaw, 10) || 0)) : null;
   const total = review.game.moves_uci.length;
   document.getElementById("btn-review-analyse").disabled = true;
-  document.getElementById("review-progress").textContent =
-    `Анализ… ~${Math.ceil(total * movetime * 2 / 1000)} сек`;
+  document.getElementById("review-progress").textContent = movetime
+    ? `Анализ… ~${Math.ceil(total * movetime * 2 / 1000)} сек`
+    : `Анализ на глубину ${depth}…`;
   try {
     const r = await api("/api/game/analyse", {
       method: "POST",
@@ -1264,6 +1268,7 @@ document.getElementById("btn-review-analyse").addEventListener("click", async ()
       body: JSON.stringify({
         moves_uci: review.game.moves_uci,
         starting_fen: review.game.starting_fen,
+        depth: movetime ? null : depth,
         movetime_ms: movetime,
         multipv: 2,
       }),
