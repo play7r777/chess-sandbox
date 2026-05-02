@@ -257,6 +257,14 @@ async def game_import(req: GameImportRequest) -> dict[str, Any]:
     return imported.to_dict()
 
 
+@app.get("/api/opening/explorer")
+async def opening_explorer(fen: str, limit: int = 5) -> dict[str, Any]:
+    """Top master replies for the given position (via Lichess Masters)."""
+    from .opening_book import masters_top_moves
+    moves = await masters_top_moves(fen, limit=limit)
+    return {"moves": moves}
+
+
 @app.post("/api/game/analyse")
 async def game_analyse(req: GameAnalyseRequest) -> dict[str, Any]:
     if not engine.is_running:

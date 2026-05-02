@@ -1281,11 +1281,12 @@ document.getElementById("btn-review-analyse").addEventListener("click", async ()
         starting_fen: review.game.starting_fen,
         depth: movetime ? null : depth,
         movetime_ms: movetime,
-        multipv: 2,
+        multipv: 3,
       }),
     });
     review.analysis = r;
     renderReviewSummary(r.summary);
+    renderKeyMoments(r.key_moments || []);
     renderReviewMoves();
     document.getElementById("review-progress").textContent =
       `Готово — ${r.moves.length} ходов проанализировано.`;
@@ -1329,6 +1330,60 @@ function renderReviewSummary(s) {
   } else {
     hint.textContent = "(клик — фильтр)";
   }
+}
+
+function renderKeyMoments(moments) {
+  const host = document.getElementById("review-key-moments");
+  if (!host) return;
+  if (!moments || moments.length === 0) { host.innerHTML = ""; return; }
+  const rows = moments.map((k) => {
+    const side = k.side === "w" ? "Белые" : "Чёрные";
+    const moveNum = Math.ceil(k.ply / 2);
+    return `<li data-ply="${k.ply}" title="${escapeHtml(k.note || "")}">
+      <span class="km-ply">${moveNum}${k.side === "b" ? "..." : "."}</span>
+      <span class="km-icon cls-${k.classification}" style="color:inherit">${REVIEW_ICONS[k.classification] || ""}</span>
+      <span class="km-san">${side} ${escapeHtml(k.move_san)}</span>
+      <span class="km-delta">ΔWP ${k.wp_delta}%</span>
+    </li>`;
+  }).join("");
+  host.innerHTML = `<h3>Ключевые моменты</h3><ol>${rows}</ol>`;
+  host.querySelectorAll("li[data-ply]").forEach((li) => {
+    li.addEventListener("click", () => {
+      const ply = parseInt(li.dataset.ply, 10);
+      jumpToReviewIdx(ply - 1);
+    });
+  });
+}
+
+async function renderOpeningExplorer(fen) {
+  const host = document.getElementById("opening-explorer");
+  if (!host) return;
+  if (!fen) { host.innerHTML = ""; return; }
+  // Only show for positions in the first 20 moves.
+  const fullmove = parseInt((fen.split(" ")[5] || "1"), 10);
+  if (fullmove > 20) { host.innerHTML = ""; return; }
+  try {
+    const r = await api(`/api/opening/explorer?fen=${encodeURIComponent(fen)}&limit=5`);
+    const moves = r.moves || [];
+    if (!moves.length) { host.innerHTML = ""; return; }
+    const rows = moves.map((m) => `
+      <tr>
+        <td class="oe-san">${escapeHtml(m.san)}</td>
+        <td class="oe-total">${m.total.toLocaleString("ru-RU")}</td>
+        <td>
+          <div class="pct-bar" title="Белые ${m.white_pct}% / Ничьи ${m.draw_pct}% / Чёрные ${m.black_pct}%">
+            <span class="pct-w" style="width:${m.white_pct}%"></span>
+            <span class="pct-d" style="width:${m.draw_pct}%"></span>
+            <span class="pct-b" style="width:${m.black_pct}%"></span>
+          </div>
+        </td>
+      </tr>`).join("");
+    host.innerHTML = `<h3>Дебютный обзор (Lichess Masters)</h3>
+      <table>
+        <thead><tr><th>Ход</th><th>Партии</th><th>Результат</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch { host.innerHTML = ""; }
 }
 
 function renderReviewMoves() {
@@ -1412,6 +1467,8 @@ function jumpToReviewIdx(idx) {
     }
     renderBoard();
     renderBoardHint();
+    // Refresh opening explorer for the current position (fire-and-forget).
+    renderOpeningExplorer(fen);
   } catch { /* ignore */ }
   // Update active list highlighting without full re-render of summary.
   document.querySelectorAll("#review-moves li").forEach((el, i) => {
@@ -1446,7 +1503,19 @@ function renderBoardHint() {
   }
   const coachLine = (m.coach && m.coach.length)
     ? `<div class="coach-line">💡 ${m.coach.map(escapeHtml).join(" · ")}</div>` : "";
-  host.innerHTML = main + coachLine;
+  // Show the engine's PV line (first ≤5 SAN moves) when we didn't play
+  // the top move — gives the user a glimpse of "what was right and why".
+  let pvLine = "";
+  if (
+    m.best_pv_san
+    && m.best_pv_san.length >= 2
+    && m.move_uci !== m.best_move_uci
+  ) {
+    const sansHtml = m.best_pv_san.slice(0, 5)
+      .map((s) => `<span class="pv-san">${escapeHtml(s)}</span>`).join("");
+    pvLine = `<div class="pv-line"><span class="pv-label">Лучшая линия:</span>${sansHtml}</div>`;
+  }
+  host.innerHTML = main + coachLine + pvLine;
 }
 
 function refreshNavButtons() {

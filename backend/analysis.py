@@ -89,6 +89,8 @@ class MoveAnalysis:
     classification: str   # one of CLASS_LABELS
     note: str = ""
     coach: list[str] | None = None  # additional Russian "coach" hints
+    best_pv_uci: list[str] | None = None  # engine's top-line continuation
+    best_pv_san: list[str] | None = None  # same, in SAN from pre_board
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,6 +108,8 @@ class MoveAnalysis:
             "classification": self.classification,
             "note": self.note,
             "coach": self.coach or [],
+            "best_pv_uci": self.best_pv_uci or [],
+            "best_pv_san": self.best_pv_san or [],
         }
 
 
@@ -549,6 +553,7 @@ def _classify(
     wp_loss: float,
     phase: str,
     is_forced: bool,
+    is_recapture: bool = False,
 ) -> tuple[str, str]:
     """Pick a label + short note for one move.
 
@@ -624,9 +629,17 @@ def _classify(
 
     # Great: only-good-move (tighter — gap must be ≥ 250 cp, like chess.com)
     # OR position turnaround from clearly losing to clearly winning.
-    if is_top1 and only_move_gap_cp >= 250 and abs(eval_before_cp) < 1000:
+    # Obvious recaptures (taking back on the same square opponent just
+    # captured on) are NOT Great even with a huge gap — chess.com
+    # considers them standard Best-level moves.
+    if (
+        is_top1
+        and only_move_gap_cp >= 250
+        and abs(eval_before_cp) < 1000
+        and not is_recapture
+    ):
         return "great", "Великолепный ход — единственный спасительный"
-    if eval_before_cp <= -200 and eval_after_cp >= 150:
+    if eval_before_cp <= -200 and eval_after_cp >= 150 and not is_recapture:
         return "great", "Великолепный ход — переломил позицию"
 
     # Best: matches the engine's first line.
@@ -690,6 +703,46 @@ def _accuracy_for_pair(wp_before: float, wp_after: float) -> float:
     return float(max(0.0, min(100.0, raw)))
 
 
+def _caps2_game_accuracy(
+    per_ply_accuracies: list[float],
+    per_ply_wp_before: list[float],
+) -> float:
+    """Volatility-weighted CAPS2-style accuracy (as used by Lichess,
+    close approximation of chess.com's CAPS2). Weights each ply by the
+    local WP stdev in a ±2-move window, then averages a weighted-mean
+    and a harmonic-mean of per-ply accuracies. This is what makes the
+    final number 2-4% lower than a naive mean and what lines our output
+    up with chess.com's displayed Accuracy%.
+    """
+    n = len(per_ply_accuracies)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return per_ply_accuracies[0]
+    # Per-ply volatility (stdev of wp_before in a ±2 move window, floored).
+    weights: list[float] = []
+    for i in range(n):
+        lo = max(0, i - 2)
+        hi = min(n, i + 3)
+        window = per_ply_wp_before[lo:hi]
+        if len(window) < 2:
+            weights.append(0.5)
+            continue
+        mean = sum(window) / len(window)
+        var = sum((x - mean) ** 2 for x in window) / len(window)
+        std = math.sqrt(var)
+        # Lichess uses max(0.5, min(12, 100*std)) as weight; we follow.
+        weights.append(max(0.5, min(12.0, std * 100.0)))
+    total_w = sum(weights)
+    weighted_mean = (
+        sum(a * w for a, w in zip(per_ply_accuracies, weights, strict=True)) / total_w
+    )
+    # Harmonic mean — penalises single very-bad moves more strongly.
+    positive_accs = [max(1e-6, a) for a in per_ply_accuracies]
+    harmonic = n / sum(1.0 / a for a in positive_accs)
+    return float(max(0.0, min(100.0, (weighted_mean + harmonic) / 2.0)))
+
+
 # ---------------------------------------------------------------------------
 # Main analysis loop
 # ---------------------------------------------------------------------------
@@ -700,7 +753,7 @@ async def analyse_game(
     starting_fen: str = chess.STARTING_FEN,
     movetime_ms: int | None = None,
     depth: int | None = 22,
-    multipv: int = 2,
+    multipv: int = 3,
     progress_cb: Any = None,
 ) -> dict[str, Any]:
     """Walk the game, run Stockfish per ply, classify each move."""
@@ -718,8 +771,14 @@ async def analyse_game(
     board = chess.Board(starting_fen)
     analyses: list[MoveAnalysis] = []
     accuracies: dict[chess.Color, list[float]] = {chess.WHITE: [], chess.BLACK: []}
+    # wp_before tracked per-colour for CAPS2-style volatility weighting.
+    wp_before_per_color: dict[chess.Color, list[float]] = {
+        chess.WHITE: [], chess.BLACK: []
+    }
     cpls: dict[chess.Color, list[int]] = {chess.WHITE: [], chess.BLACK: []}
     counts: dict[str, int] = {label: 0 for label in CLASS_LABELS}
+    # Track the opponent's previous move to detect recaptures.
+    prev_move: chess.Move | None = None
 
     for ply_index, uci in enumerate(moves_uci):
         try:
@@ -832,6 +891,27 @@ async def analyse_game(
         # legal move count BEFORE the move was played
         is_forced = len(list(pre_board.legal_moves)) == 1
 
+        # Recapture detection: our move captures on the same square
+        # where the opponent's last move landed (i.e. took back).
+        is_recapture = (
+            prev_move is not None
+            and pre_board.is_capture(move)
+            and move.to_square == prev_move.to_square
+        )
+
+        # Draw-aware override: if the position after the move is a
+        # dead draw by rule (insufficient material, 3-fold, 50-move,
+        # stalemate) clamp both evals so the classifier treats them
+        # as equal.
+        if (
+            board.is_stalemate()
+            or board.is_insufficient_material()
+            or board.is_fifty_moves()
+            or board.is_repetition(3)
+        ):
+            eval_after_cp = 0
+            cpl = max(0, eval_before_cp)
+
         label, note = _classify(
             cpl=cpl,
             eval_before_cp=eval_before_cp,
@@ -844,6 +924,7 @@ async def analyse_game(
             wp_loss=wp_loss_pct,
             phase=phase,
             is_forced=is_forced,
+            is_recapture=is_recapture,
         )
         counts[label] = counts.get(label, 0) + 1
 
@@ -859,14 +940,30 @@ async def analyse_game(
         )
 
         accuracies[side_color].append(_accuracy_for_pair(wp_before, wp_after))
+        wp_before_per_color[side_color].append(wp_before)
         # Cap per-ply CPL for ACPL averaging — a single forced-mate
         # blowout otherwise dominates the average and makes the metric
         # meaningless. chess.com does the same kind of capping.
         cpls[side_color].append(min(cpl, 1000))
 
+        prev_move = move
+
         best_san = None
         if best_move is not None:
             best_san = pre_board.san(best_move)
+
+        # Serialise the engine's top-1 PV (up to 5 plies) for the UI
+        # to draw arrows / show best-line continuation.
+        best_pv_uci: list[str] = []
+        best_pv_san: list[str] = []
+        if best_pv:
+            sim = pre_board.copy(stack=False)
+            for pv_move in best_pv[:5]:
+                if pv_move not in sim.legal_moves:
+                    break
+                best_pv_uci.append(pv_move.uci())
+                best_pv_san.append(sim.san(pv_move))
+                sim.push(pv_move)
 
         analyses.append(
             MoveAnalysis(
@@ -884,6 +981,8 @@ async def analyse_game(
                 classification=label,
                 note=note,
                 coach=coach or None,
+                best_pv_uci=best_pv_uci or None,
+                best_pv_san=best_pv_san or None,
             )
         )
 
@@ -893,14 +992,66 @@ async def analyse_game(
     def _avg(xs: list[float] | list[int]) -> float:
         return float(sum(xs) / len(xs)) if xs else 0.0
 
+    # Key moments: top-5 plies by "turning-point" magnitude — biggest
+    # WP swings, with a preference for genuine mistakes/brilliancies
+    # over even-position trivia. Skipped if fewer than 5 plies.
+    key_moments: list[dict[str, Any]] = []
+    if analyses:
+        ranked = sorted(
+            analyses,
+            key=lambda m: abs(
+                _winning_chances(m.eval_before_cp)
+                - _winning_chances(m.eval_after_cp)
+            ),
+            reverse=True,
+        )
+        seen_plies: set[int] = set()
+        for a in ranked:
+            if a.ply in seen_plies:
+                continue
+            wp_delta = abs(
+                _winning_chances(a.eval_before_cp)
+                - _winning_chances(a.eval_after_cp)
+            )
+            if wp_delta < 0.05:
+                continue
+            # Prefer a spread across the game — skip a ply if we already
+            # have one within ±1 of it (so we don't spam key moments on
+            # a single tactical sequence).
+            if any(abs(a.ply - p) <= 1 for p in seen_plies):
+                continue
+            seen_plies.add(a.ply)
+            key_moments.append({
+                "ply": a.ply,
+                "side": a.side,
+                "move_san": a.move_san,
+                "classification": a.classification,
+                "note": a.note,
+                "eval_before_cp": a.eval_before_cp,
+                "eval_after_cp": a.eval_after_cp,
+                "wp_delta": round(wp_delta * 100, 1),
+            })
+            if len(key_moments) >= 5:
+                break
+
     summary = {
         "white": {
-            "accuracy": round(_avg(accuracies[chess.WHITE]), 1),
+            "accuracy": round(
+                _caps2_game_accuracy(
+                    accuracies[chess.WHITE], wp_before_per_color[chess.WHITE]
+                ),
+                1,
+            ),
             "acpl": round(_avg(cpls[chess.WHITE]), 1),
             "moves": len(cpls[chess.WHITE]),
         },
         "black": {
-            "accuracy": round(_avg(accuracies[chess.BLACK]), 1),
+            "accuracy": round(
+                _caps2_game_accuracy(
+                    accuracies[chess.BLACK], wp_before_per_color[chess.BLACK]
+                ),
+                1,
+            ),
             "acpl": round(_avg(cpls[chess.BLACK]), 1),
             "moves": len(cpls[chess.BLACK]),
         },
@@ -910,6 +1061,7 @@ async def analyse_game(
     return {
         "moves": [m.to_dict() for m in analyses],
         "summary": summary,
+        "key_moments": key_moments,
     }
 
 

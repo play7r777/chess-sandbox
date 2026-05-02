@@ -18,6 +18,7 @@ import asyncio
 import gzip
 import logging
 from pathlib import Path
+from typing import Any
 
 import requests  # type: ignore[import-untyped]
 
@@ -67,24 +68,44 @@ def book_size() -> int:
     return len(_load())
 
 
-def _masters_sync(fen: str) -> bool:
-    """Blocking call to the Lichess Masters explorer. Returns True if
-    the given position has at least one master-level game. Any network
-    failure returns False (treated as "unknown — not in book")."""
+# Minimum number of master games required for a position to count
+# as "Book" — chess.com-style thresholding (rare lines don't qualify).
+_MASTERS_MIN_GAMES = 5
+
+_MASTERS_DETAIL_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _masters_fetch(fen: str, *, with_top_moves: bool) -> dict[str, Any] | None:
+    """Blocking Lichess Masters explorer call. Returns the raw JSON
+    (with `moves`, `white`, `draws`, `black`) or None on failure."""
     try:
         r = requests.get(
             _MASTERS_URL,
-            params={"fen": fen, "moves": 0, "topGames": 0, "recentGames": 0},
+            params={
+                "fen": fen,
+                "moves": 12 if with_top_moves else 0,
+                "topGames": 0,
+                "recentGames": 0,
+            },
             headers={"Accept": "application/json"},
             timeout=4,
         )
         if r.status_code != 200:
-            return False
+            return None
         data = r.json()
-        total = int(data.get("white", 0) + data.get("draws", 0) + data.get("black", 0))
-        return total > 0
+        return data if isinstance(data, dict) else None
     except (requests.RequestException, ValueError):
+        return None
+
+
+def _masters_sync(fen: str) -> bool:
+    """Returns True only if the position has ≥ _MASTERS_MIN_GAMES master
+    games — a popularity-gated check, closer to chess.com's Book rule."""
+    data = _masters_fetch(fen, with_top_moves=False)
+    if not data:
         return False
+    total = int(data.get("white", 0) + data.get("draws", 0) + data.get("black", 0))
+    return total >= _MASTERS_MIN_GAMES
 
 
 async def masters_in_book(fen: str) -> bool:
@@ -107,3 +128,35 @@ async def masters_in_book(fen: str) -> bool:
         result = await asyncio.to_thread(_masters_sync, fen)
         _MASTERS_CACHE[key] = result
         return result
+
+
+async def masters_top_moves(fen: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Return the top master replies for a position with win percentages.
+
+    Output: list of dicts {san, uci, white, draws, black, total, white_pct,
+    draw_pct, black_pct}. Empty list on any failure. Cached per position.
+    """
+    key = _key(fen)
+    cached = _MASTERS_DETAIL_CACHE.get(key)
+    if cached is None:
+        data = await asyncio.to_thread(
+            lambda: _masters_fetch(fen, with_top_moves=True)
+        )
+        cached = data or {}
+        _MASTERS_DETAIL_CACHE[key] = cached
+    moves_data = cached.get("moves") or []
+    out: list[dict[str, Any]] = []
+    for m in moves_data[:limit]:
+        w, d, b = int(m.get("white", 0)), int(m.get("draws", 0)), int(m.get("black", 0))
+        total = w + d + b
+        if total == 0:
+            continue
+        out.append({
+            "san": m.get("san", ""),
+            "uci": m.get("uci", ""),
+            "white": w, "draws": d, "black": b, "total": total,
+            "white_pct": round(100.0 * w / total, 1),
+            "draw_pct": round(100.0 * d / total, 1),
+            "black_pct": round(100.0 * b / total, 1),
+        })
+    return out
