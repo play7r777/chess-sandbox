@@ -370,9 +370,24 @@ def _classify(
             return "brilliant", "Бриллиантовый ход — мат через жертву"
         return "best", "Мат!"
 
-    # Allowed checkmate: this move loses to a forced mate.
+    # We end up in a position where the opponent has a forced mate.
     if eval_after_cp <= -MATE_SCORE + 1000:
         mate_in = max(1, MATE_SCORE + eval_after_cp)
+        # If we were already losing to mate before this move (i.e. every
+        # legal reply leads to mate) then we did *not* blunder — we
+        # played the best (or a best-equivalent) defensive try.
+        already_lost_to_mate = eval_before_cp <= -MATE_SCORE + 1000
+        if already_lost_to_mate:
+            if is_top1:
+                return "best", f"Лучшая попытка в проигранной позиции (мат в {mate_in})"
+            # Even in a lost position we can speed up our own demise.
+            before_mate_in = max(1, MATE_SCORE + eval_before_cp)
+            if mate_in <= before_mate_in:
+                # Holding-out at least as long → just call it Good.
+                return "good", f"Тянет сопротивление (мат в {mate_in})"
+            # Significantly shorter mate than what was forced → mistake.
+            return "mistake", f"Ускорил мат ({before_mate_in} → {mate_in})"
+        # We were not previously losing to mate → genuine blunder.
         return "blunder", f"Подставился под мат в {mate_in}"
 
     # Book: position is in the opening database.
