@@ -318,6 +318,7 @@ body.mode-legal .mode-toggle { display: none !important; }
 .review-moves .cls-excellent  .icon, .review-summary .pill.cls-excellent  { color: #62de9b; }
 .review-moves .cls-good       .icon, .review-summary .pill.cls-good       { color: #b6e07c; }
 .review-moves .cls-book       .icon, .review-summary .pill.cls-book       { color: #c8a55b; }
+.review-moves .cls-forced     .icon, .review-summary .pill.cls-forced     { color: #8e8ba0; }
 .review-moves .cls-inaccuracy .icon, .review-summary .pill.cls-inaccuracy { color: #f0c958; }
 .review-moves .cls-mistake    .icon, .review-summary .pill.cls-mistake    { color: #f08c4a; }
 .review-moves .cls-blunder    .icon, .review-summary .pill.cls-blunder    { color: #f15464; }

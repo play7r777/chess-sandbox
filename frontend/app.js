@@ -1200,18 +1200,19 @@ document.getElementById("btn-mode-sandbox").addEventListener("click", () => {
 
 const REVIEW_ICONS = {
   brilliant: "!!", great: "!", best: "★", excellent: "✓",
-  good: "✓", book: "📖", inaccuracy: "?!", mistake: "?",
-  blunder: "??", miss: "✗",
+  good: "✓", book: "📖", forced: "⛓",
+  inaccuracy: "?!", mistake: "?", blunder: "??", miss: "✗",
 };
 const REVIEW_LABELS = {
   brilliant: "Бриллиант", great: "Великолепный", best: "Лучший",
   excellent: "Превосходный", good: "Хороший", book: "Теория",
+  forced: "Вынужденный",
   inaccuracy: "Неточность", mistake: "Ошибка",
   blunder: "Грубая ошибка", miss: "Упущенная победа",
 };
 
 const REVIEW_ORDER = [
-  "brilliant","great","best","excellent","good","book",
+  "brilliant","great","best","excellent","good","book","forced",
   "inaccuracy","mistake","blunder","miss",
 ];
 

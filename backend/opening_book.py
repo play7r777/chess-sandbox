@@ -14,14 +14,24 @@ and is a strong proxy for chess.com's `Book` classification.
 """
 from __future__ import annotations
 
+import asyncio
 import gzip
 import logging
 from pathlib import Path
+
+import requests  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
 _DATA_FILE = Path(__file__).parent / "data" / "openings.txt.gz"
 _BOOK: set[str] | None = None
+
+# Lichess Masters opening explorer — free, public, no auth. Returns a JSON
+# body with a `white`/`black`/`draws` count and a list of master games
+# for any FEN in their 2.4M+ game corpus (avg rating ≥ 2200).
+_MASTERS_URL = "https://explorer.lichess.ovh/masters"
+_MASTERS_CACHE: dict[str, bool] = {}
+_MASTERS_LOCK = asyncio.Lock()
 
 
 def _load() -> set[str]:
@@ -55,3 +65,45 @@ def is_book_position(fen: str) -> bool:
 
 def book_size() -> int:
     return len(_load())
+
+
+def _masters_sync(fen: str) -> bool:
+    """Blocking call to the Lichess Masters explorer. Returns True if
+    the given position has at least one master-level game. Any network
+    failure returns False (treated as "unknown — not in book")."""
+    try:
+        r = requests.get(
+            _MASTERS_URL,
+            params={"fen": fen, "moves": 0, "topGames": 0, "recentGames": 0},
+            headers={"Accept": "application/json"},
+            timeout=4,
+        )
+        if r.status_code != 200:
+            return False
+        data = r.json()
+        total = int(data.get("white", 0) + data.get("draws", 0) + data.get("black", 0))
+        return total > 0
+    except (requests.RequestException, ValueError):
+        return False
+
+
+async def masters_in_book(fen: str) -> bool:
+    """Async-friendly Lichess Masters lookup with an in-process cache.
+
+    This is a best-effort augmentation on top of the local ECO book:
+    we only call it when the local lookup misses AND we're still in
+    the first 20 moves. Cache is process-global so each unique FEN
+    hits the network at most once per session.
+    """
+    key = _key(fen)
+    cached = _MASTERS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    async with _MASTERS_LOCK:
+        # Re-check in case another concurrent request populated it.
+        cached = _MASTERS_CACHE.get(key)
+        if cached is not None:
+            return cached
+        result = await asyncio.to_thread(_masters_sync, fen)
+        _MASTERS_CACHE[key] = result
+        return result

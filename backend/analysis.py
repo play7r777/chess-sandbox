@@ -35,7 +35,7 @@ import chess
 import chess.pgn
 import requests  # type: ignore[import-untyped]
 
-from .opening_book import is_book_position
+from .opening_book import is_book_position, masters_in_book
 from .stockfish_engine import engine
 
 USER_AGENT = (
@@ -116,6 +116,7 @@ CLASS_LABELS = [
     "excellent",
     "good",
     "book",
+    "forced",
     "inaccuracy",
     "mistake",
     "blunder",
@@ -454,12 +455,85 @@ def _coach_hints(
             if captured is not None and _piece_value(captured) >= 320:
                 hints.append("Лучший ход выигрывал материал")
 
+    # 6) Pinned piece created by the move (we pin an opponent piece).
+    for sq in chess.SQUARES:
+        p = board_after.piece_at(sq)
+        if p is None or p.color == mover:
+            continue
+        # python-chess's is_pinned checks if the given side's piece is pinned.
+        if board_after.is_pinned(p.color, sq) and not board_before.is_pinned(
+            p.color, sq
+        ):
+            if _piece_value(p) >= 320 and eval_after_cp > eval_before_cp - 30:
+                hints.append("Создал связку на фигуру соперника")
+                break
+
+    # 7) Weak back-rank — mover's king has no pawn/piece escape
+    #    squares on its back rank after the move.
+    if king_sq is not None:
+        back_rank = 0 if mover == chess.WHITE else 7
+        if chess.square_rank(king_sq) == back_rank:
+            escape_rank = 1 if mover == chess.WHITE else 6
+            # Count non-pawn escape squares in front of the king.
+            escape_squares: list[int] = []
+            for df in (-1, 0, 1):
+                f = chess.square_file(king_sq) + df
+                if 0 <= f <= 7:
+                    esc = chess.square(f, escape_rank)
+                    p = board_after.piece_at(esc)
+                    if p is None:
+                        escape_squares.append(esc)
+            if not escape_squares and not is_top1 and eval_after_cp < eval_before_cp - 50:
+                hints.append("Слабая последняя горизонталь")
+
+    # 8) Doubled pawns created by the move (mover's own).
+    def _own_pawns_on_file(b: chess.Board, file_: int) -> int:
+        n = 0
+        for r in range(8):
+            piece = b.piece_at(chess.square(file_, r))
+            if piece is not None and piece.piece_type == chess.PAWN and piece.color == mover:
+                n += 1
+        return n
+
+    if move.promotion is None:
+        moved = board_before.piece_at(move.from_square)
+        if moved is not None and moved.piece_type == chess.PAWN:
+            file_after = chess.square_file(move.to_square)
+            if (
+                _own_pawns_on_file(board_after, file_after) >= 2
+                and _own_pawns_on_file(board_before, file_after)
+                < _own_pawns_on_file(board_after, file_after)
+                and not is_top1
+                and eval_after_cp < eval_before_cp - 30
+            ):
+                hints.append("Сдвоенные пешки")
+
     return hints
 
 
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
+
+
+def _game_phase(board: chess.Board) -> str:
+    """Classify a position as 'opening', 'middlegame', or 'endgame'.
+
+    Uses a simple material/phase score similar to Stockfish's:
+    queens=4, rooks=2, minors=1. score >= 18 = middlegame/opening,
+    <= 6 = endgame, else middlegame.
+    """
+    phase_score = 0
+    for piece_type, weight in (
+        (chess.QUEEN, 4), (chess.ROOK, 2), (chess.BISHOP, 1), (chess.KNIGHT, 1)
+    ):
+        phase_score += weight * len(board.pieces(piece_type, chess.WHITE))
+        phase_score += weight * len(board.pieces(piece_type, chess.BLACK))
+    if phase_score <= 6:
+        return "endgame"
+    if phase_score >= 18 and board.fullmove_number <= 12:
+        return "opening"
+    return "middlegame"
 
 
 def _classify(
@@ -473,6 +547,8 @@ def _classify(
     is_hidden_sacrifice: bool,
     in_book: bool,
     wp_loss: float,
+    phase: str,
+    is_forced: bool,
 ) -> tuple[str, str]:
     """Pick a label + short note for one move.
 
@@ -517,6 +593,11 @@ def _classify(
     if in_book:
         return "book", "Теория"
 
+    # Forced: only one legal move. Don't reward this — it wasn't a
+    # decision. Skip if the move is also terrible (still blunder).
+    if is_forced and wp_loss < 20.0:
+        return "forced", "Вынужденный ход — единственный легальный"
+
     # Mate-miss: had forced mate, no longer have it.
     if eval_before_cp >= MATE_SCORE - 1000 and eval_after_cp < MATE_SCORE - 1000:
         return "miss", f"Упущен мат ({_pretty_cp(eval_before_cp)} → {_pretty_cp(eval_after_cp)})"
@@ -526,12 +607,16 @@ def _classify(
 
     # Brilliant: top-1 + (material sacrifice OR hidden tactical
     # sacrifice — apparent hanging piece that opponent can't take) +
-    # still winning + we weren't in a hopelessly lost position before.
+    # still winning + we weren't in a hopelessly lost position + the
+    # position wasn't already decisively winning *before* the move
+    # (chess.com doesn't hand out Brilliant in overwhelming positions
+    # — you're just expected to play best moves there).
     if (
         (is_sacrifice or is_hidden_sacrifice)
         and is_top1
         and eval_after_cp >= 100
         and eval_before_cp >= -200
+        and eval_before_cp < 500
     ):
         if is_hidden_sacrifice and not is_sacrifice:
             return "brilliant", "Бриллиантовый ход — скрытая жертва (тактика)"
@@ -549,18 +634,24 @@ def _classify(
         return "best", "Лучший ход"
 
     # Win-percentage-loss (WP-loss) buckets, in % points (0..100).
-    # These are calibrated to match chess.com's classifier for typical
-    # equal positions; sacrificial / decisive positions are softened by
-    # the WP scale automatically. We *also* require a minimum cpl for
-    # the "Mistake" label so a small cp drop in a clearly-decisive
-    # position doesn't get tagged Mistake — that matches chess.com.
-    if wp_loss < 2.0:
+    # Phase-aware: endgame is stricter (small cp swings mean more
+    # there — engine eval is more accurate deep in simplified
+    # positions, and decisive positions flip more easily on one move),
+    # opening is a touch more forgiving since piece activity / prophylaxis
+    # aren't always captured by a one-line eval.
+    if phase == "endgame":
+        thr_excellent, thr_good, thr_inacc, thr_mistake = 1.5, 4.0, 8.0, 16.0
+    elif phase == "opening":
+        thr_excellent, thr_good, thr_inacc, thr_mistake = 2.5, 6.0, 12.0, 22.0
+    else:
+        thr_excellent, thr_good, thr_inacc, thr_mistake = 2.0, 5.0, 10.0, 20.0
+    if wp_loss < thr_excellent:
         return "excellent", "Превосходный"
-    if wp_loss < 5.0:
+    if wp_loss < thr_good:
         return "good", "Хороший"
-    if wp_loss < 10.0:
+    if wp_loss < thr_inacc:
         return "inaccuracy", f"Неточность (−{cpl} cp)"
-    if wp_loss < 20.0 or cpl < 200:
+    if wp_loss < thr_mistake or cpl < 200:
         if cpl < 80:
             return "good", "Хороший"
         if cpl < 150:
@@ -691,9 +782,21 @@ async def analyse_game(
         # (could be captured by a cheaper attacker), but the engine's
         # top reply for the opponent isn't to take it — meaning the
         # capture loses to a tactic (pin / discovered / back-rank).
+        #
+        # Guards against false positives:
+        #   * If the move was itself a capture of a piece of equal or
+        #     higher value (e.g. BxQ), it is a *winning trade*, not a
+        #     sacrifice — even if our piece is now hanging, we're already
+        #     net-ahead in material.
+        #   * If the opponent's best reply does capture our piece on the
+        #     same square, it's just a normal lost-piece blunder / trade.
         is_hidden_sac = False
+        moving_piece_val = _piece_value(pre_board.piece_at(move.from_square))
+        captured_piece_val = _piece_value(pre_board.piece_at(move.to_square))
+        net_winning_trade = captured_piece_val >= moving_piece_val
         if (
             not is_sac
+            and not net_winning_trade
             and board.piece_at(move.to_square) is not None
             and _looks_hanging(board, move.to_square)
             and infos_after
@@ -713,7 +816,21 @@ async def analyse_game(
 
         # Book lookup: position before the move must be in the book AND
         # the move itself must keep us in the book (else it's a deviation).
+        # Local ECO book is consulted first; if either position is unknown
+        # we optionally fall back to the Lichess Masters API (much bigger
+        # corpus — millions of 2200+ ELO master games).
         in_book = is_book_position(fen_before) and is_book_position(board.fen())
+        if not in_book and pre_board.fullmove_number <= 20:
+            in_book = (
+                await masters_in_book(fen_before)
+                and await masters_in_book(board.fen())
+            )
+
+        # Phase + forced-move detection: run before `_classify` so
+        # phase-aware WP thresholds and Forced branch kick in.
+        phase = _game_phase(pre_board)
+        # legal move count BEFORE the move was played
+        is_forced = len(list(pre_board.legal_moves)) == 1
 
         label, note = _classify(
             cpl=cpl,
@@ -725,6 +842,8 @@ async def analyse_game(
             is_hidden_sacrifice=is_hidden_sac,
             in_book=in_book,
             wp_loss=wp_loss_pct,
+            phase=phase,
+            is_forced=is_forced,
         )
         counts[label] = counts.get(label, 0) + 1
 
