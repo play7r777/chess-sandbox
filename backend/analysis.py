@@ -463,6 +463,13 @@ async def analyse_game(
         raise RuntimeError(
             "Stockfish is not configured. Start the engine first via the UI."
         )
+    # Always require *some* engine limit. If the caller explicitly
+    # passes both as None we fall back to a sane default depth — this
+    # avoids ever issuing chess.engine.Limit(time=None, depth=None),
+    # which would let Stockfish search indefinitely and lock the
+    # engine for any concurrent request.
+    if movetime_ms is None and depth is None:
+        depth = 22
     board = chess.Board(starting_fen)
     analyses: list[MoveAnalysis] = []
     accuracies: dict[chess.Color, list[float]] = {chess.WHITE: [], chess.BLACK: []}

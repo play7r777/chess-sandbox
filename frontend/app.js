@@ -824,15 +824,18 @@ function renderHistory() {
 
 async function engineMove() {
   if (!state.game.active) return;
-  const fen = state.game.chess.fen();
+  // Capture the game object at request time so a stop+restart during
+  // the await can't make us apply a stale move to the new game.
+  const myGame = state.game;
+  const fen = myGame.chess.fen();
   document.getElementById("play-status").textContent = "Stockfish думает…";
   try {
     const r = await api("/api/engine/best_move", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fen, movetime_ms: state.game.movetimeMs }),
+      body: JSON.stringify({ fen, movetime_ms: myGame.movetimeMs }),
     });
-    if (state.game.stopRequested) return;
+    if (myGame !== state.game || myGame.stopRequested) return;
     if (!r.best_move) {
       setStatus("Stockfish не вернул ход.", "error");
       stopGame();
@@ -841,7 +844,7 @@ async function engineMove() {
     const from = r.best_move.slice(0, 2);
     const to = r.best_move.slice(2, 4);
     const promo = r.best_move.length > 4 ? r.best_move[4] : undefined;
-    const move = state.game.chess.move({ from, to, promotion: promo || "q" });
+    const move = myGame.chess.move({ from, to, promotion: promo || "q" });
     if (!move) {
       setStatus("Движок предложил нелегальный ход: " + r.best_move, "error");
       stopGame();
@@ -851,10 +854,11 @@ async function engineMove() {
     document.getElementById("play-status").textContent =
       `Ход движка: ${move.san} ${formatEval(r)}. ${gameStateText()}`;
     if (checkGameOver()) return;
-    if (state.game.chess.turn() === state.game.playerColor) {
+    if (myGame.chess.turn() === myGame.playerColor) {
       document.getElementById("play-status").textContent += " Ваш ход.";
     }
   } catch (err) {
+    if (myGame !== state.game) return;
     setStatus("Stockfish: " + err.message, "error");
     stopGame();
   }
