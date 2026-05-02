@@ -382,10 +382,11 @@ def _classify(
                 return "best", f"Лучшая попытка в проигранной позиции (мат в {mate_in})"
             # Even in a lost position we can speed up our own demise.
             before_mate_in = max(1, MATE_SCORE + eval_before_cp)
-            if mate_in <= before_mate_in:
+            # Larger mate_in = mate is further away = better defence.
+            if mate_in >= before_mate_in:
                 # Holding-out at least as long → just call it Good.
                 return "good", f"Тянет сопротивление (мат в {mate_in})"
-            # Significantly shorter mate than what was forced → mistake.
+            # Shorter mate than what was forced → speeds up our own demise.
             return "mistake", f"Ускорил мат ({before_mate_in} → {mate_in})"
         # We were not previously losing to mate → genuine blunder.
         return "blunder", f"Подставился под мат в {mate_in}"
