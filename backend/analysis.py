@@ -911,6 +911,10 @@ async def analyse_game(
         ):
             eval_after_cp = 0
             cpl = max(0, eval_before_cp)
+            # Recompute dependent WP metrics so `_classify` (which
+            # reads wp_loss) sees the correct post-draw delta.
+            wp_after = _winning_chances(eval_after_cp)
+            wp_loss_pct = max(0.0, (wp_before - wp_after) * 100.0)
 
         label, note = _classify(
             cpl=cpl,
