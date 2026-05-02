@@ -1213,8 +1213,14 @@ const review = {
 };
 
 function fmtCp(cp) {
-  if (cp >= 99000) return `#+${100000 - cp}`;
-  if (cp <= -99000) return `#-${cp + 100000}`;
+  if (cp >= 99000) {
+    const n = 100000 - cp;
+    return n === 0 ? "#" : `#${n}`;
+  }
+  if (cp <= -99000) {
+    const n = cp + 100000;
+    return n === 0 ? "−#" : `−#${n}`;
+  }
   const v = (cp / 100).toFixed(2);
   return cp > 0 ? `+${v}` : v;
 }
@@ -1407,10 +1413,17 @@ function renderBoardHint() {
   const m = moves[review.activeIdx];
   if (!m || !m.best_move_san) { host.textContent = ""; return; }
   const sideLabel = m.side === "w" ? "Белые" : "Чёрные";
+  const playedSan = m.move_san;
+  const bestSan = m.best_move_san || "";
+  const playedEval = fmtCp(m.eval_after_cp);
+  const bestEval = fmtCp(m.eval_before_cp);
+  const showPlayedEval = !/[+#]$/.test(playedSan);
+  const showBestEval = !/[+#]$/.test(bestSan);
   if (m.move_uci === m.best_move_uci) {
-    host.innerHTML = `<span class="label">${sideLabel} сыграли лучший ход:</span><span class="san">${m.move_san}</span><span class="eval">${fmtCp(m.eval_after_cp)}</span>`;
+    host.innerHTML = `<span class="label">${sideLabel} сыграли лучший ход:</span><span class="san">${playedSan}</span>${showPlayedEval ? `<span class="eval">${playedEval}</span>` : ""}`;
   } else {
-    host.innerHTML = `<span class="label">${sideLabel} сыграли ${m.move_san} (${fmtCp(m.eval_after_cp)}). Лучше было:</span><span class="san">${m.best_move_san}</span><span class="eval">${fmtCp(m.eval_before_cp)}</span>`;
+    const playedTail = showPlayedEval ? ` (${playedEval})` : "";
+    host.innerHTML = `<span class="label">${sideLabel} сыграли ${playedSan}${playedTail}. Лучше было:</span><span class="san">${bestSan}</span>${showBestEval ? `<span class="eval">${bestEval}</span>` : ""}`;
   }
 }
 

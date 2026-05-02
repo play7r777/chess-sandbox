@@ -329,6 +329,17 @@ def _classify(
     is_sacrifice: bool,
 ) -> tuple[str, str]:
     """Pick a label + short note for one move."""
+    # Checkmate delivered: always at least Best (Brilliant if sacrificial).
+    if eval_after_cp >= MATE_SCORE - 1:
+        if is_sacrifice:
+            return "brilliant", "Бриллиантовый ход — мат через жертву"
+        return "best", "Мат!"
+
+    # Allowed checkmate: this move loses to a forced mate.
+    if eval_after_cp <= -MATE_SCORE + 1000:
+        mate_in = max(1, MATE_SCORE + eval_after_cp)
+        return "blunder", f"Подставился под мат в {mate_in}"
+
     # Book: very early in the game and the move is essentially perfect.
     # We don't have an opening DB, so this is a heuristic — limit to first
     # few full moves and very small CPL so non-theoretical moves still get a
@@ -336,12 +347,12 @@ def _classify(
     if ply_index < 10 and cpl <= 10 and is_top1:
         return "book", "Теория"
 
+    # Mate-miss: had forced mate, no longer have it.
+    if eval_before_cp >= MATE_SCORE - 1000 and eval_after_cp < MATE_SCORE - 1000:
+        return "miss", f"Упущен мат ({_pretty_cp(eval_before_cp)} → {_pretty_cp(eval_after_cp)})"
     # Miss: was clearly winning, now isn't.
     if eval_before_cp >= 300 and eval_after_cp < 100 and cpl >= 100:
         return "miss", f"Упущена победа ({_pretty_cp(eval_before_cp)} → {_pretty_cp(eval_after_cp)})"
-    # Mate-miss
-    if eval_before_cp >= MATE_SCORE - 1000 and eval_after_cp < MATE_SCORE - 1000:
-        return "miss", "Упущен мат"
 
     if is_top1 and is_sacrifice and eval_after_cp >= 100:
         return "brilliant", "Бриллиантовый ход — жертва, остаётся выигрышной позиция"
@@ -450,17 +461,29 @@ async def analyse_game(
             top2 = _score_to_cp(infos_before[1], side_color)
             only_move_gap_cp = max(0, top1 - top2)
 
-        # Eval after the played move: analyse the resulting position with
-        # multipv=1 (cheaper) and flip POV back to the mover.
+        # Eval after the played move: handle terminal states first (mate,
+        # stalemate, draw) before consulting the engine — engines return
+        # ambiguous mate(0) scores on already-finished positions.
         board.push(move)
-        infos_after = await engine.analyse_raw(
-            board.fen(), movetime_ms=movetime_ms, multipv=1
-        )
-        eval_after_cp = (
-            _score_to_cp(infos_after[0], side_color)
-            if infos_after
-            else eval_before_cp
-        )
+        if board.is_checkmate():
+            # The mover just delivered mate.
+            eval_after_cp = MATE_SCORE
+        elif (
+            board.is_stalemate()
+            or board.is_insufficient_material()
+            or board.is_seventyfive_moves()
+            or board.is_fivefold_repetition()
+        ):
+            eval_after_cp = 0
+        else:
+            infos_after = await engine.analyse_raw(
+                board.fen(), movetime_ms=movetime_ms, multipv=1
+            )
+            eval_after_cp = (
+                _score_to_cp(infos_after[0], side_color)
+                if infos_after
+                else eval_before_cp
+            )
 
         cpl = max(0, eval_before_cp - eval_after_cp)
 
