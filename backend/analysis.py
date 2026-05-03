@@ -323,6 +323,16 @@ def _is_sacrifice(board_before: chess.Board, move: chess.Move) -> bool:
     after the move is played: if the opponent can win material from
     the to-square via a capture sequence (and the move wasn't a
     simple equal-or-better trade), it counts as a sacrifice.
+
+    Filters out non-sacrifices that look like one on paper:
+
+    * Equal-or-better-trade: capturing a piece of equal-or-greater
+      value than the mover (RxR, BxB, NxB, …) — that's a fair trade.
+    * Forced-trade rescue: the moving piece was already under attack
+      by opponent on its source square, and the move's net SEE result
+      is no worse than just losing the piece on the source square
+      would have been. Saving a hanging piece via a trade is not a
+      sacrifice — it's defence.
     """
     moving_piece = board_before.piece_at(move.from_square)
     if moving_piece is None or moving_piece.piece_type == chess.PAWN:
@@ -340,7 +350,19 @@ def _is_sacrifice(board_before: chess.Board, move: chess.Move) -> bool:
     # (pawn promotion/etc. ignored — close enough).
     net_loss = opp_gain - captured_value
     # Require a meaningful loss (≥ 200 cp ≈ minor piece) to count as Brilliant.
-    return net_loss >= 200
+    if net_loss < 200:
+        return False
+    # Forced-trade rescue: if our piece was already under attack on
+    # its from-square, we may just be saving it by trading instead
+    # of letting it be taken for free. Compare what we lose by playing
+    # the move (net_loss) with what we'd lose by leaving the piece
+    # on its source square (SEE there). If trading is at least as
+    # good as standing still, this is not a sacrifice.
+    if board_before.attackers(not moving_piece.color, move.from_square):
+        standing_loss = _see(board_before, move.from_square, not moving_piece.color)
+        if standing_loss >= net_loss:
+            return False
+    return True
 
 
 def _looks_hanging(board: chess.Board, sq: chess.Square) -> bool:
@@ -619,10 +641,13 @@ def _classify(
     # still winning + we weren't in a hopelessly lost position + the
     # position wasn't already decisively winning *before* the move
     # (chess.com doesn't hand out Brilliant in overwhelming positions
-    # — you're just expected to play best moves there).
+    # — you're just expected to play best moves there). Recaptures
+    # and forced moves are excluded — those are routine, not creative.
     if (
         (is_sacrifice or is_hidden_sacrifice)
         and is_top1
+        and not is_recapture
+        and not is_forced
         and eval_after_cp >= 100
         and eval_before_cp >= -200
         and eval_before_cp < 500
@@ -851,15 +876,22 @@ async def analyse_game(
         #     higher value (e.g. BxQ), it is a *winning trade*, not a
         #     sacrifice — even if our piece is now hanging, we're already
         #     net-ahead in material.
+        #   * If the moved piece was already under attack on its
+        #     from-square — we are saving a hanging piece by trading,
+        #     not sacrificing.
         #   * If the opponent's best reply does capture our piece on the
         #     same square, it's just a normal lost-piece blunder / trade.
         is_hidden_sac = False
         moving_piece_val = _piece_value(pre_board.piece_at(move.from_square))
         captured_piece_val = _piece_value(pre_board.piece_at(move.to_square))
         net_winning_trade = captured_piece_val >= moving_piece_val
+        from_was_attacked = bool(
+            pre_board.attackers(not pre_board.turn, move.from_square)
+        )
         if (
             not is_sac
             and not net_winning_trade
+            and not from_was_attacked
             and board.piece_at(move.to_square) is not None
             and _looks_hanging(board, move.to_square)
             and infos_after
