@@ -397,11 +397,11 @@ body.mode-legal .mode-toggle { display: none !important; }
 .review-moves .cls-brilliant  .icon, .review-summary .pill.cls-brilliant  { color: #26c2a3; }
 .review-moves .cls-great      .icon, .review-summary .pill.cls-great      { color: #749bbf; }
 .review-moves .cls-best       .icon, .review-summary .pill.cls-best       { color: #81b64c; }
-.review-moves .cls-excellent  .icon, .review-summary .pill.cls-excellent  { color: #95b776; }
-.review-moves .cls-good       .icon, .review-summary .pill.cls-good       { color: #95af6f; }
+.review-moves .cls-excellent  .icon, .review-summary .pill.cls-excellent  { color: #81b64c; }
+.review-moves .cls-good       .icon, .review-summary .pill.cls-good       { color: #95b776; }
 .review-moves .cls-book       .icon, .review-summary .pill.cls-book       { color: #d5a47d; }
-.review-moves .cls-forced     .icon, .review-summary .pill.cls-forced     { color: #95978e; }
-.review-moves .cls-inaccuracy .icon, .review-summary .pill.cls-inaccuracy { color: #f7c045; }
+.review-moves .cls-forced     .icon, .review-summary .pill.cls-forced     { color: #96af8b; }
+.review-moves .cls-inaccuracy .icon, .review-summary .pill.cls-inaccuracy { color: #f7c631; }
 .review-moves .cls-mistake    .icon, .review-summary .pill.cls-mistake    { color: #ffa459; }
 .review-moves .cls-blunder    .icon, .review-summary .pill.cls-blunder    { color: #fa412d; }
 .review-moves .cls-miss       .icon, .review-summary .pill.cls-miss       { color: #ff7769; }
@@ -432,17 +432,17 @@ body.mode-legal .mode-toggle { display: none !important; }
 .square.last-move-cls.cls-brilliant  { background-image: linear-gradient(rgba( 38, 194, 163, 0.55), rgba( 38, 194, 163, 0.55)); }
 .square.last-move-cls.cls-great      { background-image: linear-gradient(rgba(116, 155, 191, 0.55), rgba(116, 155, 191, 0.55)); }
 .square.last-move-cls.cls-best       { background-image: linear-gradient(rgba(129, 182,  76, 0.55), rgba(129, 182,  76, 0.55)); }
-.square.last-move-cls.cls-excellent  { background-image: linear-gradient(rgba(149, 183, 118, 0.50), rgba(149, 183, 118, 0.50)); }
-.square.last-move-cls.cls-good       { background-image: linear-gradient(rgba(149, 175, 111, 0.50), rgba(149, 175, 111, 0.50)); }
+.square.last-move-cls.cls-excellent  { background-image: linear-gradient(rgba(129, 182,  76, 0.50), rgba(129, 182,  76, 0.50)); }
+.square.last-move-cls.cls-good       { background-image: linear-gradient(rgba(149, 183, 118, 0.50), rgba(149, 183, 118, 0.50)); }
 .square.last-move-cls.cls-book       { background-image: linear-gradient(rgba(213, 164, 125, 0.50), rgba(213, 164, 125, 0.50)); }
-.square.last-move-cls.cls-forced     { background-image: linear-gradient(rgba(149, 151, 142, 0.50), rgba(149, 151, 142, 0.50)); }
-.square.last-move-cls.cls-inaccuracy { background-image: linear-gradient(rgba(247, 192,  69, 0.60), rgba(247, 192,  69, 0.60)); }
+.square.last-move-cls.cls-forced     { background-image: linear-gradient(rgba(150, 175, 139, 0.50), rgba(150, 175, 139, 0.50)); }
+.square.last-move-cls.cls-inaccuracy { background-image: linear-gradient(rgba(247, 198,  49, 0.60), rgba(247, 198,  49, 0.60)); }
 .square.last-move-cls.cls-mistake    { background-image: linear-gradient(rgba(255, 164,  89, 0.60), rgba(255, 164,  89, 0.60)); }
 .square.last-move-cls.cls-blunder    { background-image: linear-gradient(rgba(250,  65,  45, 0.62), rgba(250,  65,  45, 0.62)); }
 .square.last-move-cls.cls-miss       { background-image: linear-gradient(rgba(255, 119, 105, 0.60), rgba(255, 119, 105, 0.60)); }
 
-.square.best-from { box-shadow: inset 0 0 0 3px rgba(94, 170, 70, 0.55); }
-.square.best-to   { box-shadow: inset 0 0 0 3px rgba(94, 170, 70, 0.85); }
+/* Green outline removed per user request — the colored square tint
+   alone communicates the move endpoints, no extra ring needed. */
 
 /* SVG arrow overlay for best move + PV preview. */
 .board .board-arrows {
