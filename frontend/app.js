@@ -513,21 +513,19 @@ function attachSquareHandlers(cell) {
       );
       e.dataTransfer.effectAllowed = "move";
       pieceEl.classList.add("dragging");
-      // Mirror click-to-select behaviour: light up the legal targets
-      // for the piece being dragged so the user can see where it's
-      // allowed to land.
+      // Light up legal targets for the piece being dragged so the
+      // user sees where it can land. We MUST NOT call renderBoard()
+      // here \u2014 rebuilding the DOM mid-dragstart destroys the source
+      // element and the browser cancels the drag. Instead we paint
+      // the classes directly on the existing cells.
       const fromSq = pieceEl.dataset.fromSquare;
-      if (fromSq) highlightLegalFromSquare(fromSq);
+      if (fromSq) paintDragLegalTargets(fromSq);
     });
     pieceEl.addEventListener("dragend", () => {
       pieceEl.classList.remove("dragging");
-      // The drop handler clears the highlights on a successful move;
-      // on a cancelled drag we still want them gone.
-      if (state.legalTargets.length || state.selectedSquare) {
-        state.selectedSquare = null;
-        state.legalTargets = [];
-        renderBoard();
-      }
+      // Clear paint-only highlights without touching state.legalTargets
+      // (those are owned by the click-select flow).
+      clearDragLegalTargets();
     });
   }
 }
@@ -678,27 +676,79 @@ function handleFreeplaySquareClick(squareName) {
   }
 }
 
-// Drag&drop helper: re-uses the same legal-target highlighter that
-// click-to-select would, dispatching to the right code path based on
-// whether a play-vs-engine session is active or we're in freeplay.
-function highlightLegalFromSquare(squareName) {
+// Drag&drop helper: paint legal-move/legal-capture classes on the
+// existing cell DOM nodes WITHOUT re-rendering the board (which would
+// destroy the dragstart source element and cancel the drag). Returns
+// the list of squares that were painted so the caller can pass it to
+// clearDragLegalTargets() if it wants \u2014 we also remember the painted
+// list in module state so dragend can find it after the DOM may have
+// been re-rendered for an unrelated reason.
+const _dragHighlightedSquares = new Set();
+
+function _legalTargetsForSquare(squareName) {
+  // Returns either { ok: true, chess, targets: [..] } describing legal
+  // landings for the piece on `squareName`, or { ok: false } if there
+  // are no legal targets to highlight (wrong colour, sandbox, etc.).
+  let c = null;
   if (state.game.active) {
-    const c = state.game.chess;
-    if (c.turn() !== state.game.playerColor) return;
-    const piece = c.get(squareName);
-    if (!piece || piece.color !== c.turn()) return;
-    selectSquare(squareName);
-    return;
+    c = state.game.chess;
+    if (c.turn() !== state.game.playerColor) return { ok: false };
+  } else if (state.legalMode) {
+    c = ensureFreeplayChess();
+  } else {
+    // Sandbox: any piece can go anywhere \u2014 no highlight to compute.
+    return { ok: false };
   }
-  if (state.legalMode) {
-    const c = ensureFreeplayChess();
-    if (!c) return;
-    const piece = c.get(squareName);
-    if (!piece || piece.color !== c.turn()) return;
-    selectFreeplaySquare(squareName);
+  if (!c) return { ok: false };
+  const piece = c.get(squareName);
+  if (!piece || piece.color !== c.turn()) return { ok: false };
+  const moves = c.moves({ square: squareName, verbose: true });
+  const targets = moves.map((m) => m.to);
+  // Mirror selectSquare/selectFreeplaySquare: also accept king-on-rook
+  // drag-targets for castling so the highlight reflects what the drop
+  // handler will actually accept.
+  for (const m of moves) {
+    if (m.flags && (m.flags.includes("k") || m.flags.includes("q"))) {
+      const rank = m.color === "w" ? "1" : "8";
+      const rookSq = m.flags.includes("k") ? "h" + rank : "a" + rank;
+      if (!targets.includes(rookSq)) targets.push(rookSq);
+    }
   }
-  // Sandbox mode: any piece can go anywhere, so there's nothing to
-  // highlight.
+  return { ok: true, chess: c, targets };
+}
+
+function paintDragLegalTargets(squareName) {
+  clearDragLegalTargets();
+  const r = _legalTargetsForSquare(squareName);
+  if (!r.ok) return;
+  const boardEl = document.getElementById("board");
+  if (!boardEl) return;
+  // Mark the source square as 'selected' so the user gets the same
+  // visual cue as click-to-select.
+  const fromCell = boardEl.querySelector(`.square[data-square="${squareName}"]`);
+  if (fromCell) {
+    fromCell.classList.add("selected");
+    _dragHighlightedSquares.add(squareName);
+  }
+  for (const sq of r.targets) {
+    const cell = boardEl.querySelector(`.square[data-square="${sq}"]`);
+    if (!cell) continue;
+    const piece = r.chess.get(sq);
+    cell.classList.add(piece ? "legal-capture" : "legal-move");
+    _dragHighlightedSquares.add(sq);
+  }
+}
+
+function clearDragLegalTargets() {
+  if (_dragHighlightedSquares.size === 0) return;
+  const boardEl = document.getElementById("board");
+  if (!boardEl) { _dragHighlightedSquares.clear(); return; }
+  for (const sq of _dragHighlightedSquares) {
+    const cell = boardEl.querySelector(`.square[data-square="${sq}"]`);
+    if (!cell) continue;
+    cell.classList.remove("legal-move", "legal-capture", "selected");
+  }
+  _dragHighlightedSquares.clear();
 }
 
 function selectFreeplaySquare(squareName) {
