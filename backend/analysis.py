@@ -603,11 +603,15 @@ def _classify(
     if is_forced and wp_loss < 20.0:
         return "forced", "Вынужденный ход — единственный легальный"
 
-    # Mate-miss: had forced mate, no longer have it.
-    if eval_before_cp >= MATE_SCORE - 1000 and eval_after_cp < MATE_SCORE - 1000:
+    # Mate-miss / win-miss only fire when the move is *not* the
+    # engine's top-1 recommendation. If the player picked the engine's
+    # best move and the eval still drops, that is the position's
+    # nature — not a missed opportunity — and should fall through to
+    # the Best/Excellent path below.
+    if not is_top1 and eval_before_cp >= MATE_SCORE - 1000 and eval_after_cp < MATE_SCORE - 1000:
         return "miss", f"Упущен мат ({_pretty_cp(eval_before_cp)} → {_pretty_cp(eval_after_cp)})"
     # Miss: was clearly winning, now isn't.
-    if eval_before_cp >= 300 and eval_after_cp < 100 and cpl >= 100:
+    if not is_top1 and eval_before_cp >= 300 and eval_after_cp < 100 and cpl >= 100:
         return "miss", f"Упущена победа ({_pretty_cp(eval_before_cp)} → {_pretty_cp(eval_after_cp)})"
 
     # Brilliant: top-1 + (material sacrifice OR hidden tactical
