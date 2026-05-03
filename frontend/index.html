@@ -11,6 +11,10 @@
       <div class="brand">
         <span class="brand-piece">♛</span>
         <span class="brand-name">Chess Sandbox</span>
+        <div class="view-tabs" role="tablist" aria-label="Режим интерфейса">
+          <button id="tab-main"     class="view-tab is-active" type="button" role="tab" aria-selected="true"  data-view="main">Main</button>
+          <button id="tab-analysis" class="view-tab"           type="button" role="tab" aria-selected="false" data-view="analysis">Analysis</button>
+        </div>
       </div>
       <div class="topbar-actions">
         <button id="btn-undo" type="button" title="Отменить (Ctrl+Z)" disabled>↶</button>
@@ -77,13 +81,13 @@
       </section>
 
       <aside class="sidebar">
-        <section class="palette">
+        <section class="palette" data-view="main">
           <h2>Палитра фигур <small>перетащи на доску</small></h2>
           <div class="palette-row" data-color="w" id="palette-white"></div>
           <div class="palette-row" data-color="b" id="palette-black"></div>
         </section>
 
-        <section class="panel" id="panel-engine">
+        <section class="panel" id="panel-engine" data-view="main">
           <h2>Движок Stockfish</h2>
           <div class="row">
             <label>
@@ -107,7 +111,7 @@
           </div>
         </section>
 
-        <section class="panel" id="panel-play">
+        <section class="panel" id="panel-play" data-view="main">
           <h2>Игра против Stockfish из этой позиции</h2>
           <div class="row">
             <label>
@@ -138,7 +142,7 @@
           <ol id="move-history" class="move-history"></ol>
         </section>
 
-        <section class="panel" id="panel-review">
+        <section class="panel" id="panel-review" data-view="analysis">
           <h2>Анализ партии (как chess.com)</h2>
           <div class="row">
             <input id="review-source" type="text" placeholder="https://www.chess.com/game/live/... или https://lichess.org/... или PGN" style="flex:1; min-width:260px;" />
@@ -161,7 +165,7 @@
           <ol id="review-moves" class="review-moves"></ol>
         </section>
 
-        <section class="panel" id="panel-recognize">
+        <section class="panel" id="panel-recognize" data-view="main">
           <h2>Распознать со скриншота</h2>
           <div id="recognize-dropzone" class="dropzone" tabindex="0">
             Вставь сюда (Ctrl+V) или брось файл — распознается автоматически.
@@ -174,7 +178,7 @@
           <div id="recognize-output" class="muted">Загрузите изображение шахматной доски.</div>
         </section>
 
-        <section class="panel" id="panel-about">
+        <section class="panel" id="panel-about" data-view="main">
           <h2>Подсказки</h2>
           <ul class="hints">
             <li>Перетащи фигуру с палитры на любую клетку, чтобы добавить.</li>

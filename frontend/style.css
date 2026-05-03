@@ -66,6 +66,42 @@ input:focus, select:focus, button:focus-visible {
   font-size: 18px; font-weight: 600;
 }
 .brand-piece { font-size: 28px; color: var(--accent); }
+
+/* View tabs (Main / Analysis) — sit immediately right of the brand. */
+.view-tabs {
+  display: inline-flex;
+  margin-left: 18px;
+  background: #1b2230;
+  border: 1px solid #2a3140;
+  border-radius: 999px;
+  padding: 3px;
+  gap: 2px;
+}
+.view-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: #9aa6bd;
+  font: 600 13px/1 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  letter-spacing: 0.02em;
+  padding: 7px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, transform 80ms ease;
+}
+.view-tab:hover { color: #d8e3f2; }
+.view-tab:active { transform: scale(0.97); }
+.view-tab.is-active {
+  background: #5eaa46;
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+}
+.view-tab:focus-visible { outline: 2px solid #5eaa46; outline-offset: 2px; }
+
+/* When a view is active we hide every sidebar section that doesn't
+   belong to it. The board area itself is always visible. */
+body.view-main     [data-view="analysis"] { display: none !important; }
+body.view-analysis [data-view="main"]     { display: none !important; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
 .mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }

@@ -1396,6 +1396,28 @@ if (dropzone) {
   });
 }
 
+// ---------- View tabs (Main / Analysis) ----------
+
+function setView(view) {
+  const v = view === "analysis" ? "analysis" : "main";
+  document.body.classList.toggle("view-main",     v === "main");
+  document.body.classList.toggle("view-analysis", v === "analysis");
+  document.querySelectorAll(".view-tab").forEach((btn) => {
+    const isActive = btn.dataset.view === v;
+    btn.classList.toggle("is-active", isActive);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  try { localStorage.setItem("cs.view", v); } catch (_) { /* ignore */ }
+}
+
+document.querySelectorAll(".view-tab").forEach((btn) => {
+  btn.addEventListener("click", () => setView(btn.dataset.view));
+});
+
+setView((() => {
+  try { return localStorage.getItem("cs.view") || "main"; } catch (_) { return "main"; }
+})());
+
 // ---------- Mode switch ----------
 
 function setBoardMode(legal) {
