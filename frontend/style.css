@@ -100,8 +100,8 @@ input:focus, select:focus, button:focus-visible {
 
 /* When a view is active we hide every sidebar section that doesn't
    belong to it. The board area itself is always visible. */
-body.view-main     [data-view="analysis"] { display: none !important; }
-body.view-analysis [data-view="main"]     { display: none !important; }
+body.view-main     .sidebar [data-view="analysis"] { display: none !important; }
+body.view-analysis .sidebar [data-view="main"]     { display: none !important; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
 .mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }
