@@ -142,7 +142,15 @@ async def engine_best_move(req: BestMoveRequest) -> dict[str, Any]:
         chess.Board(req.fen)  # validate
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid FEN: {exc}") from exc
-    movetime = req.movetime_ms or settings.stockfish_default_movetime_ms
+    # Only fall back to the default movetime when the caller passed neither
+    # a movetime nor a depth — otherwise a depth-only request would be
+    # silently capped by the default 1s search limit.
+    if req.movetime_ms is not None:
+        movetime: int | None = req.movetime_ms
+    elif req.depth is not None:
+        movetime = None
+    else:
+        movetime = settings.stockfish_default_movetime_ms
     try:
         result = await engine.best_move(req.fen, movetime_ms=movetime, depth=req.depth)
     except Exception as exc:
@@ -158,7 +166,12 @@ async def engine_analyse(req: AnalyseRequest) -> dict[str, Any]:
         chess.Board(req.fen)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid FEN: {exc}") from exc
-    movetime = req.movetime_ms or settings.stockfish_default_movetime_ms
+    if req.movetime_ms is not None:
+        movetime: int | None = req.movetime_ms
+    elif req.depth is not None:
+        movetime = None
+    else:
+        movetime = settings.stockfish_default_movetime_ms
     try:
         results = await engine.analyse(
             req.fen, movetime_ms=movetime, depth=req.depth, multipv=req.multipv
