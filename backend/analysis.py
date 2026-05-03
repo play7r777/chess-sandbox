@@ -962,7 +962,7 @@ async def analyse_game(
         best_pv_san: list[str] = []
         if best_pv:
             sim = pre_board.copy(stack=False)
-            for pv_move in best_pv[:5]:
+            for pv_move in best_pv[:10]:
                 if pv_move not in sim.legal_moves:
                     break
                 best_pv_uci.append(pv_move.uci())

@@ -74,6 +74,21 @@ const state = {
     running: false,
     path: null,
   },
+  // Review-mode visuals.
+  bestArrow: null,        // { from, to } — primary green arrow on board
+  bestPv: null,           // [uci, uci, ...] — full best line for translucent PV arrows
+  reviewBadge: null,      // { square, classification } — chess.com-style icon
+  // Drill mode (practice critical moments).
+  drill: {
+    active: false,
+    moments: [],          // copy of key_moments to walk through
+    idx: 0,               // current moment index
+    expectedUci: null,
+    expectedSan: null,
+    side: null,           // 'w' | 'b' — side to move in the drill position
+    plyIdx: null,         // ply index in analysis (for navigation)
+    feedback: null,       // 'correct' | 'wrong' | null
+  },
 };
 
 // ---------- Helpers: board indexing ----------
@@ -90,6 +105,131 @@ function idxFromSquareName(name) {
   const rank = parseInt(name[1], 10);
   if (file < 0 || !rank) return -1;
   return (8 - rank) * 8 + file;
+}
+
+// SVG-coord centre (in board-units, 0..8) for a given square name,
+// honouring the current flip orientation. Used by the arrow overlay.
+function squareToBoardXY(sq) {
+  const fileIdx = FILES.indexOf(sq[0]);
+  const rankIdx = parseInt(sq[1], 10);
+  if (fileIdx < 0 || !rankIdx) return null;
+  const visualCol = state.flipped ? 7 - fileIdx : fileIdx;
+  const visualRow = state.flipped ? rankIdx - 1 : 8 - rankIdx;
+  return { x: visualCol + 0.5, y: visualRow + 0.5 };
+}
+
+// Glyphs rendered inside the round chess.com-style classification
+// badge that floats over the destination square. Kept compact so
+// they fit a 30 px circle on every board size.
+const REVIEW_BADGE_GLYPHS = {
+  brilliant:  "!!",
+  great:      "!",
+  best:       "★",
+  excellent:  "✓",
+  good:       "✓",
+  book:       "\u{1F4D6}",   // 📖
+  forced:     "⛓",
+  inaccuracy: "?!",
+  mistake:    "?",
+  blunder:    "??",
+  miss:       "✕",
+};
+
+function makeReviewBadge(cls) {
+  const wrap = document.createElement("span");
+  wrap.className = "review-badge cls-" + cls;
+  const inner = document.createElement("span");
+  inner.className = "review-badge-glyph";
+  inner.textContent = REVIEW_BADGE_GLYPHS[cls] || "";
+  wrap.appendChild(inner);
+  return wrap;
+}
+
+// Build a green SVG-arrow overlay over the board (Stockfish's best
+// move + a couple of plies of the principal variation as fading
+// translucent arrows behind it). Called every renderBoard().
+function renderBoardArrows() {
+  const existing = boardEl.querySelector(".board-arrows");
+  if (existing) existing.remove();
+  const hasBest = !!state.bestArrow;
+  const hasPv   = Array.isArray(state.bestPv) && state.bestPv.length > 0;
+  if (!hasBest && !hasPv) return;
+
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("class", "board-arrows");
+  svg.setAttribute("viewBox", "0 0 8 8");
+  svg.setAttribute("preserveAspectRatio", "none");
+
+  // Reusable arrowhead marker per opacity level.
+  const defs = document.createElementNS(NS, "defs");
+  const tints = [
+    { id: "arrow-best", fill: "#5eaa46" },
+    { id: "arrow-pv1",  fill: "rgba(94, 170, 70, 0.55)" },
+    { id: "arrow-pv2",  fill: "rgba(94, 170, 70, 0.32)" },
+  ];
+  for (const t of tints) {
+    const m = document.createElementNS(NS, "marker");
+    m.setAttribute("id", t.id);
+    m.setAttribute("viewBox", "0 0 10 10");
+    m.setAttribute("refX", "7");
+    m.setAttribute("refY", "5");
+    m.setAttribute("markerWidth", "3.4");
+    m.setAttribute("markerHeight", "3.4");
+    m.setAttribute("orient", "auto");
+    const tip = document.createElementNS(NS, "path");
+    tip.setAttribute("d", "M0,1 L9,5 L0,9 L2.5,5 Z");
+    tip.setAttribute("fill", t.fill);
+    m.appendChild(tip);
+    defs.appendChild(m);
+  }
+  svg.appendChild(defs);
+
+  function drawArrow(fromSq, toSq, color, markerId, width) {
+    const a = squareToBoardXY(fromSq);
+    const b = squareToBoardXY(toSq);
+    if (!a || !b) return;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 0.01) return;
+    // Pull the line back from both ends a little so the arrow
+    // sits *on* the squares instead of hiding the piece glyphs.
+    const inset = 0.30;
+    const x1 = a.x + (dx / len) * 0.18;
+    const y1 = a.y + (dy / len) * 0.18;
+    const x2 = b.x - (dx / len) * inset;
+    const y2 = b.y - (dy / len) * inset;
+    const ln = document.createElementNS(NS, "line");
+    ln.setAttribute("x1", x1);
+    ln.setAttribute("y1", y1);
+    ln.setAttribute("x2", x2);
+    ln.setAttribute("y2", y2);
+    ln.setAttribute("stroke", color);
+    ln.setAttribute("stroke-width", String(width));
+    ln.setAttribute("stroke-linecap", "round");
+    ln.setAttribute("marker-end", `url(#${markerId})`);
+    svg.appendChild(ln);
+  }
+
+  // Render translucent PV arrows underneath the primary green one.
+  // PV indices: 0 is the same as bestArrow, 1 is opponent's reply,
+  // 2 is our planned follow-up. Show 1 + 2 as supporting context.
+  if (hasPv) {
+    for (let i = 1; i <= 2; i++) {
+      const m = state.bestPv[i];
+      if (!m || m.length < 4) continue;
+      const fromSq = m.slice(0, 2);
+      const toSq = m.slice(2, 4);
+      const markerId = i === 1 ? "arrow-pv1" : "arrow-pv2";
+      const color = i === 1 ? "rgba(94, 170, 70, 0.55)" : "rgba(94, 170, 70, 0.32)";
+      drawArrow(fromSq, toSq, color, markerId, 0.18);
+    }
+  }
+  if (hasBest) {
+    drawArrow(state.bestArrow.from, state.bestArrow.to, "#5eaa46", "arrow-best", 0.24);
+  }
+
+  boardEl.appendChild(svg);
 }
 
 // ---------- FEN serialization ----------
@@ -161,6 +301,7 @@ function loadFen(fen) {
   state.lastMove = null;
   state.reviewBadge = null;
   state.bestArrow = null;
+  state.bestPv = null;
 }
 
 // ---------- Rendering ----------
@@ -214,15 +355,24 @@ function renderBoard() {
         cell.classList.add(piece ? "legal-capture" : "legal-move");
       }
       if (state.lastMove && (state.lastMove.from === sqName || state.lastMove.to === sqName)) {
-        cell.classList.add("last-move");
+        // When we have a classification for the last move, tint the
+        // destination square with the classification colour
+        // (chess.com-style — red for blunder, green for best, etc.).
+        // The "from" square keeps the regular yellow highlight.
+        if (
+          state.reviewBadge
+          && state.reviewBadge.square === sqName
+          && sqName === state.lastMove.to
+        ) {
+          cell.classList.add("last-move-cls", "cls-" + state.reviewBadge.classification);
+        } else {
+          cell.classList.add("last-move");
+        }
       }
 
       // Review-mode badges + best-move highlights.
       if (state.reviewBadge && state.reviewBadge.square === sqName) {
-        const badge = document.createElement("span");
-        badge.className = "review-badge cls-" + state.reviewBadge.classification;
-        badge.textContent = REVIEW_ICONS[state.reviewBadge.classification] || "";
-        cell.appendChild(badge);
+        cell.appendChild(makeReviewBadge(state.reviewBadge.classification));
       }
       if (state.bestArrow) {
         if (state.bestArrow.from === sqName) cell.classList.add("best-from");
@@ -233,6 +383,7 @@ function renderBoard() {
       boardEl.appendChild(cell);
     }
   }
+  renderBoardArrows();
   syncMetaInputs();
   document.getElementById("fen-input").value = buildFen();
 }
@@ -332,6 +483,12 @@ function handleDrop(e, cell) {
 }
 
 function tryFreeplayMove(from, to) {
+  // Drill mode hijacks freeplay drops: instead of mutating the
+  // sandbox we treat the drop as the user's "answer" to the puzzle.
+  if (state.drill.active) {
+    tryDrillMove(from, to);
+    return;
+  }
   const c = ensureFreeplayChess();
   if (!c) return;
   const moveTo = freeplayCastlingTarget(c, from, to) || to;
@@ -1346,13 +1503,201 @@ function renderKeyMoments(moments) {
       <span class="km-delta">ΔWP ${k.wp_delta}%</span>
     </li>`;
   }).join("");
-  host.innerHTML = `<h3>Ключевые моменты</h3><ol>${rows}</ol>`;
+  // Only offer drill if at least one moment is "actionable"
+  // (excludes book / forced / best — there is no lesson there).
+  const drillable = moments.some((m) =>
+    ["inaccuracy", "mistake", "blunder", "miss"].includes(m.classification)
+  );
+  const drillBtn = drillable
+    ? `<button id="btn-drill-start" type="button" class="drill-start-btn">🎯 Тренировать критические моменты</button>`
+    : "";
+  host.innerHTML = `<h3>Ключевые моменты ${drillBtn}</h3><ol>${rows}</ol>`;
   host.querySelectorAll("li[data-ply]").forEach((li) => {
     li.addEventListener("click", () => {
       const ply = parseInt(li.dataset.ply, 10);
       jumpToReviewIdx(ply - 1);
     });
   });
+  const startBtn = document.getElementById("btn-drill-start");
+  if (startBtn) startBtn.addEventListener("click", () => startDrill(moments));
+}
+
+// ---------- Drill mode (chess.com Lessons-style practice) ----------
+
+function startDrill(moments) {
+  const filtered = (moments || []).filter((m) =>
+    ["inaccuracy", "mistake", "blunder", "miss"].includes(m.classification)
+  );
+  if (filtered.length === 0 || !review.analysis) {
+    setStatus("Нет критических моментов для тренировки.", "info");
+    return;
+  }
+  state.drill.active = true;
+  state.drill.moments = filtered;
+  state.drill.idx = 0;
+  loadDrillMoment();
+}
+
+function loadDrillMoment() {
+  const km = state.drill.moments[state.drill.idx];
+  if (!km || !review.analysis) { exitDrill(); return; }
+  const moves = review.analysis.moves;
+  const moveData = moves[km.ply - 1];
+  if (!moveData || !moveData.best_move_uci) {
+    nextDrill();
+    return;
+  }
+  // The puzzle position is the FEN *before* the bad move was played.
+  const fenBefore = km.ply === 1
+    ? review.game.starting_fen
+    : moves[km.ply - 2].fen_after;
+  state.drill.expectedUci = moveData.best_move_uci;
+  state.drill.expectedSan = moveData.best_move_san || "";
+  state.drill.side = moveData.side;
+  state.drill.plyIdx = km.ply - 1;
+  state.drill.feedback = null;
+  loadFen(fenBefore);
+  state.lastMove = null;
+  state.reviewBadge = null;
+  state.bestArrow = null;
+  state.bestPv = null;
+  renderBoard();
+  renderDrillUi();
+  // Hide normal review board hint while drilling.
+  const hint = document.getElementById("board-hint");
+  if (hint) hint.textContent = "";
+}
+
+function tryDrillMove(from, to) {
+  if (!state.drill.active) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  const moveTo = freeplayCastlingTarget(c, from, to) || to;
+  // Validate legality first.
+  let move;
+  try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
+  if (!move) {
+    setStatus("Нелегальный ход.", "error");
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  // UCI of the player's attempt (always with q-promotion when applicable).
+  const playedUci =
+    move.from + move.to + (move.promotion ? move.promotion : "");
+  const expected = state.drill.expectedUci;
+  // Match — strip optional promotion suffix and compare prefix-then-suffix.
+  const sameMove =
+    playedUci === expected
+    || (expected.length >= 4
+        && playedUci.slice(0, 4) === expected.slice(0, 4)
+        && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
+  if (sameMove) {
+    // Show the move on the board with a 'best' badge as positive
+    // feedback, then auto-advance after a beat.
+    loadFen(c.fen());
+    state.lastMove = { from: move.from, to: move.to };
+    state.reviewBadge = { square: move.to, classification: "best" };
+    state.bestArrow = null;
+    state.bestPv = null;
+    state.drill.feedback = "correct";
+    renderBoard();
+    renderDrillUi();
+    setTimeout(nextDrill, 1400);
+  } else {
+    state.drill.feedback = "wrong";
+    // Don't apply the wrong move — let the user try again.
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderDrillUi();
+    // Tiny visual nudge: flash the destination square red briefly.
+    const cell = boardEl.querySelector(`.square[data-square="${move.to}"]`);
+    if (cell) {
+      cell.classList.add("drill-flash-bad");
+      setTimeout(() => cell.classList.remove("drill-flash-bad"), 700);
+    }
+  }
+}
+
+function nextDrill() {
+  if (!state.drill.active) return;
+  if (state.drill.idx + 1 >= state.drill.moments.length) {
+    exitDrill(true);
+    return;
+  }
+  state.drill.idx += 1;
+  loadDrillMoment();
+}
+
+function exitDrill(finished) {
+  const wasActive = state.drill.active;
+  state.drill.active = false;
+  state.drill.moments = [];
+  state.drill.expectedUci = null;
+  state.drill.expectedSan = null;
+  state.drill.feedback = null;
+  renderDrillUi();
+  if (!wasActive) return;
+  if (finished) {
+    setStatus("Тренировка завершена — все ключевые моменты пройдены.", "info");
+  }
+  // Restore review view if there was one.
+  if (review.activeIdx >= 0) jumpToReviewIdx(review.activeIdx);
+}
+
+function renderDrillUi() {
+  const host = document.getElementById("drill-panel");
+  if (!host) return;
+  if (!state.drill.active) {
+    host.innerHTML = "";
+    host.style.display = "none";
+    return;
+  }
+  host.style.display = "block";
+  const total = state.drill.moments.length;
+  const cur = state.drill.idx + 1;
+  const sideLabel = state.drill.side === "w" ? "Белые" : "Чёрные";
+  let feedback = "";
+  if (state.drill.feedback === "correct") {
+    feedback = `<div class="drill-msg drill-ok">✓ Верно! Лучший ход — <b>${escapeHtml(state.drill.expectedSan)}</b></div>`;
+  } else if (state.drill.feedback === "wrong") {
+    feedback = `<div class="drill-msg drill-bad">✕ Не лучший ход. Попробуй ещё раз или нажми «Подсказка».</div>`;
+  }
+  host.innerHTML = `
+    <div class="drill-head">
+      <span class="drill-title">🎯 Тренировка ключевых моментов · ${cur} / ${total}</span>
+      <button id="drill-exit" type="button" class="drill-secondary">✕ Выйти</button>
+    </div>
+    <div class="drill-prompt">Ход за <b>${sideLabel}</b>. Найди лучший ход.</div>
+    ${feedback}
+    <div class="drill-actions">
+      <button id="drill-hint" type="button" class="drill-secondary">💡 Подсказка</button>
+      <button id="drill-show" type="button" class="drill-secondary">👁 Показать ответ</button>
+      <button id="drill-skip" type="button" class="drill-secondary">⤳ Пропустить</button>
+    </div>
+  `;
+  const exitBtn = document.getElementById("drill-exit");
+  if (exitBtn) exitBtn.onclick = () => exitDrill(false);
+  const hintBtn = document.getElementById("drill-hint");
+  if (hintBtn) hintBtn.onclick = () => {
+    const u = state.drill.expectedUci;
+    if (u && u.length >= 4) {
+      // Highlight the source square only (small hint, not the full arrow).
+      state.bestArrow = { from: u.slice(0, 2), to: u.slice(0, 2) };
+      renderBoard();
+    }
+  };
+  const showBtn = document.getElementById("drill-show");
+  if (showBtn) showBtn.onclick = () => {
+    const u = state.drill.expectedUci;
+    if (u && u.length >= 4) {
+      state.bestArrow = { from: u.slice(0, 2), to: u.slice(2, 4) };
+      renderBoard();
+    }
+  };
+  const skipBtn = document.getElementById("drill-skip");
+  if (skipBtn) skipBtn.onclick = nextDrill;
 }
 
 async function renderOpeningExplorer(fen) {
@@ -1461,9 +1806,15 @@ function jumpToReviewIdx(idx) {
       state.bestArrow = m.best_move_uci
         ? { from: m.best_move_uci.slice(0, 2), to: m.best_move_uci.slice(2, 4) }
         : null;
+      // Only show PV arrows when the played move ≠ best move
+      // (otherwise the green arrow already sits on the played square).
+      state.bestPv = (m.move_uci !== m.best_move_uci && Array.isArray(m.best_pv_uci))
+        ? m.best_pv_uci
+        : null;
     } else {
       state.reviewBadge = null;
       state.bestArrow = null;
+      state.bestPv = null;
     }
     renderBoard();
     renderBoardHint();
@@ -1511,7 +1862,7 @@ function renderBoardHint() {
     && m.best_pv_san.length >= 2
     && m.move_uci !== m.best_move_uci
   ) {
-    const sansHtml = m.best_pv_san.slice(0, 5)
+    const sansHtml = m.best_pv_san.slice(0, 10)
       .map((s) => `<span class="pv-san">${escapeHtml(s)}</span>`).join("");
     pvLine = `<div class="pv-line"><span class="pv-label">Лучшая линия:</span>${sansHtml}</div>`;
   }
