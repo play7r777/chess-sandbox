@@ -100,8 +100,10 @@ input:focus, select:focus, button:focus-visible {
 
 /* When a view is active we hide every sidebar section that doesn't
    belong to it. The board area itself is always visible. */
-body.view-main     .sidebar [data-view="analysis"] { display: none !important; }
-body.view-analysis .sidebar [data-view="main"]     { display: none !important; }
+body.view-main     .sidebar    [data-view="analysis"],
+body.view-main     .board-area [data-view="analysis"] { display: none !important; }
+body.view-analysis .sidebar    [data-view="main"],
+body.view-analysis .board-area [data-view="main"]     { display: none !important; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
 .mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }
@@ -490,6 +492,29 @@ body.mode-legal .mode-toggle { display: none !important; }
   z-index: 5;
   overflow: visible;
 }
+
+/* Player name strips above / below the board (Analysis view only). */
+.player-strip {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px;
+  background: #1b2230;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #d8e3f2;
+  margin: 4px 0;
+  min-height: 32px;
+}
+.player-strip[hidden] { display: none; }
+.player-strip .player-disc {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 1px solid #2a3140;
+  flex: 0 0 auto;
+}
+.player-strip .player-disc.white  { background: #f1f2f2; }
+.player-strip .player-disc.black  { background: #232629; border-color: #4a5060; }
+.player-strip .player-name { font-weight: 600; letter-spacing: 0.01em; }
+.player-strip .player-meta { color: #8ba0bf; font-variant-numeric: tabular-nums; font-size: 12px; }
 
 /* Board navigation + best-move hint */
 .board-nav {

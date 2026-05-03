@@ -513,8 +513,22 @@ function attachSquareHandlers(cell) {
       );
       e.dataTransfer.effectAllowed = "move";
       pieceEl.classList.add("dragging");
+      // Mirror click-to-select behaviour: light up the legal targets
+      // for the piece being dragged so the user can see where it's
+      // allowed to land.
+      const fromSq = pieceEl.dataset.fromSquare;
+      if (fromSq) highlightLegalFromSquare(fromSq);
     });
-    pieceEl.addEventListener("dragend", () => pieceEl.classList.remove("dragging"));
+    pieceEl.addEventListener("dragend", () => {
+      pieceEl.classList.remove("dragging");
+      // The drop handler clears the highlights on a successful move;
+      // on a cancelled drag we still want them gone.
+      if (state.legalTargets.length || state.selectedSquare) {
+        state.selectedSquare = null;
+        state.legalTargets = [];
+        renderBoard();
+      }
+    });
   }
 }
 
@@ -664,6 +678,29 @@ function handleFreeplaySquareClick(squareName) {
   }
 }
 
+// Drag&drop helper: re-uses the same legal-target highlighter that
+// click-to-select would, dispatching to the right code path based on
+// whether a play-vs-engine session is active or we're in freeplay.
+function highlightLegalFromSquare(squareName) {
+  if (state.game.active) {
+    const c = state.game.chess;
+    if (c.turn() !== state.game.playerColor) return;
+    const piece = c.get(squareName);
+    if (!piece || piece.color !== c.turn()) return;
+    selectSquare(squareName);
+    return;
+  }
+  if (state.legalMode) {
+    const c = ensureFreeplayChess();
+    if (!c) return;
+    const piece = c.get(squareName);
+    if (!piece || piece.color !== c.turn()) return;
+    selectFreeplaySquare(squareName);
+  }
+  // Sandbox mode: any piece can go anywhere, so there's nothing to
+  // highlight.
+}
+
 function selectFreeplaySquare(squareName) {
   const c = state.freeplay.chess;
   state.selectedSquare = squareName;
@@ -720,6 +757,7 @@ function makePaletteCell(piece) {
 document.getElementById("btn-flip").addEventListener("click", () => {
   state.flipped = !state.flipped;
   renderBoard();
+  renderPlayerStrips();
 });
 document.getElementById("btn-phys-flip").addEventListener("click", () => {
   if (state.game.active) {
@@ -1510,6 +1548,7 @@ document.getElementById("btn-review-import").addEventListener("click", async () 
     document.getElementById("review-progress").textContent =
       `${r.headers.White || "?"} vs ${r.headers.Black || "?"} — ${r.moves_uci.length} полуходов. Жми «Анализировать».`;
     document.getElementById("btn-review-analyse").disabled = false;
+    renderPlayerStrips();
     renderReviewMoves();
     document.getElementById("review-summary").innerHTML = "";
   } catch (err) {
@@ -1830,6 +1869,51 @@ async function renderOpeningExplorer(fen) {
         <tbody>${rows}</tbody>
       </table>`;
   } catch { host.innerHTML = ""; }
+}
+
+function renderPlayerStrips() {
+  const top = document.getElementById("player-top");
+  const bot = document.getElementById("player-bottom");
+  if (!top || !bot) return;
+  const game = review.game;
+  if (!game) {
+    top.hidden = true;
+    bot.hidden = true;
+    top.innerHTML = "";
+    bot.innerHTML = "";
+    return;
+  }
+  const h = game.headers || {};
+  const whiteName = (h.White || "Белые").trim() || "Белые";
+  const blackName = (h.Black || "Чёрные").trim() || "Чёрные";
+  const whiteElo = (h.WhiteElo || "").trim();
+  const blackElo = (h.BlackElo || "").trim();
+  const renderSide = (color, name, elo) => {
+    const meta = elo ? `<span class="player-meta">${elo}</span>` : "";
+    return `
+      <span class="player-disc ${color}"></span>
+      <span class="player-name">${escapeHtml(name)}</span>
+      ${meta}
+    `;
+  };
+  // Visual top of board = side opposite to the bottom-of-screen player.
+  // When unflipped, white sits at the bottom; flipping swaps the strips.
+  const bottomColor = state.flipped ? "black" : "white";
+  const topColor    = state.flipped ? "white" : "black";
+  const bottomName  = bottomColor === "white" ? whiteName : blackName;
+  const bottomElo   = bottomColor === "white" ? whiteElo  : blackElo;
+  const topName     = topColor    === "white" ? whiteName : blackName;
+  const topElo      = topColor    === "white" ? whiteElo  : blackElo;
+  top.innerHTML = renderSide(topColor, topName, topElo);
+  bot.innerHTML = renderSide(bottomColor, bottomName, bottomElo);
+  top.hidden = false;
+  bot.hidden = false;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function renderReviewMoves() {
