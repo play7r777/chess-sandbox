@@ -394,69 +394,52 @@ body.mode-legal .mode-toggle { display: none !important; }
 .opening-explorer .oe-san { color: #d8e3f2; font-weight: 500; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .opening-explorer .oe-total { color: #8ba0bf; font-variant-numeric: tabular-nums; }
 
-.review-moves .cls-brilliant  .icon, .review-summary .pill.cls-brilliant  { color: #00d2ff; }
-.review-moves .cls-great      .icon, .review-summary .pill.cls-great      { color: #5fb6ff; }
-.review-moves .cls-best       .icon, .review-summary .pill.cls-best       { color: #41d77f; }
-.review-moves .cls-excellent  .icon, .review-summary .pill.cls-excellent  { color: #62de9b; }
-.review-moves .cls-good       .icon, .review-summary .pill.cls-good       { color: #b6e07c; }
-.review-moves .cls-book       .icon, .review-summary .pill.cls-book       { color: #c8a55b; }
-.review-moves .cls-forced     .icon, .review-summary .pill.cls-forced     { color: #8e8ba0; }
-.review-moves .cls-inaccuracy .icon, .review-summary .pill.cls-inaccuracy { color: #f0c958; }
-.review-moves .cls-mistake    .icon, .review-summary .pill.cls-mistake    { color: #f08c4a; }
-.review-moves .cls-blunder    .icon, .review-summary .pill.cls-blunder    { color: #f15464; }
-.review-moves .cls-miss       .icon, .review-summary .pill.cls-miss       { color: #d65bd9; }
+.review-moves .cls-brilliant  .icon, .review-summary .pill.cls-brilliant  { color: #26c2a3; }
+.review-moves .cls-great      .icon, .review-summary .pill.cls-great      { color: #749bbf; }
+.review-moves .cls-best       .icon, .review-summary .pill.cls-best       { color: #81b64c; }
+.review-moves .cls-excellent  .icon, .review-summary .pill.cls-excellent  { color: #95b776; }
+.review-moves .cls-good       .icon, .review-summary .pill.cls-good       { color: #95af6f; }
+.review-moves .cls-book       .icon, .review-summary .pill.cls-book       { color: #d5a47d; }
+.review-moves .cls-forced     .icon, .review-summary .pill.cls-forced     { color: #95978e; }
+.review-moves .cls-inaccuracy .icon, .review-summary .pill.cls-inaccuracy { color: #f7c045; }
+.review-moves .cls-mistake    .icon, .review-summary .pill.cls-mistake    { color: #ffa459; }
+.review-moves .cls-blunder    .icon, .review-summary .pill.cls-blunder    { color: #fa412d; }
+.review-moves .cls-miss       .icon, .review-summary .pill.cls-miss       { color: #ff7769; }
 
 /* Game-review board badges (chess.com-style) */
 .square { position: relative; }
 .square .review-badge {
   position: absolute;
-  top: 2px; right: 2px;
-  width: 32%; height: 32%;
-  min-width: 26px; min-height: 26px;
-  max-width: 42px; max-height: 42px;
-  border-radius: 50%;
+  top: -6%; right: -6%;
+  width: 38%; height: 38%;
+  min-width: 22px; min-height: 22px;
+  max-width: 46px; max-height: 46px;
   display: flex; align-items: center; justify-content: center;
-  border: 2px solid #ffffff;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.25);
   pointer-events: none;
   z-index: 6;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
 }
-.square .review-badge .review-badge-glyph {
-  font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
-  font-weight: 900;
-  font-size: clamp(10px, 1.9vmin, 18px);
-  line-height: 1;
-  letter-spacing: -0.03em;
-  color: #fff;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.45);
-  user-select: none;
+.square .review-badge svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
-.square .review-badge.cls-brilliant  { background: linear-gradient(180deg, #2ad5c8, #16a99d); }
-.square .review-badge.cls-great      { background: linear-gradient(180deg, #6dbcff, #3a8ed4); }
-.square .review-badge.cls-best       { background: linear-gradient(180deg, #6cd587, #41a35d); }
-.square .review-badge.cls-excellent  { background: linear-gradient(180deg, #8ce0a6, #4ea76b); }
-.square .review-badge.cls-good       { background: linear-gradient(180deg, #c3d97e, #899f48); }
-.square .review-badge.cls-book       { background: linear-gradient(180deg, #d2a45a, #8a6a32); }
-.square .review-badge.cls-inaccuracy { background: linear-gradient(180deg, #f3d062, #c69b25); }
-.square .review-badge.cls-mistake    { background: linear-gradient(180deg, #f1995a, #c66425); }
-.square .review-badge.cls-blunder    { background: linear-gradient(180deg, #ed5e6e, #b03340); }
-.square .review-badge.cls-miss       { background: linear-gradient(180deg, #d65bd9, #8a2c8c); }
-.square .review-badge.cls-forced     { background: linear-gradient(180deg, #b7b3c4, #7c7892); }
 
-/* Classification-tinted destination square (chess.com style: the
-   square the move ended on glows red/orange/green/etc. instead of
-   the regular yellow last-move highlight). */
-.square.last-move-cls.cls-brilliant  { background-image: linear-gradient(rgba( 42, 213, 200, 0.50), rgba( 42, 213, 200, 0.50)); }
-.square.last-move-cls.cls-great      { background-image: linear-gradient(rgba(109, 188, 255, 0.45), rgba(109, 188, 255, 0.45)); }
-.square.last-move-cls.cls-best       { background-image: linear-gradient(rgba(108, 213, 135, 0.55), rgba(108, 213, 135, 0.55)); }
-.square.last-move-cls.cls-excellent  { background-image: linear-gradient(rgba(140, 224, 166, 0.45), rgba(140, 224, 166, 0.45)); }
-.square.last-move-cls.cls-good       { background-image: linear-gradient(rgba(195, 217, 126, 0.40), rgba(195, 217, 126, 0.40)); }
-.square.last-move-cls.cls-book       { background-image: linear-gradient(rgba(210, 164,  90, 0.40), rgba(210, 164,  90, 0.40)); }
-.square.last-move-cls.cls-forced     { background-image: linear-gradient(rgba(160, 156, 178, 0.40), rgba(160, 156, 178, 0.40)); }
-.square.last-move-cls.cls-inaccuracy { background-image: linear-gradient(rgba(243, 208,  98, 0.55), rgba(243, 208,  98, 0.55)); }
-.square.last-move-cls.cls-mistake    { background-image: linear-gradient(rgba(241, 153,  90, 0.60), rgba(241, 153,  90, 0.60)); }
-.square.last-move-cls.cls-blunder    { background-image: linear-gradient(rgba(237,  94, 110, 0.65), rgba(237,  94, 110, 0.65)); }
-.square.last-move-cls.cls-miss       { background-image: linear-gradient(rgba(214,  91, 217, 0.55), rgba(214,  91, 217, 0.55)); }
+/* Classification-tinted square (chess.com style: both origin
+   and destination squares glow with the move's classification
+   colour instead of the regular yellow last-move highlight). The
+   tint matches the badge's circle fill — same hex, semi-transparent. */
+.square.last-move-cls.cls-brilliant  { background-image: linear-gradient(rgba( 38, 194, 163, 0.55), rgba( 38, 194, 163, 0.55)); }
+.square.last-move-cls.cls-great      { background-image: linear-gradient(rgba(116, 155, 191, 0.55), rgba(116, 155, 191, 0.55)); }
+.square.last-move-cls.cls-best       { background-image: linear-gradient(rgba(129, 182,  76, 0.55), rgba(129, 182,  76, 0.55)); }
+.square.last-move-cls.cls-excellent  { background-image: linear-gradient(rgba(149, 183, 118, 0.50), rgba(149, 183, 118, 0.50)); }
+.square.last-move-cls.cls-good       { background-image: linear-gradient(rgba(149, 175, 111, 0.50), rgba(149, 175, 111, 0.50)); }
+.square.last-move-cls.cls-book       { background-image: linear-gradient(rgba(213, 164, 125, 0.50), rgba(213, 164, 125, 0.50)); }
+.square.last-move-cls.cls-forced     { background-image: linear-gradient(rgba(149, 151, 142, 0.50), rgba(149, 151, 142, 0.50)); }
+.square.last-move-cls.cls-inaccuracy { background-image: linear-gradient(rgba(247, 192,  69, 0.60), rgba(247, 192,  69, 0.60)); }
+.square.last-move-cls.cls-mistake    { background-image: linear-gradient(rgba(255, 164,  89, 0.60), rgba(255, 164,  89, 0.60)); }
+.square.last-move-cls.cls-blunder    { background-image: linear-gradient(rgba(250,  65,  45, 0.62), rgba(250,  65,  45, 0.62)); }
+.square.last-move-cls.cls-miss       { background-image: linear-gradient(rgba(255, 119, 105, 0.60), rgba(255, 119, 105, 0.60)); }
 
 .square.best-from { box-shadow: inset 0 0 0 3px rgba(94, 170, 70, 0.55); }
 .square.best-to   { box-shadow: inset 0 0 0 3px rgba(94, 170, 70, 0.85); }
