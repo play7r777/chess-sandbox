@@ -1910,12 +1910,6 @@ function renderPlayerStrips() {
   bot.hidden = false;
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-
 function renderReviewMoves() {
   const ol = document.getElementById("review-moves");
   ol.innerHTML = "";
