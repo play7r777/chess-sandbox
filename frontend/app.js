@@ -1692,38 +1692,139 @@ document.getElementById("btn-review-analyse").addEventListener("click", async ()
   }
 });
 
+// Chess.com glyph for the "Game Review" header.
+const GAME_REVIEW_GLYPH = `<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 24 24" width="22" height="22"><path d="M12 22.5C6.2 22.5 1.5 17.8 1.5 12C1.5 6.2 6.2 1.5 12 1.5C17.8 1.5 22.5 6.2 22.5 12C22.5 17.8 17.8 22.5 12 22.5ZM7.37 17.87C7.17 18.67 7.44 18.87 8.14 18.4L12.01 15.67L15.84 18.4C16.54 18.87 16.81 18.67 16.61 17.87L15.44 13.27L18.91 10.57C19.58 10.04 19.48 9.7 18.64 9.64L14.11 9.31L12.48 5.18C12.18 4.41 11.81 4.41 11.51 5.18L9.98 9.31L5.35 9.64C4.52 9.71 4.42 10.04 5.08 10.54L8.58 13.27L7.37 17.87Z"/></svg>`;
+
+function _avatarFor(side, headers) {
+  if (!headers) return null;
+  const key = side === "w" ? "WhiteAvatar" : "BlackAvatar";
+  return headers[key] || null;
+}
+
+function _nameFor(side, headers) {
+  if (!headers) return side === "w" ? "Белые" : "Чёрные";
+  const k = side === "w" ? "White" : "Black";
+  const name = headers[k] || (side === "w" ? "Белые" : "Чёрные");
+  const eloKey = side === "w" ? "WhiteElo" : "BlackElo";
+  const elo = headers[eloKey];
+  return elo ? `${name} (${elo})` : name;
+}
+
+function _placeholderAvatar(side) {
+  // Chess.com-style empty pawn placeholder (no external request).
+  const fill = side === "w" ? "#f4f5f6" : "#262421";
+  const stroke = side === "w" ? "#9b9b9b" : "#000";
+  const piece = side === "w" ? "#e3e3e3" : "#3a3936";
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="100%" height="100%">
+    <rect width="36" height="36" rx="4" fill="${fill}" stroke="${stroke}" stroke-width="1"/>
+    <path fill="${piece}" d="M18 8a3.2 3.2 0 0 0-3 4.5c-1.4.6-2.4 2-2.4 3.6 0 1.5.8 2.8 2 3.5L13 27h10l-1.6-7.4c1.2-.7 2-2 2-3.5 0-1.6-1-3-2.4-3.6A3.2 3.2 0 0 0 18 8Z"/>
+  </svg>`;
+}
+
 function renderReviewSummary(s) {
   const counts = s.counts || {};
   const root = document.getElementById("review-summary");
-  root.innerHTML = `
-    <div class="col"><h4>Белые</h4><div class="acc">${s.white.accuracy}%</div><div class="muted">ACPL ${s.white.acpl}</div></div>
-    <div class="col"><h4>Чёрные</h4><div class="acc">${s.black.accuracy}%</div><div class="muted">ACPL ${s.black.acpl}</div></div>
-    <div class="col" style="flex:1; min-width:280px;"><h4>Категории <span class="muted" id="review-filter-hint"></span></h4><div class="counts" id="review-pills"></div></div>
-  `;
-  const pillsHost = document.getElementById("review-pills");
-  REVIEW_ORDER.forEach((k) => {
+  const hdr = (review.game && review.game.headers) || {};
+  const wAvatar = _avatarFor("w", hdr);
+  const bAvatar = _avatarFor("b", hdr);
+  const wName = _nameFor("w", hdr);
+  const bName = _nameFor("b", hdr);
+  const userSide = review.userSide;
+  const sideClass = (col) =>
+    `gr-cell gr-side-${col}${userSide === col ? " is-you" : ""}`;
+  const avatarCell = (col, url) => `<div class="${sideClass(col)} gr-avatar-cell">
+      <div class="gr-avatar" data-side="${col}">${url ? `<img src="${url}" alt="" referrerpolicy="no-referrer" />` : _placeholderAvatar(col)}</div>
+    </div>`;
+  const accCell = (col, info) => `<div class="${sideClass(col)} gr-acc-cell">
+      <div class="gr-acc-pill gr-acc-${col}">${info.accuracy}%</div>
+      <div class="gr-acc-sub">ACPL ${info.acpl}</div>
+    </div>`;
+
+  // Build per-classification rows with clickable filter behaviour.
+  const rowsHtml = REVIEW_ORDER.map((k) => {
     const n = counts[k] || 0;
-    const pill = document.createElement("span");
-    pill.className = `pill cls-${k}` + (n === 0 ? " is-disabled" : "") + (review.filter.has(k) ? " is-active" : "");
-    pill.dataset.cls = k;
-    const xVisible = review.filter.has(k);
-    pill.innerHTML = `${REVIEW_ICONS[k]} ${REVIEW_LABELS[k]}: ${n}${xVisible ? '<span class="x" title="Снять фильтр">×</span>' : ""}`;
-    if (n > 0) {
-      pill.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        if (review.filter.has(k)) review.filter.delete(k);
-        else review.filter.add(k);
-        renderReviewSummary(s);
-        renderReviewMoves();
-      });
+    // Backend doesn't currently split counts per side; we derive it by
+    // walking `review.analysis.moves` if present.
+    let nW = 0;
+    let nB = 0;
+    if (review.analysis && Array.isArray(review.analysis.moves)) {
+      for (const mv of review.analysis.moves) {
+        if (mv.classification !== k) continue;
+        if (mv.side === "w") nW += 1;
+        else nB += 1;
+      }
+    } else {
+      nW = n;
+      nB = 0;
     }
-    pillsHost.appendChild(pill);
+    const isActive = review.filter.has(k);
+    const isOff = n === 0;
+    const color = REVIEW_COLOR[k];
+    return `<div class="gr-row gr-row-cls cls-${k}${isOff ? " is-off" : ""}${isActive ? " is-active" : ""}" data-cls="${k}" style="--cls-color:${color}">
+      <div class="gr-cell gr-label">${REVIEW_LABELS[k]}</div>
+      <div class="gr-cell gr-side-w gr-count" style="color:${color}">${nW}</div>
+      <div class="gr-cell gr-icon">${REVIEW_BADGE_SVG[k] || ""}</div>
+      <div class="gr-cell gr-side-b gr-count" style="color:${color}">${nB}</div>
+    </div>`;
+  }).join("");
+
+  root.innerHTML = `
+    <div class="gr-header">
+      <span class="gr-glyph">${GAME_REVIEW_GLYPH}</span>
+      <span class="gr-title">Game Review</span>
+      <span class="gr-filter-hint muted" id="review-filter-hint"></span>
+    </div>
+    <div class="gr-grid">
+      <div class="gr-row gr-row-names">
+        <div class="gr-cell gr-label">&nbsp;</div>
+        <div class="${sideClass("w")} gr-name">${wName}</div>
+        <div class="gr-cell"></div>
+        <div class="${sideClass("b")} gr-name">${bName}</div>
+      </div>
+      <div class="gr-row gr-row-players">
+        <div class="gr-cell gr-label">Players</div>
+        ${avatarCell("w", wAvatar)}
+        <div class="gr-cell"></div>
+        ${avatarCell("b", bAvatar)}
+      </div>
+      <div class="gr-row gr-row-accuracy">
+        <div class="gr-cell gr-label">Accuracy</div>
+        ${accCell("w", s.white)}
+        <div class="gr-cell"></div>
+        ${accCell("b", s.black)}
+      </div>
+      <div class="gr-divider"></div>
+      ${rowsHtml}
+    </div>
+  `;
+
+  // Wire avatar error → fallback to placeholder SVG.
+  root.querySelectorAll(".gr-avatar img").forEach((img) => {
+    img.addEventListener("error", () => {
+      const wrap = img.parentElement;
+      if (!wrap) return;
+      const side = wrap.dataset.side === "b" ? "b" : "w";
+      wrap.innerHTML = _placeholderAvatar(side);
+    });
   });
+
+  // Wire row click → filter toggle.
+  root.querySelectorAll(".gr-row-cls").forEach((row) => {
+    if (row.classList.contains("is-off")) return;
+    row.addEventListener("click", () => {
+      const k = row.dataset.cls;
+      if (review.filter.has(k)) review.filter.delete(k);
+      else review.filter.add(k);
+      renderReviewSummary(s);
+      renderReviewMoves();
+    });
+  });
+
   const hint = document.getElementById("review-filter-hint");
-  if (review.filter.size > 0) {
-    hint.textContent = `(показаны только: ${review.filter.size})`;
-  } else {
-    hint.textContent = "(клик — фильтр)";
+  if (hint) {
+    hint.textContent = review.filter.size > 0
+      ? `(фильтр: ${review.filter.size})`
+      : "";
   }
 }
 
@@ -1852,11 +1953,35 @@ function refreshEvalBarFromActive() {
   updateEvalBar(cp, mover);
 }
 
-// ---------- Eval graph (chess.com style) ----------
+// ---------- Eval graph (chess.com Highcharts style) ----------
 
-const GRAPH_DOT_RADIUS = 3.5;
+const GRAPH_DOT_RADIUS = 2.6;
 const GRAPH_W = 600;  // SVG viewBox width
-const GRAPH_H = 90;
+const GRAPH_H = 100;
+
+// Build a smoothed cubic-Bezier path through the given (x,y) points
+// (Catmull-Rom → Bezier conversion, tension = 0.5).
+function _smoothPath(points) {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M${points[0][0]},${points[0][1]}`;
+  const segs = [`M${points[0][0].toFixed(2)},${points[0][1].toFixed(2)}`];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(points.length - 1, i + 2)];
+    const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+    segs.push(
+      `C${cp1x.toFixed(2)},${cp1y.toFixed(2)} ` +
+      `${cp2x.toFixed(2)},${cp2y.toFixed(2)} ` +
+      `${p2[0].toFixed(2)},${p2[1].toFixed(2)}`
+    );
+  }
+  return segs.join(" ");
+}
 
 function renderEvalGraph(moves) {
   const wrap = document.getElementById("review-graph-wrap");
@@ -1869,40 +1994,57 @@ function renderEvalGraph(moves) {
   wrap.hidden = false;
   svg.setAttribute("viewBox", `0 0 ${GRAPH_W} ${GRAPH_H}`);
   const n = moves.length;
-  // Per-ply white-POV cp.
-  const cps = moves.map((m) =>
-    m.side === "w" ? m.eval_after_cp : -m.eval_after_cp
+  // Per-ply white-POV cp, prepended with the starting eval (=0 from white's
+  // POV in the standard position).
+  const cps = [0].concat(
+    moves.map((m) => (m.side === "w" ? m.eval_after_cp : -m.eval_after_cp))
   );
-  // x for ply index i (1..n) maps to pixel.
-  const x = (i) => (i / n) * GRAPH_W;
-  // y maps cp to vertical: top = +∞ (white), bottom = -∞ (black).
-  // Use the same logistic mapping as eval bar so visuals are consistent.
+  // x for sample index i (0..n) maps to pixel column.
+  const x = (i) => (i / Math.max(1, n)) * GRAPH_W;
+  // y maps cp to vertical: top = +∞ (white winning), bottom = -∞ (black).
   const y = (cp) => {
     const frac = cpToWhiteFrac(cp);
     return GRAPH_H * (1 - frac);
   };
-  // Areas: top half = black bg (where black is winning above the zero line),
-  // bottom half = white bg.
-  // Easier: split background by current line — too complex with one polygon.
-  // Use a simple two-band background: white bottom half, black top half,
-  // and overlay the eval polyline on top.
-  const polyPoints = cps.map((cp, i) => `${x(i + 1).toFixed(2)},${y(cp).toFixed(2)}`);
-  const fillPath =
-    `M0,${GRAPH_H} ` +
-    `L${x(1).toFixed(2)},${GRAPH_H} ` +
-    polyPoints.map((p) => `L${p}`).join(" ") +
-    ` L${GRAPH_W.toFixed(2)},${GRAPH_H} Z`;
-  const linePath = `M${polyPoints.join(" L")}`;
+  const points = cps.map((cp, i) => [x(i), y(cp)]);
+  const linePath = _smoothPath(points);
+  // Filled white area below the curve.
+  const fillWhite =
+    `${linePath} L${GRAPH_W.toFixed(2)},${GRAPH_H} L0,${GRAPH_H} Z`;
+  // Filled dark area above the curve.
+  const fillBlack =
+    `${linePath} L${GRAPH_W.toFixed(2)},0 L0,0 Z`;
+  // Move-number gridlines every 5 full moves.
+  const grid = [];
+  const moveSpacing = 10; // plies = 5 full moves
+  for (let p = moveSpacing; p < n; p += moveSpacing) {
+    const gx = x(p).toFixed(2);
+    grid.push(
+      `<line class="graph-grid" x1="${gx}" y1="0" x2="${gx}" y2="${GRAPH_H}" />`
+    );
+  }
+  // Dots only on classification-bearing samples (skip the leading start
+  // sample which has no move).
+  const dotClasses = new Set([
+    "brilliant",
+    "great",
+    "inaccuracy",
+    "mistake",
+    "blunder",
+    "miss",
+  ]);
   const dots = moves.map((m, i) => {
     const cls = m.classification;
+    if (!dotClasses.has(cls)) return "";
     const fill = REVIEW_COLOR[cls] || "#888";
-    return `<circle class="graph-dot cls-${cls}" data-idx="${i}" cx="${x(i + 1).toFixed(2)}" cy="${y(cps[i]).toFixed(2)}" r="${GRAPH_DOT_RADIUS}" fill="${fill}" />`;
+    return `<circle class="graph-dot cls-${cls}" data-idx="${i}" cx="${x(i + 1).toFixed(2)}" cy="${y(cps[i + 1]).toFixed(2)}" r="${GRAPH_DOT_RADIUS}" fill="${fill}" stroke="#000" stroke-width="0.4" />`;
   }).join("");
   svg.innerHTML = `
-    <rect class="graph-bg-black" x="0" y="0" width="${GRAPH_W}" height="${GRAPH_H / 2}" />
-    <rect class="graph-bg-white" x="0" y="${GRAPH_H / 2}" width="${GRAPH_W}" height="${GRAPH_H / 2}" />
+    <rect class="graph-bg-black" x="0" y="0" width="${GRAPH_W}" height="${GRAPH_H}" />
+    <path d="${fillWhite}" fill="#f4f5f6" />
+    <path d="${fillBlack}" fill="rgba(20,22,28,0.05)" />
+    ${grid.join("")}
     <line class="graph-zero" x1="0" y1="${GRAPH_H / 2}" x2="${GRAPH_W}" y2="${GRAPH_H / 2}" />
-    <path d="${fillPath}" fill="rgba(94,170,70,0.18)" />
     <path class="graph-line" d="${linePath}" />
     <line id="graph-cursor-line" class="graph-cursor" x1="0" y1="0" x2="0" y2="${GRAPH_H}" style="display:none" />
     ${dots}
@@ -1911,8 +2053,9 @@ function renderEvalGraph(moves) {
   const onPointerMove = (ev) => {
     const rect = svg.getBoundingClientRect();
     const px = ((ev.clientX - rect.left) / rect.width) * GRAPH_W;
+    // idx = which move (0..n-1)
     const idx = Math.max(0, Math.min(n - 1, Math.round((px / GRAPH_W) * n) - 1));
-    const cp = cps[idx];
+    const cp = cps[idx + 1];
     const cursor = svg.querySelector("#graph-cursor-line");
     if (cursor) {
       cursor.style.display = "";

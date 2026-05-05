@@ -309,21 +309,82 @@ body.mode-legal .mode-toggle { display: none !important; }
 }
 .recognize-fen input { flex: 1; }
 
-/* Game-review panel */
+/* Game-review panel — chess.com-style stats board */
 .review-summary {
-  display: flex; gap: 14px; flex-wrap: wrap;
-  margin: 8px 0;
+  margin: 10px 0;
+  background: linear-gradient(180deg, #1d2230 0%, #161a24 100%);
+  border: 1px solid #262d3c;
+  border-radius: 8px;
+  padding: 10px 12px 14px;
   font-size: 13px;
 }
-.review-summary .col { background: var(--bg); padding: 8px 12px; border-radius: 6px; min-width: 110px; }
-.review-summary .col h4 { margin: 0 0 4px; font-size: 12px; color: var(--fg-muted); font-weight: 600; }
-.review-summary .col .acc { font-size: 18px; font-weight: 700; }
-.review-summary .counts { display: flex; gap: 6px; flex-wrap: wrap; }
-.review-summary .counts .pill {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 8px; border-radius: 999px; font-size: 12px;
-  background: #1c2230; border: 1px solid #2a3140;
+.gr-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 2px 10px;
+  border-bottom: 1px solid #232a3a;
+  margin-bottom: 8px;
 }
+.gr-glyph svg { fill: #eaeef5; display: block; }
+.gr-title { font-size: 18px; font-weight: 700; letter-spacing: 0.2px; color: #eaeef5; }
+.gr-filter-hint { margin-left: auto; font-size: 11px; }
+.gr-grid {
+  display: grid;
+  grid-template-columns: 1fr 64px 32px 64px;
+  align-items: center;
+  row-gap: 4px;
+  column-gap: 8px;
+}
+.gr-divider {
+  grid-column: 1 / -1;
+  height: 1px; background: #232a3a;
+  margin: 6px 0 4px;
+}
+.gr-row {
+  display: contents;
+}
+.gr-cell {
+  display: flex; align-items: center; justify-content: center;
+  padding: 4px 0;
+  text-align: center;
+}
+.gr-label { justify-content: flex-start; padding-left: 2px; color: #b8c2d6; font-weight: 500; }
+.gr-row-names .gr-name {
+  font-size: 12px; font-weight: 600; color: #b8c2d6;
+  justify-content: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 110px;
+}
+.gr-avatar { width: 44px; height: 44px; border-radius: 6px; overflow: hidden; background: #262421; display: flex; align-items: center; justify-content: center; }
+.gr-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gr-avatar-cell.is-you .gr-avatar { box-shadow: 0 0 0 2px #81b64c; }
+.gr-acc-pill {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  min-width: 56px;
+  text-align: center;
+}
+.gr-acc-pill.gr-acc-w { background: #f4f5f6; color: #11181f; }
+.gr-acc-pill.gr-acc-b { background: #1d212a; color: #eaeef5; border: 1px solid #2a3140; }
+.gr-acc-cell { flex-direction: column; gap: 2px; }
+.gr-acc-sub { font-size: 10px; color: #6e7a8c; }
+.gr-row-cls {
+  cursor: pointer;
+  transition: background 0.1s;
+  border-radius: 4px;
+}
+.gr-row-cls:not(.is-off):hover .gr-cell { background: #1f2535; }
+.gr-row-cls.is-off { opacity: 0.4; cursor: default; }
+.gr-row-cls.is-active .gr-cell { background: rgba(129, 182, 76, 0.12); }
+.gr-count {
+  font-weight: 600; font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.gr-icon { width: 32px; height: 32px; }
+.gr-icon svg { width: 26px; height: 26px; display: block; }
 
 .review-moves {
   list-style: none; margin: 6px 0 0; padding: 0;
@@ -651,15 +712,16 @@ body.mode-legal .mode-toggle { display: none !important; }
 .review-phases .phase-card .phase-row .phase-acc { font-weight: 700; }
 .review-phases .phase-card .phase-row .phase-acc.is-na { color: #8ba0bf; font-weight: 500; }
 
-/* ---------- Eval graph (chess.com style) ---------- */
+/* ---------- Eval graph (chess.com Highcharts style) ---------- */
 .review-graph-wrap {
   position: relative;
-  background: #1b2230;
+  background: #2c3034;
   border: 1px solid #2a3140;
   border-radius: 8px;
-  padding: 4px 6px;
+  padding: 0;
   margin: 10px 0 0;
-  height: 90px;
+  height: 100px;
+  overflow: hidden;
 }
 .review-graph {
   display: block;
@@ -668,12 +730,12 @@ body.mode-legal .mode-toggle { display: none !important; }
   cursor: crosshair;
   touch-action: none;
 }
-.review-graph .graph-bg-white { fill: #f1f2f2; }
-.review-graph .graph-bg-black { fill: #232629; }
-.review-graph .graph-zero    { stroke: #8ba0bf; stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.6; }
-.review-graph .graph-line    { stroke: #5eaa46; stroke-width: 1.5; fill: none; }
-.review-graph .graph-cursor  { stroke: #f7c631; stroke-width: 1; }
-.review-graph .graph-dot     { stroke: #0d121d; stroke-width: 0.6; cursor: pointer; }
+.review-graph .graph-bg-black { fill: #2c3034; }
+.review-graph .graph-zero  { stroke: #6b6f74; stroke-width: 0.8; stroke-dasharray: 3 3; opacity: 0.5; }
+.review-graph .graph-grid  { stroke: #5b5e63; stroke-width: 0.5; opacity: 0.4; }
+.review-graph .graph-line  { stroke: #1d212a; stroke-width: 1.2; fill: none; }
+.review-graph .graph-cursor { stroke: #f7c631; stroke-width: 1; }
+.review-graph .graph-dot   { cursor: pointer; }
 .review-graph-tip {
   position: absolute;
   background: #f1f2f2;

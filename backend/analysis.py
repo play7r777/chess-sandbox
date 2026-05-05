@@ -43,6 +43,63 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 chess-sandbox/0.1"
 )
 
+_AVATAR_CACHE: dict[str, str | None] = {}
+
+
+def _chesscom_avatar(username: str) -> str | None:
+    """Fetch the player avatar URL from the chess.com public profile API.
+
+    Returns None if the user has no avatar or the request fails. Cached per
+    process so repeated imports of the same player are cheap.
+    """
+    if not username:
+        return None
+    key = f"cc:{username.lower()}"
+    if key in _AVATAR_CACHE:
+        return _AVATAR_CACHE[key]
+    try:
+        r = requests.get(
+            f"https://api.chess.com/pub/player/{username.lower()}",
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            avatar = r.json().get("avatar") or None
+        else:
+            avatar = None
+    except Exception:
+        avatar = None
+    _AVATAR_CACHE[key] = avatar
+    return avatar
+
+
+def _lichess_avatar(username: str) -> str | None:
+    """Fetch the lichess avatar/flair URL if available.
+
+    Lichess users rarely have a real avatar surfaced via the public API; this
+    just attempts the documented endpoint and returns None on miss.
+    """
+    if not username:
+        return None
+    key = f"li:{username.lower()}"
+    if key in _AVATAR_CACHE:
+        return _AVATAR_CACHE[key]
+    try:
+        r = requests.get(
+            f"https://lichess.org/api/user/{username}",
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            avatar = (data.get("profile") or {}).get("avatar") or None
+        else:
+            avatar = None
+    except Exception:
+        avatar = None
+    _AVATAR_CACHE[key] = avatar
+    return avatar
+
 PIECE_VALUES: dict[chess.PieceType, int] = {
     chess.PAWN: 100,
     chess.KNIGHT: 320,
@@ -170,7 +227,18 @@ def _fetch_lichess(url: str) -> ImportedGame:
     )
     if r.status_code != 200:
         raise ValueError(f"Lichess returned HTTP {r.status_code}.")
-    return _parse_pgn(r.text)
+    g = _parse_pgn(r.text)
+    w = g.headers.get("White") or ""
+    b = g.headers.get("Black") or ""
+    if w:
+        avatar = _lichess_avatar(w)
+        if avatar:
+            g.headers["WhiteAvatar"] = avatar
+    if b:
+        avatar = _lichess_avatar(b)
+        if avatar:
+            g.headers["BlackAvatar"] = avatar
+    return g
 
 
 def _fetch_chesscom(url: str) -> ImportedGame:
@@ -202,10 +270,23 @@ def _fetch_chesscom(url: str) -> ImportedGame:
     )
     if archive.status_code != 200:
         raise ValueError(f"chess.com archive returned HTTP {archive.status_code}.")
+    def _attach_avatars(parsed: ImportedGame) -> ImportedGame:
+        w = parsed.headers.get("White") or ""
+        b = parsed.headers.get("Black") or ""
+        if w:
+            wa = _chesscom_avatar(w)
+            if wa:
+                parsed.headers["WhiteAvatar"] = wa
+        if b:
+            ba = _chesscom_avatar(b)
+            if ba:
+                parsed.headers["BlackAvatar"] = ba
+        return parsed
+
     games = archive.json().get("games") or []
     for g in games:
         if str(game_id) in (g.get("url") or "") and g.get("pgn"):
-            return _parse_pgn(g["pgn"])
+            return _attach_avatars(_parse_pgn(g["pgn"]))
     # Fallback: try opponent's archive (some games only appear under one side).
     black = headers.get("Black") or ""
     if black:
@@ -217,7 +298,7 @@ def _fetch_chesscom(url: str) -> ImportedGame:
         if archive_b.status_code == 200:
             for g in archive_b.json().get("games") or []:
                 if str(game_id) in (g.get("url") or "") and g.get("pgn"):
-                    return _parse_pgn(g["pgn"])
+                    return _attach_avatars(_parse_pgn(g["pgn"]))
     raise ValueError(
         "Could not locate this chess.com game in the public archives. "
         "It may be too recent (~24h delay) or a private/unlisted game."
