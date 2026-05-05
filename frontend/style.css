@@ -120,9 +120,9 @@ body.mode-legal .mode-toggle { display: none !important; }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 420px;
+  grid-template-columns: minmax(0, 1fr) 500px;
   gap: 24px;
-  max-width: 1400px;
+  max-width: 1500px;
   margin: 0 auto;
   padding: 24px;
 }
@@ -153,13 +153,19 @@ body.mode-legal .mode-toggle { display: none !important; }
 .square.dark  { background: var(--dark-sq); }
 .square .coord {
   position: absolute;
-  font-size: 11px;
-  color: rgba(0, 0, 0, 0.45);
+  font-size: 10px;
+  font-weight: 700;
   pointer-events: none;
+  user-select: none;
+  font-family: var(--ui-font, system-ui, sans-serif);
+  letter-spacing: 0;
+  line-height: 1;
 }
-.square .coord.file { right: 3px; bottom: 1px; }
-.square .coord.rank { left: 3px; top: 1px; }
-.square.dark .coord { color: rgba(255, 255, 255, 0.55); }
+.square .coord.file { right: 3px; bottom: 2px; }
+.square .coord.rank { left: 3px; top: 2px; }
+/* chess.com convention: coord text is the opposite shade of the square. */
+.square.light .coord { color: var(--dark-sq); }
+.square.dark  .coord { color: var(--light-sq); }
 
 .square.drop-target { box-shadow: inset 0 0 0 3px var(--accent-strong); }
 .square.selected { box-shadow: inset 0 0 0 3px var(--selected); }
@@ -329,10 +335,10 @@ body.mode-legal .mode-toggle { display: none !important; }
 .gr-filter-hint { margin-left: auto; font-size: 11px; }
 .gr-grid {
   display: grid;
-  grid-template-columns: 1fr 64px 32px 64px;
+  grid-template-columns: minmax(0, 1fr) 110px 36px 110px;
   align-items: center;
   row-gap: 4px;
-  column-gap: 8px;
+  column-gap: 10px;
 }
 .gr-divider {
   grid-column: 1 / -1;
@@ -352,7 +358,10 @@ body.mode-legal .mode-toggle { display: none !important; }
   font-size: 12px; font-weight: 600; color: #b8c2d6;
   justify-content: center;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  max-width: 110px;
+  max-width: 100%;
+  display: block;
+  text-align: center;
+  padding: 0 2px;
 }
 .gr-avatar { width: 44px; height: 44px; border-radius: 6px; overflow: hidden; background: #262421; display: flex; align-items: center; justify-content: center; }
 .gr-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -383,8 +392,8 @@ body.mode-legal .mode-toggle { display: none !important; }
   font-weight: 600; font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
-.gr-icon { width: 32px; height: 32px; }
-.gr-icon svg { width: 26px; height: 26px; display: block; }
+.gr-icon { width: 36px; height: 36px; }
+.gr-icon svg { width: 28px; height: 28px; display: block; }
 
 .review-moves {
   list-style: none; margin: 6px 0 0; padding: 0;
@@ -574,8 +583,34 @@ body.mode-legal .mode-toggle { display: none !important; }
 }
 .player-strip .player-disc.white  { background: #f1f2f2; }
 .player-strip .player-disc.black  { background: #232629; border-color: #4a5060; }
+.player-strip .player-avatar {
+  width: 28px; height: 28px;
+  border-radius: 4px;
+  border: 1px solid #2a3140;
+  flex: 0 0 auto;
+  object-fit: cover;
+  background: #2a3140;
+}
 .player-strip .player-name { font-weight: 600; letter-spacing: 0.01em; }
 .player-strip .player-meta { color: #8ba0bf; font-variant-numeric: tabular-nums; font-size: 12px; }
+/* Captured-piece strip (chess.com-style) */
+.player-strip .cap-row {
+  display: inline-flex; align-items: center;
+  gap: 1px;
+  margin-left: 6px;
+}
+.player-strip .cap-piece {
+  width: 16px; height: 16px;
+  margin-right: -5px;        /* slight overlap, like chess.com */
+  filter: drop-shadow(0 1px 0 rgba(0,0,0,0.35));
+}
+.player-strip .cap-adv {
+  margin-left: 8px;
+  color: #b6c1d4;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
 
 /* Board navigation + best-move hint */
 .board-nav {

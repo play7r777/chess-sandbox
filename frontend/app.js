@@ -2339,6 +2339,65 @@ async function renderOpeningExplorer(fen) {
   } catch { host.innerHTML = ""; }
 }
 
+// Material values for captured-piece score tally.
+const PIECE_POINTS = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+// Standard starting count of each piece per side.
+const START_PIECE_COUNTS = { p: 8, n: 2, b: 2, r: 2, q: 1, k: 1 };
+// Render order matches chess.com strip: pawns → knights → bishops → rooks → queens.
+const CAPTURE_ORDER = ["p", "n", "b", "r", "q"];
+
+// Compute pieces missing from the current state.board for each side.
+// Returns { white: { p: n, ... }, black: { p: n, ... }, score: signedDiff }.
+// "white" object lists BLACK pieces captured BY white; vice-versa for "black".
+function _computeCaptured() {
+  const counts = { white: {}, black: {} };
+  for (const k of CAPTURE_ORDER) { counts.white[k] = 0; counts.black[k] = 0; }
+  // state.board entries are FEN-letters: uppercase white, lowercase black.
+  // Count what's currently on the board for each side.
+  const onBoard = { white: {}, black: {} };
+  for (const k of CAPTURE_ORDER) { onBoard.white[k] = 0; onBoard.black[k] = 0; }
+  for (const piece of state.board) {
+    if (!piece) continue;
+    const lower = piece.toLowerCase();
+    if (lower === "k") continue;
+    if (piece === piece.toUpperCase()) onBoard.white[lower] = (onBoard.white[lower] || 0) + 1;
+    else onBoard.black[lower] = (onBoard.black[lower] || 0) + 1;
+  }
+  // Captured BY white = (start count of black piece) − (currently on board).
+  for (const k of CAPTURE_ORDER) {
+    counts.white[k] = Math.max(0, START_PIECE_COUNTS[k] - onBoard.black[k]);
+    counts.black[k] = Math.max(0, START_PIECE_COUNTS[k] - onBoard.white[k]);
+  }
+  // Score = sum(values captured by white) − sum(values captured by black).
+  let scoreWhite = 0, scoreBlack = 0;
+  for (const k of CAPTURE_ORDER) {
+    scoreWhite += counts.white[k] * PIECE_POINTS[k];
+    scoreBlack += counts.black[k] * PIECE_POINTS[k];
+  }
+  return { counts, score: scoreWhite - scoreBlack };
+}
+
+// Render captured-pieces row + optional "+N" advantage.
+// `forSide` is "white" or "black" — the side that captured them.
+function _renderCapturedRow(forSide, captured, advantage) {
+  const parts = [];
+  // Captured pieces are the OPPONENT's piece colour.
+  // FEN: uppercase = white piece, lowercase = black piece.
+  for (const k of CAPTURE_ORDER) {
+    const n = captured[forSide][k] || 0;
+    if (n <= 0) continue;
+    const pieceChar = forSide === "white" ? k : k.toUpperCase();
+    for (let i = 0; i < n; i += 1) {
+      parts.push(
+        `<img class="cap-piece" src="${pieceSvgUrl(pieceChar)}" alt="${k}">`
+      );
+    }
+  }
+  // advantage > 0 means *this* side leads in material.
+  const adv = advantage > 0 ? `<span class="cap-adv">+${advantage}</span>` : "";
+  return `<span class="cap-row">${parts.join("")}${adv}</span>`;
+}
+
 function renderPlayerStrips() {
   const top = document.getElementById("player-top");
   const bot = document.getElementById("player-bottom");
@@ -2356,12 +2415,22 @@ function renderPlayerStrips() {
   const blackName = (h.Black || "Чёрные").trim() || "Чёрные";
   const whiteElo = (h.WhiteElo || "").trim();
   const blackElo = (h.BlackElo || "").trim();
-  const renderSide = (color, name, elo) => {
+  const whiteAvatar = h.WhiteAvatar || "";
+  const blackAvatar = h.BlackAvatar || "";
+  const cap = _computeCaptured();
+  const advWhite = cap.score > 0 ? cap.score : 0;
+  const advBlack = cap.score < 0 ? -cap.score : 0;
+  const renderSide = (color, name, elo, avatar) => {
     const meta = elo ? `<span class="player-meta">${elo}</span>` : "";
+    const avatarHtml = avatar
+      ? `<img class="player-avatar" src="${escapeHtml(avatar)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'player-disc ${color}'}))">`
+      : `<span class="player-disc ${color}"></span>`;
+    const adv = color === "white" ? advWhite : advBlack;
     return `
-      <span class="player-disc ${color}"></span>
+      ${avatarHtml}
       <span class="player-name">${escapeHtml(name)}</span>
       ${meta}
+      ${_renderCapturedRow(color, cap.counts, adv)}
     `;
   };
   // Visual top of board = side opposite to the bottom-of-screen player.
@@ -2370,10 +2439,12 @@ function renderPlayerStrips() {
   const topColor    = state.flipped ? "white" : "black";
   const bottomName  = bottomColor === "white" ? whiteName : blackName;
   const bottomElo   = bottomColor === "white" ? whiteElo  : blackElo;
+  const bottomAvatar = bottomColor === "white" ? whiteAvatar : blackAvatar;
   const topName     = topColor    === "white" ? whiteName : blackName;
   const topElo      = topColor    === "white" ? whiteElo  : blackElo;
-  top.innerHTML = renderSide(topColor, topName, topElo);
-  bot.innerHTML = renderSide(bottomColor, bottomName, bottomElo);
+  const topAvatar   = topColor    === "white" ? whiteAvatar : blackAvatar;
+  top.innerHTML = renderSide(topColor, topName, topElo, topAvatar);
+  bot.innerHTML = renderSide(bottomColor, bottomName, bottomElo, bottomAvatar);
   top.hidden = false;
   bot.hidden = false;
 }
@@ -2465,6 +2536,7 @@ function jumpToReviewIdx(idx) {
     }
     renderBoard();
     renderBoardHint();
+    renderPlayerStrips();
     // Refresh opening explorer for the current position (fire-and-forget).
     renderOpeningExplorer(fen);
   } catch { /* ignore */ }
