@@ -808,6 +808,7 @@ document.getElementById("btn-flip").addEventListener("click", () => {
   state.flipped = !state.flipped;
   renderBoard();
   renderPlayerStrips();
+  refreshEvalBarFromActive();
 });
 document.getElementById("btn-phys-flip").addEventListener("click", () => {
   if (state.game.active) {
@@ -1562,11 +1563,27 @@ const REVIEW_ORDER = [
   "inaccuracy","mistake","blunder","miss",
 ];
 
+const REVIEW_COLOR = {
+  brilliant: "#26c2a3",
+  great:     "#749bbf",
+  best:      "#81b64c",
+  excellent: "#81b64c",
+  good:      "#95b776",
+  book:      "#d5a47d",
+  forced:    "#96af8b",
+  inaccuracy:"#f7c631",
+  mistake:   "#ffa459",
+  blunder:   "#fa412d",
+  miss:      "#ff7769",
+};
+
 const review = {
   game: null,
   analysis: null,
   activeIdx: -1,
   filter: new Set(),  // active classification filters; empty == show all
+  userSide: null,     // "w" | "b" | null — which side the user played
+  sideAsked: false,   // have we already shown the side-pick modal this session
 };
 
 function fmtCp(cp) {
@@ -1608,8 +1625,34 @@ document.getElementById("btn-review-import").addEventListener("click", async () 
   }
 });
 
+function askUserSide() {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("side-modal");
+    if (!modal) { resolve(null); return; }
+    modal.hidden = false;
+    const onClick = (ev) => {
+      const btn = ev.target.closest("[data-side]");
+      if (!btn) return;
+      modal.hidden = true;
+      modal.removeEventListener("click", onClick);
+      resolve(btn.dataset.side || null);
+    };
+    modal.addEventListener("click", onClick);
+  });
+}
+
 document.getElementById("btn-review-analyse").addEventListener("click", async () => {
   if (!review.game) return;
+  if (!review.sideAsked) {
+    review.sideAsked = true;
+    const picked = await askUserSide();
+    review.userSide = picked || null;
+    // Auto-orient board for the user's side (white = a1 bottom-left).
+    if (picked === "b" && !state.flipped) state.flipped = true;
+    if (picked === "w" && state.flipped) state.flipped = false;
+    renderBoard();
+    renderPlayerStrips();
+  }
   const depthRaw = document.getElementById("review-depth").value.trim();
   const movetimeRaw = document.getElementById("review-movetime").value.trim();
   const depth = depthRaw ? Math.max(6, Math.min(40, parseInt(depthRaw, 10) || 8)) : 8;
@@ -1633,8 +1676,13 @@ document.getElementById("btn-review-analyse").addEventListener("click", async ()
     });
     review.analysis = r;
     renderReviewSummary(r.summary);
+    renderRatingPanel(r.summary);
+    renderPhasesPanel(r.summary);
+    renderEvalGraph(r.moves);
     renderKeyMoments(r.key_moments || []);
     renderReviewMoves();
+    revealEvalBar();
+    updateEvalBar(0, "w");  // reset to neutral until user navigates
     document.getElementById("review-progress").textContent =
       `Готово — ${r.moves.length} ходов проанализировано.`;
   } catch (err) {
@@ -1677,6 +1725,233 @@ function renderReviewSummary(s) {
   } else {
     hint.textContent = "(клик — фильтр)";
   }
+}
+
+function renderRatingPanel(summary) {
+  const host = document.getElementById("review-rating");
+  if (!host) return;
+  const userSide = review.userSide;
+  const card = (color, info) => {
+    const r = info.estimated_rating;
+    const valueHtml = r != null
+      ? `<div class="rating-value">${r}</div>`
+      : `<div class="rating-value is-na">—</div>`;
+    const isYou = userSide === color ? " is-you" : "";
+    const label = color === "w" ? "Белые" : "Чёрные";
+    return `<div class="rating-card${isYou}">
+      <span class="rating-disc ${color}"></span>
+      <div>
+        <div class="rating-label">Game Rating · ${label}${userSide === color ? " (вы)" : ""}</div>
+        ${valueHtml}
+      </div>
+    </div>`;
+  };
+  host.innerHTML = card("w", summary.white) + card("b", summary.black);
+}
+
+function renderPhasesPanel(summary) {
+  const host = document.getElementById("review-phases");
+  if (!host) return;
+  const phases = [
+    ["opening", "Opening Accuracy"],
+    ["middlegame", "Middlegame Accuracy"],
+    ["endgame", "Endgame Accuracy"],
+  ];
+  const fmt = (v) => v == null ? `<span class="phase-acc is-na">—</span>` : `<span class="phase-acc">${v}%</span>`;
+  host.innerHTML = phases.map(([key, title]) => {
+    const w = summary.white.phases?.[key] || {};
+    const b = summary.black.phases?.[key] || {};
+    return `<div class="phase-card">
+      <div class="phase-title">${title}</div>
+      <div class="phase-row"><span><span class="phase-disc w"></span>Белые</span> ${fmt(w.accuracy)}</div>
+      <div class="phase-row"><span><span class="phase-disc b"></span>Чёрные</span> ${fmt(b.accuracy)}</div>
+    </div>`;
+  }).join("");
+}
+
+// ---------- Eval bar ----------
+
+function revealEvalBar() {
+  const bar = document.getElementById("eval-bar");
+  if (bar) bar.hidden = false;
+}
+function hideEvalBar() {
+  const bar = document.getElementById("eval-bar");
+  if (bar) bar.hidden = true;
+}
+
+// Map cp (white POV) to a 0..1 fraction of board-height occupied by white.
+function cpToWhiteFrac(cpWhitePov) {
+  if (cpWhitePov >= 99000) return 1.0;
+  if (cpWhitePov <= -99000) return 0.0;
+  // Same logistic curve as backend (Lichess WP formula); centred at 0 = 50%.
+  const wp = 0.5 + 0.5 * (2.0 / (1.0 + Math.exp(-0.00368208 * cpWhitePov)) - 1.0);
+  return Math.max(0.02, Math.min(0.98, wp));
+}
+
+function updateEvalBar(cpWhitePov, _moverSide) {
+  const bar = document.getElementById("eval-bar");
+  const label = document.getElementById("eval-bar-label");
+  if (!bar || !label) return;
+  const frac = cpToWhiteFrac(cpWhitePov);
+  // White at bottom, black at top: when frac is large (white winning),
+  // white block grows.
+  const flipped = state.flipped;
+  const whiteBottom = !flipped;
+  // CSS variables drive the flex-basis percentages.
+  if (whiteBottom) {
+    bar.style.setProperty("--eval-white", `${(frac * 100).toFixed(2)}%`);
+    bar.style.setProperty("--eval-black", `${((1 - frac) * 100).toFixed(2)}%`);
+  } else {
+    bar.style.setProperty("--eval-white", `${((1 - frac) * 100).toFixed(2)}%`);
+    bar.style.setProperty("--eval-black", `${(frac * 100).toFixed(2)}%`);
+  }
+  // Pretty number.
+  let text;
+  if (cpWhitePov >= 99000)      text = `M${100000 - cpWhitePov}`;
+  else if (cpWhitePov <= -99000) text = `M${cpWhitePov + 100000}`;
+  else text = (Math.abs(cpWhitePov) / 100).toFixed(1);
+  label.textContent = text;
+  // Label sits on the side of whoever has the advantage.
+  const whiteAdvantage = cpWhitePov >= 0;
+  const labelOnTop = (whiteBottom && !whiteAdvantage) || (!whiteBottom && whiteAdvantage);
+  if (labelOnTop) {
+    bar.style.setProperty("--eval-label-top", "4px");
+    bar.style.setProperty("--eval-label-bottom", "auto");
+  } else {
+    bar.style.setProperty("--eval-label-top", "auto");
+    bar.style.setProperty("--eval-label-bottom", "4px");
+  }
+  if (whiteAdvantage) {
+    bar.style.setProperty("--eval-label-bg", "#f1f2f2");
+    bar.style.setProperty("--eval-label-fg", "#0d121d");
+  } else {
+    bar.style.setProperty("--eval-label-bg", "#232629");
+    bar.style.setProperty("--eval-label-fg", "#f1f2f2");
+  }
+}
+
+// Called whenever activeIdx changes (jumpToReviewIdx) to keep the
+// eval bar in sync with the current position.
+function refreshEvalBarFromActive() {
+  const moves = review.analysis ? review.analysis.moves : null;
+  if (!moves) { return; }
+  const idx = review.activeIdx;
+  let cp = 0;
+  let mover = "w";
+  if (idx >= 0) {
+    const m = moves[idx];
+    // m.eval_after_cp is from mover POV; convert to white POV.
+    cp = m.side === "w" ? m.eval_after_cp : -m.eval_after_cp;
+    mover = m.side;
+  } else {
+    // Starting position — use first move's eval_before_cp from white POV.
+    const m0 = moves[0];
+    if (m0) cp = m0.side === "w" ? m0.eval_before_cp : -m0.eval_before_cp;
+  }
+  updateEvalBar(cp, mover);
+}
+
+// ---------- Eval graph (chess.com style) ----------
+
+const GRAPH_DOT_RADIUS = 3.5;
+const GRAPH_W = 600;  // SVG viewBox width
+const GRAPH_H = 90;
+
+function renderEvalGraph(moves) {
+  const wrap = document.getElementById("review-graph-wrap");
+  const svg = document.getElementById("review-graph");
+  const tip = document.getElementById("review-graph-tip");
+  if (!wrap || !svg || !tip || !moves || moves.length === 0) {
+    if (wrap) wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  svg.setAttribute("viewBox", `0 0 ${GRAPH_W} ${GRAPH_H}`);
+  const n = moves.length;
+  // Per-ply white-POV cp.
+  const cps = moves.map((m) =>
+    m.side === "w" ? m.eval_after_cp : -m.eval_after_cp
+  );
+  // x for ply index i (1..n) maps to pixel.
+  const x = (i) => (i / n) * GRAPH_W;
+  // y maps cp to vertical: top = +∞ (white), bottom = -∞ (black).
+  // Use the same logistic mapping as eval bar so visuals are consistent.
+  const y = (cp) => {
+    const frac = cpToWhiteFrac(cp);
+    return GRAPH_H * (1 - frac);
+  };
+  // Areas: top half = black bg (where black is winning above the zero line),
+  // bottom half = white bg.
+  // Easier: split background by current line — too complex with one polygon.
+  // Use a simple two-band background: white bottom half, black top half,
+  // and overlay the eval polyline on top.
+  const polyPoints = cps.map((cp, i) => `${x(i + 1).toFixed(2)},${y(cp).toFixed(2)}`);
+  const fillPath =
+    `M0,${GRAPH_H} ` +
+    `L${x(1).toFixed(2)},${GRAPH_H} ` +
+    polyPoints.map((p) => `L${p}`).join(" ") +
+    ` L${GRAPH_W.toFixed(2)},${GRAPH_H} Z`;
+  const linePath = `M${polyPoints.join(" L")}`;
+  const dots = moves.map((m, i) => {
+    const cls = m.classification;
+    const fill = REVIEW_COLOR[cls] || "#888";
+    return `<circle class="graph-dot cls-${cls}" data-idx="${i}" cx="${x(i + 1).toFixed(2)}" cy="${y(cps[i]).toFixed(2)}" r="${GRAPH_DOT_RADIUS}" fill="${fill}" />`;
+  }).join("");
+  svg.innerHTML = `
+    <rect class="graph-bg-black" x="0" y="0" width="${GRAPH_W}" height="${GRAPH_H / 2}" />
+    <rect class="graph-bg-white" x="0" y="${GRAPH_H / 2}" width="${GRAPH_W}" height="${GRAPH_H / 2}" />
+    <line class="graph-zero" x1="0" y1="${GRAPH_H / 2}" x2="${GRAPH_W}" y2="${GRAPH_H / 2}" />
+    <path d="${fillPath}" fill="rgba(94,170,70,0.18)" />
+    <path class="graph-line" d="${linePath}" />
+    <line id="graph-cursor-line" class="graph-cursor" x1="0" y1="0" x2="0" y2="${GRAPH_H}" style="display:none" />
+    ${dots}
+  `;
+  // Pointer interactions.
+  const onPointerMove = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * GRAPH_W;
+    const idx = Math.max(0, Math.min(n - 1, Math.round((px / GRAPH_W) * n) - 1));
+    const cp = cps[idx];
+    const cursor = svg.querySelector("#graph-cursor-line");
+    if (cursor) {
+      cursor.style.display = "";
+      cursor.setAttribute("x1", x(idx + 1).toFixed(2));
+      cursor.setAttribute("x2", x(idx + 1).toFixed(2));
+    }
+    // Tooltip.
+    const m = moves[idx];
+    const evalText = (() => {
+      if (cp >= 99000) return `M${100000 - cp}`;
+      if (cp <= -99000) return `−M${cp + 100000}`;
+      const v = (cp / 100).toFixed(2);
+      return cp > 0 ? `+${v}` : v;
+    })();
+    const moveNum = Math.ceil(m.ply / 2);
+    const dot = m.side === "b" ? "..." : ".";
+    tip.textContent = `${moveNum}${dot} ${m.move_san} ${evalText}`;
+    tip.hidden = false;
+    // Position tip in the wrap, in pixel coords.
+    const wrapRect = wrap.getBoundingClientRect();
+    const px_in_wrap = ((idx + 1) / n) * wrapRect.width;
+    const py_in_wrap = (y(cp) / GRAPH_H) * wrapRect.height;
+    tip.style.left = `${px_in_wrap}px`;
+    tip.style.top = `${py_in_wrap - 6}px`;
+  };
+  const onPointerLeave = () => {
+    tip.hidden = true;
+    const cursor = svg.querySelector("#graph-cursor-line");
+    if (cursor) cursor.style.display = "none";
+  };
+  const onClick = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * GRAPH_W;
+    const idx = Math.max(0, Math.min(n - 1, Math.round((px / GRAPH_W) * n) - 1));
+    jumpToReviewIdx(idx);
+  };
+  svg.onpointermove = onPointerMove;
+  svg.onpointerleave = onPointerLeave;
+  svg.onclick = onClick;
 }
 
 function renderKeyMoments(moments) {
@@ -2055,6 +2330,25 @@ function jumpToReviewIdx(idx) {
     el.classList.toggle("is-active", i === idx);
   });
   refreshNavButtons();
+  refreshEvalBarFromActive();
+  refreshGraphCursorFromActive();
+}
+
+function refreshGraphCursorFromActive() {
+  const moves = review.analysis ? review.analysis.moves : null;
+  const svg = document.getElementById("review-graph");
+  if (!moves || !svg) return;
+  const cursor = svg.querySelector("#graph-cursor-line");
+  if (!cursor) return;
+  const idx = review.activeIdx;
+  if (idx < 0) {
+    cursor.style.display = "none";
+    return;
+  }
+  const x = ((idx + 1) / moves.length) * GRAPH_W;
+  cursor.style.display = "";
+  cursor.setAttribute("x1", x.toFixed(2));
+  cursor.setAttribute("x2", x.toFixed(2));
 }
 
 function renderBoardHint() {

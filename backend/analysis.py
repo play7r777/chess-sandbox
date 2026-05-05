@@ -91,6 +91,7 @@ class MoveAnalysis:
     coach: list[str] | None = None  # additional Russian "coach" hints
     best_pv_uci: list[str] | None = None  # engine's top-line continuation
     best_pv_san: list[str] | None = None  # same, in SAN from pre_board
+    phase: str = "middlegame"  # opening / middlegame / endgame
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +111,7 @@ class MoveAnalysis:
             "coach": self.coach or [],
             "best_pv_uci": self.best_pv_uci or [],
             "best_pv_san": self.best_pv_san or [],
+            "phase": self.phase,
         }
 
 
@@ -805,6 +807,16 @@ async def analyse_game(
         chess.WHITE: [], chess.BLACK: []
     }
     cpls: dict[chess.Color, list[int]] = {chess.WHITE: [], chess.BLACK: []}
+    # Per-phase per-side accuracy + wp_before tables for chess.com-style
+    # opening / middlegame / endgame breakdown.
+    phase_accuracies: dict[chess.Color, dict[str, list[float]]] = {
+        chess.WHITE: {"opening": [], "middlegame": [], "endgame": []},
+        chess.BLACK: {"opening": [], "middlegame": [], "endgame": []},
+    }
+    phase_wp_before: dict[chess.Color, dict[str, list[float]]] = {
+        chess.WHITE: {"opening": [], "middlegame": [], "endgame": []},
+        chess.BLACK: {"opening": [], "middlegame": [], "endgame": []},
+    }
     counts: dict[str, int] = {label: 0 for label in CLASS_LABELS}
     # Track the opponent's previous move to detect recaptures.
     prev_move: chess.Move | None = None
@@ -979,8 +991,11 @@ async def analyse_game(
             is_top1=is_top1,
         )
 
-        accuracies[side_color].append(_accuracy_for_pair(wp_before, wp_after))
+        ply_accuracy = _accuracy_for_pair(wp_before, wp_after)
+        accuracies[side_color].append(ply_accuracy)
         wp_before_per_color[side_color].append(wp_before)
+        phase_accuracies[side_color][phase].append(ply_accuracy)
+        phase_wp_before[side_color][phase].append(wp_before)
         # Cap per-ply CPL for ACPL averaging — a single forced-mate
         # blowout otherwise dominates the average and makes the metric
         # meaningless. chess.com does the same kind of capping.
@@ -1023,6 +1038,7 @@ async def analyse_game(
                 coach=coach or None,
                 best_pv_uci=best_pv_uci or None,
                 best_pv_san=best_pv_san or None,
+                phase=phase,
             )
         )
 
@@ -1074,26 +1090,75 @@ async def analyse_game(
             if len(key_moments) >= 5:
                 break
 
+    def _phase_block(side: chess.Color) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for phase_name in ("opening", "middlegame", "endgame"):
+            accs = phase_accuracies[side][phase_name]
+            wps = phase_wp_before[side][phase_name]
+            out[phase_name] = {
+                "accuracy": (
+                    round(_caps2_game_accuracy(accs, wps), 1) if accs else None
+                ),
+                "moves": len(accs),
+            }
+        return out
+
+    def _estimate_rating(accuracy: float, n_moves: int) -> int | None:
+        """Rough chess.com-style Elo estimate from CAPS2 accuracy.
+
+        Empirical mapping calibrated to common observations on chess.com
+        Game Review (~80% accuracy ≈ 1500 Elo, ~90% ≈ 2000, ~95% ≈ 2400).
+        Below ~20 plies (10 moves per side) the estimate is unreliable,
+        so we suppress it.
+        """
+        if n_moves < 10:
+            return None
+        # Piecewise linear: accuracy → rating.
+        anchors = [
+            (50.0, 200),
+            (60.0, 600),
+            (70.0, 1100),
+            (75.0, 1350),
+            (80.0, 1600),
+            (85.0, 1850),
+            (90.0, 2100),
+            (93.0, 2300),
+            (95.0, 2450),
+            (97.0, 2600),
+            (99.0, 2750),
+            (100.0, 2850),
+        ]
+        if accuracy <= anchors[0][0]:
+            return anchors[0][1]
+        if accuracy >= anchors[-1][0]:
+            return anchors[-1][1]
+        for (a0, r0), (a1, r1) in zip(anchors, anchors[1:], strict=False):
+            if a0 <= accuracy <= a1:
+                t = (accuracy - a0) / (a1 - a0) if a1 > a0 else 0.0
+                return int(round(r0 + t * (r1 - r0)))
+        return None
+
+    white_acc = _caps2_game_accuracy(
+        accuracies[chess.WHITE], wp_before_per_color[chess.WHITE]
+    )
+    black_acc = _caps2_game_accuracy(
+        accuracies[chess.BLACK], wp_before_per_color[chess.BLACK]
+    )
+
     summary = {
         "white": {
-            "accuracy": round(
-                _caps2_game_accuracy(
-                    accuracies[chess.WHITE], wp_before_per_color[chess.WHITE]
-                ),
-                1,
-            ),
+            "accuracy": round(white_acc, 1),
             "acpl": round(_avg(cpls[chess.WHITE]), 1),
             "moves": len(cpls[chess.WHITE]),
+            "phases": _phase_block(chess.WHITE),
+            "estimated_rating": _estimate_rating(white_acc, len(cpls[chess.WHITE])),
         },
         "black": {
-            "accuracy": round(
-                _caps2_game_accuracy(
-                    accuracies[chess.BLACK], wp_before_per_color[chess.BLACK]
-                ),
-                1,
-            ),
+            "accuracy": round(black_acc, 1),
             "acpl": round(_avg(cpls[chess.BLACK]), 1),
             "moves": len(cpls[chess.BLACK]),
+            "phases": _phase_block(chess.BLACK),
+            "estimated_rating": _estimate_rating(black_acc, len(cpls[chess.BLACK])),
         },
         "counts": counts,
     }

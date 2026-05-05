@@ -37,7 +37,14 @@
     <main class="layout">
       <section class="board-area">
         <div id="player-top" class="player-strip" data-view="analysis" hidden></div>
-        <div id="board" class="board" aria-label="Chess board"></div>
+        <div class="board-with-evalbar">
+          <div id="eval-bar" class="eval-bar" data-view="analysis" hidden>
+            <div class="eval-bar-black"></div>
+            <div class="eval-bar-white"></div>
+            <div class="eval-bar-label" id="eval-bar-label">0.0</div>
+          </div>
+          <div id="board" class="board" aria-label="Chess board"></div>
+        </div>
         <div id="player-bottom" class="player-strip" data-view="analysis" hidden></div>
         <div class="board-nav" id="board-nav">
           <button id="nav-first" type="button" title="В начало партии" disabled>⏮</button>
@@ -161,6 +168,12 @@
             <span id="review-progress" class="muted"></span>
           </div>
           <div id="review-summary" class="review-summary"></div>
+          <div id="review-rating" class="review-rating"></div>
+          <div id="review-phases" class="review-phases"></div>
+          <div id="review-graph-wrap" class="review-graph-wrap" hidden>
+            <svg id="review-graph" class="review-graph" preserveAspectRatio="none"></svg>
+            <div id="review-graph-tip" class="review-graph-tip" hidden></div>
+          </div>
           <div id="review-key-moments" class="review-key-moments"></div>
           <div id="drill-panel" class="drill-panel" style="display:none"></div>
           <div id="opening-explorer" class="opening-explorer"></div>
@@ -193,6 +206,17 @@
       </aside>
     </main>
 
+    <div id="side-modal" class="side-modal" hidden>
+      <div class="side-modal-card">
+        <h3>За какую сторону вы играли?</h3>
+        <p class="muted">Это нужно только для подсветки в отчёте — анализ строится за обе стороны.</p>
+        <div class="side-modal-actions">
+          <button type="button" data-side="w" class="side-btn side-btn-white">Белые</button>
+          <button type="button" data-side="b" class="side-btn side-btn-black">Чёрные</button>
+          <button type="button" data-side="" class="side-btn side-btn-none">Не указывать</button>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/static/app.js"></script>
   </body>
 </html>

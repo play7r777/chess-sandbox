@@ -557,3 +557,176 @@ body.mode-legal .mode-toggle { display: none !important; }
 .review-summary .pill.is-disabled { opacity: 0.4; cursor: default; }
 
 .review-moves li.is-hidden { display: none; }
+
+/* ---------- Eval bar (left of board) ---------- */
+.board-with-evalbar {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: min(80vh, 100%);
+}
+.board-with-evalbar > .board { width: 100%; flex: 1 1 auto; }
+.eval-bar {
+  position: relative;
+  width: 22px;
+  flex: 0 0 22px;
+  border: 2px solid #2a2017;
+  border-radius: 3px;
+  overflow: hidden;
+  background: #232629;
+  display: flex;
+  flex-direction: column;
+}
+.eval-bar[hidden] { display: none; }
+.eval-bar-black {
+  flex: 0 0 var(--eval-black, 50%);
+  background: #232629;
+  transition: flex-basis 0.18s ease;
+}
+.eval-bar-white {
+  flex: 0 0 var(--eval-white, 50%);
+  background: #f1f2f2;
+  transition: flex-basis 0.18s ease;
+}
+.eval-bar-label {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  padding: 2px 4px;
+  border-radius: 3px;
+  pointer-events: none;
+  white-space: nowrap;
+  /* Position swaps based on which side is winning. */
+  top: var(--eval-label-top, 4px);
+  bottom: var(--eval-label-bottom, auto);
+  background: var(--eval-label-bg, #232629);
+  color: var(--eval-label-fg, #f1f2f2);
+}
+
+/* ---------- Game rating + phase accuracy panel ---------- */
+.review-rating, .review-phases {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+.review-rating .rating-card {
+  background: #1b2230;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.review-rating .rating-card.is-you { border-color: #5eaa46; box-shadow: 0 0 0 1px rgba(94,170,70,0.25); }
+.review-rating .rating-disc {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1px solid #2a3140; flex: 0 0 auto;
+}
+.review-rating .rating-disc.w { background: #f1f2f2; }
+.review-rating .rating-disc.b { background: #232629; border-color: #4a5060; }
+.review-rating .rating-label { font-size: 11px; color: #8ba0bf; text-transform: uppercase; letter-spacing: 0.04em; }
+.review-rating .rating-value { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.review-rating .rating-value.is-na { color: #8ba0bf; font-size: 14px; font-weight: 600; }
+
+.review-phases .phase-card {
+  background: #1b2230;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.review-phases .phase-card .phase-title {
+  font-size: 11px; color: #8ba0bf; text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.review-phases .phase-card .phase-row { display: flex; justify-content: space-between; gap: 6px; font-variant-numeric: tabular-nums; font-size: 13px; }
+.review-phases .phase-card .phase-row .phase-disc { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: middle; border: 1px solid #2a3140; }
+.review-phases .phase-card .phase-row .phase-disc.w { background: #f1f2f2; }
+.review-phases .phase-card .phase-row .phase-disc.b { background: #232629; border-color: #4a5060; }
+.review-phases .phase-card .phase-row .phase-acc { font-weight: 700; }
+.review-phases .phase-card .phase-row .phase-acc.is-na { color: #8ba0bf; font-weight: 500; }
+
+/* ---------- Eval graph (chess.com style) ---------- */
+.review-graph-wrap {
+  position: relative;
+  background: #1b2230;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  padding: 4px 6px;
+  margin: 10px 0 0;
+  height: 90px;
+}
+.review-graph {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+.review-graph .graph-bg-white { fill: #f1f2f2; }
+.review-graph .graph-bg-black { fill: #232629; }
+.review-graph .graph-zero    { stroke: #8ba0bf; stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.6; }
+.review-graph .graph-line    { stroke: #5eaa46; stroke-width: 1.5; fill: none; }
+.review-graph .graph-cursor  { stroke: #f7c631; stroke-width: 1; }
+.review-graph .graph-dot     { stroke: #0d121d; stroke-width: 0.6; cursor: pointer; }
+.review-graph-tip {
+  position: absolute;
+  background: #f1f2f2;
+  color: #0d121d;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+.review-graph-tip::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -4px;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: #f1f2f2;
+}
+
+/* ---------- Side selection modal ---------- */
+.side-modal {
+  position: fixed; inset: 0;
+  background: rgba(13, 18, 29, 0.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.side-modal[hidden] { display: none; }
+.side-modal-card {
+  background: #1b2230;
+  border: 1px solid #2a3140;
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 420px;
+  text-align: center;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.side-modal-card h3 { margin: 0 0 8px; font-size: 18px; }
+.side-modal-card p { margin: 0 0 16px; }
+.side-modal-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.side-btn {
+  padding: 10px 18px;
+  border-radius: 8px;
+  border: 1px solid #2a3140;
+  font-weight: 700;
+  cursor: pointer;
+  font-size: 14px;
+}
+.side-btn-white { background: #f1f2f2; color: #0d121d; }
+.side-btn-black { background: #232629; color: #f1f2f2; border-color: #4a5060; }
+.side-btn-none  { background: #2a3140; color: #cbd5e1; }
+.side-btn:hover { filter: brightness(1.1); }
