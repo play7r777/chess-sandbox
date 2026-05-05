@@ -977,6 +977,9 @@ async def analyse_game(
         is_hidden_sac = False
         moving_piece_val = _piece_value(pre_board.piece_at(move.from_square))
         captured_piece_val = _piece_value(pre_board.piece_at(move.to_square))
+        # En-passant: the captured pawn sits behind move.to_square, not on it.
+        if captured_piece_val == 0 and pre_board.is_en_passant(move):
+            captured_piece_val = PIECE_VALUES[chess.PAWN]
         net_winning_trade = captured_piece_val >= moving_piece_val
         from_was_attacked = bool(
             pre_board.attackers(not pre_board.turn, move.from_square)
