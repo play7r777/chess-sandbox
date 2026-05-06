@@ -242,7 +242,11 @@ def _fetch_lichess(url: str) -> ImportedGame:
 
 
 def _fetch_chesscom(url: str) -> ImportedGame:
-    m = re.search(r"chess\.com/game/(live|daily)/(\d+)", url)
+    # Accept both the canonical /game/<kind>/<id> form and the analysis-page
+    # variant (/analysis/game/<kind>/<id>...), with any ?username=…&move=…
+    # query suffix. The frontend also normalises before submit, this is the
+    # backend belt-and-braces.
+    m = re.search(r"chess\.com/(?:analysis/)?game/(live|daily)/(\d+)", url)
     if not m:
         raise ValueError(
             "chess.com URL must look like https://www.chess.com/game/live/<id>"

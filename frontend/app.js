@@ -1855,8 +1855,51 @@ function fmtCp(cp) {
   return cp > 0 ? `+${v}` : v;
 }
 
+// Strip query/fragment/sub-paths from chess.com / lichess game URLs so users can
+// paste any flavour (live, analysis, ?username=…&move=…) and get the canonical
+// game link the importer expects.
+function normalizeReviewSource(raw) {
+  const src = (raw || "").trim();
+  if (!src) return src;
+  let url;
+  try { url = new URL(src); } catch { return src; }
+  const host = url.hostname.toLowerCase();
+  if (host.endsWith("chess.com")) {
+    const m = url.pathname.match(/\/game\/(live|daily|rapid|bullet|blitz)\/(\d+)/i)
+      || url.pathname.match(/\/(live|daily|rapid|bullet|blitz)\/(\d+)/i);
+    if (m) {
+      const kind = m[1].toLowerCase();
+      const id = m[2];
+      return `https://www.chess.com/game/${kind}/${id}`;
+    }
+    return src;
+  }
+  if (host.endsWith("lichess.org")) {
+    const m = url.pathname.match(/^\/(?:embed\/)?([a-zA-Z0-9]{8})/);
+    if (m) return `https://lichess.org/${m[1]}`;
+    return src;
+  }
+  return src;
+}
+
+(function wireReviewSourceAutoNormalize() {
+  const input = document.getElementById("review-source");
+  if (!input) return;
+  const normalize = () => {
+    const v = input.value;
+    const n = normalizeReviewSource(v);
+    if (n && n !== v) input.value = n;
+  };
+  input.addEventListener("paste", () => setTimeout(normalize, 0));
+  input.addEventListener("change", normalize);
+  input.addEventListener("blur", normalize);
+})();
+
 document.getElementById("btn-review-import").addEventListener("click", async () => {
-  const src = document.getElementById("review-source").value.trim();
+  const input = document.getElementById("review-source");
+  const normalized = normalizeReviewSource(input.value);
+  if (normalized !== input.value) input.value = normalized;
+  const src = normalized.trim();
   if (!src) { setStatus("Вставьте ссылку или PGN.", "error"); return; }
   document.getElementById("btn-review-import").disabled = true;
   document.getElementById("review-progress").textContent = "Загрузка партии…";
