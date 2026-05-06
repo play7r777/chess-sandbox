@@ -12,11 +12,13 @@ import { Chess } from "/static/lib/chess.js";
 
 // Persistent UI settings (localStorage). Falls back to defaults if unset.
 const SETTINGS_KEY = "chess-sandbox/settings/v1";
-const DEFAULT_PIECE_SET = "cburnett";
+const DEFAULT_PIECE_SET = "merida";
 const DEFAULT_BOARD_THEME = "brown";
 
-// Available board themes — each is just a colour pair (light, dark) +
-// last-move highlight tint. Adding new themes is purely cosmetic.
+// Available board themes — each is either a flat colour pair (light, dark)
+// or an `image` describing a full pre-rendered board sprite. When `image`
+// is set the per-square light/dark backgrounds are dropped and the image
+// is stretched across the whole 8×8 grid (see `applyBoardTheme`).
 const BOARD_THEMES = {
   brown:      { name: "Brown",      light: "#edd6b0", dark: "#b88762", highlight: "rgba(220, 200, 90, 0.45)" },
   green:      { name: "Green",      light: "#eeeed2", dark: "#769656", highlight: "rgba(255, 240, 90, 0.45)" },
@@ -28,15 +30,17 @@ const BOARD_THEMES = {
   forest:     { name: "Forest",     light: "#d6e3c4", dark: "#3f6a3a", highlight: "rgba(255, 230, 100, 0.45)" },
   tournament: { name: "Tournament", light: "#c9c9c9", dark: "#5d6470", highlight: "rgba(180, 200, 255, 0.40)" },
   newspaper:  { name: "Newspaper",  light: "#ffffff", dark: "#9b9b9b", highlight: "rgba(255, 230, 90, 0.45)" },
+  set1:       { name: "#1",         image: "/static/board-themes/set1.png", highlight: "rgba(255, 220, 90, 0.45)" },
 };
 
 // Available piece sets. Files live under /static/pieces/<key>/ and are
 // open-source pulls from the lichess project (which kindly hosts them
 // under permissive licenses). Names are mapped to the closest chess.com
 // counterpart in the UI for familiarity, but the assets are independent.
+// `ext` defaults to "svg" — set it explicitly for raster sets.
 const PIECE_SETS = {
-  cburnett:   { name: "Classic" },
   merida:     { name: "Merida" },
+  cburnett:   { name: "Classic" },
   alpha:      { name: "Alpha" },
   maestro:    { name: "Maestro" },
   california: { name: "California" },
@@ -44,10 +48,31 @@ const PIECE_SETS = {
   staunty:    { name: "Staunty" },
   fantasy:    { name: "Fantasy" },
   pirouetti:  { name: "Wood" },
+  set1:       { name: "#1", ext: "png" },
 };
 
+const DEFAULT_PV_ARROW_COUNT = 6;
+const MAX_PV_ARROW_COUNT = 12;
+const DEFAULT_BEST_LINE_LENGTH = 10;
+const MAX_BEST_LINE_LENGTH = 24;
+function _clampArrows(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_PV_ARROW_COUNT;
+  return Math.max(1, Math.min(MAX_PV_ARROW_COUNT, Math.round(v)));
+}
+function _clampBestLine(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_BEST_LINE_LENGTH;
+  return Math.max(1, Math.min(MAX_BEST_LINE_LENGTH, Math.round(v)));
+}
 function loadSettings() {
-  const fallback = { theme: DEFAULT_BOARD_THEME, pieces: DEFAULT_PIECE_SET, soundOn: true };
+  const fallback = {
+    theme: DEFAULT_BOARD_THEME,
+    pieces: DEFAULT_PIECE_SET,
+    soundOn: true,
+    pvArrowCount: DEFAULT_PV_ARROW_COUNT,
+    bestLineLength: DEFAULT_BEST_LINE_LENGTH,
+  };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return fallback;
@@ -56,6 +81,8 @@ function loadSettings() {
       theme: BOARD_THEMES[parsed.theme] ? parsed.theme : DEFAULT_BOARD_THEME,
       pieces: PIECE_SETS[parsed.pieces] ? parsed.pieces : DEFAULT_PIECE_SET,
       soundOn: parsed.soundOn !== false,
+      pvArrowCount: _clampArrows(parsed.pvArrowCount ?? DEFAULT_PV_ARROW_COUNT),
+      bestLineLength: _clampBestLine(parsed.bestLineLength ?? DEFAULT_BEST_LINE_LENGTH),
     };
   } catch { return fallback; }
 }
@@ -66,45 +93,100 @@ function saveSettings(s) {
 
 const userSettings = loadSettings();
 function getPieceSet() { return userSettings.pieces; }
+function getPieceExt() {
+  const set = PIECE_SETS[getPieceSet()];
+  return (set && set.ext) || "svg";
+}
 function applyBoardTheme() {
   const t = BOARD_THEMES[userSettings.theme] || BOARD_THEMES[DEFAULT_BOARD_THEME];
   const root = document.documentElement;
-  root.style.setProperty("--light-sq", t.light);
-  root.style.setProperty("--dark-sq", t.dark);
+  // Always update highlight tint.
   root.style.setProperty("--highlight", t.highlight);
+  // Image-backed themes: the whole board uses one PNG/JPG; squares stay
+  // transparent so the image shows through. Otherwise fall back to
+  // per-square flat colours.
+  if (t.image) {
+    root.style.setProperty("--board-image", `url("${t.image}")`);
+    root.style.setProperty("--light-sq", "transparent");
+    root.style.setProperty("--dark-sq", "transparent");
+    document.body.classList.add("board-theme-image");
+  } else {
+    root.style.setProperty("--board-image", "none");
+    root.style.setProperty("--light-sq", t.light);
+    root.style.setProperty("--dark-sq", t.dark);
+    document.body.classList.remove("board-theme-image");
+  }
 }
 applyBoardTheme();
 
-// ----- Move sound (synthesized via WebAudio so we don't ship a binary) -----
-let _audioCtx = null;
-function _getAudioCtx() {
-  if (_audioCtx) return _audioCtx;
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  if (!Ctx) return null;
-  try { _audioCtx = new Ctx(); } catch { _audioCtx = null; }
-  return _audioCtx;
+// ----- Move sounds (real .wav assets shipped under /static/sounds) -----
+//
+// Mirrors chess.com semantics: each chess event (plain move, capture,
+// castle, promote, check, illegal) plays its own short sample. We use
+// HTMLAudioElement here — `Audio.cloneNode()` cheaply gives us an
+// independent playback so two rapid moves never cancel each other.
+const SOUND_FILES = {
+  "move-self":     "/static/sounds/move-self.wav",
+  "move-opponent": "/static/sounds/move-opponent.wav",
+  "move-check":    "/static/sounds/move-check.wav",
+  "capture":       "/static/sounds/capture.wav",
+  "castle":        "/static/sounds/castle.wav",
+  "promote":       "/static/sounds/promote.wav",
+  "illegal":       "/static/sounds/illegal.wav",
+};
+const _soundCache = {};
+function _getSound(name) {
+  if (_soundCache[name]) return _soundCache[name];
+  const url = SOUND_FILES[name];
+  if (!url) return null;
+  try {
+    const a = new Audio(url);
+    a.preload = "auto";
+    _soundCache[name] = a;
+    return a;
+  } catch { return null; }
 }
-// Short tonal "click" approximating a chess.com piece-drop sound: a quick
-// burst of low-mid frequencies with fast exponential decay. ~70ms total.
-function playMoveSound() {
+function _playWav(name) {
   if (!userSettings.soundOn) return;
-  const ctx = _getAudioCtx();
-  if (!ctx) return;
-  if (ctx.state === "suspended") { try { ctx.resume(); } catch { /* ignore */ } }
-  const t0 = ctx.currentTime;
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.type = "triangle";
-  // Slight pitch envelope from 320 → 220 Hz gives the wooden "tonk" feel.
-  osc.frequency.setValueAtTime(320, t0);
-  osc.frequency.exponentialRampToValueAtTime(220, t0 + 0.05);
-  gain.gain.setValueAtTime(0.0001, t0);
-  gain.gain.exponentialRampToValueAtTime(0.35, t0 + 0.005);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.10);
-  osc.connect(gain).connect(ctx.destination);
-  osc.start(t0);
-  osc.stop(t0 + 0.12);
+  const base = _getSound(name);
+  if (!base) return;
+  try {
+    // Cloning lets overlapping playbacks coexist without clobbering each
+    // other (engine reply + animation can collide otherwise).
+    const a = base.cloneNode();
+    const p = a.play();
+    if (p && typeof p.catch === "function") p.catch(() => { /* autoplay blocked */ });
+  } catch { /* ignore */ }
 }
+// Pre-load all samples eagerly so the first move is never silent on
+// poor connections.
+Object.keys(SOUND_FILES).forEach(_getSound);
+
+// Pick a sound key from a chess.js move object. `inCheck` is the result
+// of `chess.isCheck()` (or `isCheckmate()`) AFTER the move was applied.
+function _moveSoundKey(move, { isOwn, inCheck }) {
+  if (inCheck) return "move-check";
+  const flags = (move && move.flags) || "";
+  if (flags.includes("p")) return "promote";
+  if (flags.includes("k") || flags.includes("q")) return "castle";
+  if (flags.includes("c") || flags.includes("e")) return "capture";
+  return isOwn ? "move-self" : "move-opponent";
+}
+// SAN-only fallback used by the analysis review (we don't always have a
+// chess.js move object there, just `move_san` from the backend).
+function _moveSoundKeyFromSan(san, { isOwn }) {
+  if (!san) return isOwn ? "move-self" : "move-opponent";
+  if (/[+#]/.test(san)) return "move-check";
+  if (/^O-O(-O)?/.test(san)) return "castle"; // O-O / O-O-O
+  if (san.includes("=")) return "promote";
+  if (san.includes("x")) return "capture";
+  return isOwn ? "move-self" : "move-opponent";
+}
+function playMoveSoundFor(move, opts) { _playWav(_moveSoundKey(move, opts || {})); }
+function playMoveSoundForSan(san, opts) { _playWav(_moveSoundKeyFromSan(san, opts || {})); }
+function playIllegalSound() { _playWav("illegal"); }
+// Back-compat: the settings toggle calls this to demo "sound is on".
+function playMoveSound() { _playWav("move-self"); }
 
 const SOUND_ON_PATH = "M17.33 17C16.93 17.43 16.5 17.47 16.06 17.07L15.93 16.94C15.5 16.54 15.46 16.04 15.86 15.61C16.69 14.44 16.99 13.21 16.99 11.91C16.99 10.71 16.72 9.53996 15.89 8.40996C15.49 7.97996 15.52 7.47996 15.96 7.03996L16.03 6.96996C16.46 6.53996 16.93 6.56996 17.33 6.99996C18.53 8.56996 19 10.27 19 11.9C19 13.6 18.57 15.37 17.33 17ZM20.67 21C20.27 21.47 19.8 21.47 19.37 21.03L19.3 20.96C18.87 20.53 18.87 20.06 19.27 19.59C21.17 17.29 22 14.62 22 11.92C22 9.28996 21.17 6.68996 19.23 4.38996C18.83 3.91996 18.83 3.45996 19.26 3.05996L19.39 2.92996C19.82 2.52996 20.29 2.52996 20.69 2.99996C22.96 5.66996 23.99 8.82996 23.99 11.93C23.99 15.1 22.99 18.3 20.66 21H20.67ZM14 1.49996V22.5C14 23.43 12.9 23.67 12.23 22.9L8.92999 19.1C8.25999 18.3 7.59999 18 6.55999 18H2.65999C0.65999 18 -0.0100098 17.33 -0.0100098 15.33V8.65996C-0.0100098 6.65996 0.65999 5.98995 2.65999 5.98995H6.55999C7.58999 5.68996 8.25999 5.68996 8.92999 4.88996L12.23 1.08996C12.9 0.319955 14 0.559955 14 1.48996V1.49996Z";
 const SOUND_OFF_PATH = "M14 1.5V22.5C14 23.43 12.9 23.67 12.23 22.9L8.93 19.1C8.26 18.3 7.6 18 6.56 18H2.66C0.66 18 -0.01 17.33 -0.01 15.33V8.66C-0.01 6.66 0.66 5.99 2.66 5.99H6.56C7.59 5.99 8.26 5.69 8.93 4.89L12.23 1.09C12.9 0.32 14 0.56 14 1.49V1.5ZM23.41 13.41L21 15.83L18.59 13.41L17.17 14.83L19.59 17.24L17.17 19.66L18.59 21.07L21 18.66L23.41 21.07L24.83 19.66L22.41 17.24L24.83 14.83L23.41 13.41Z";
@@ -126,7 +208,7 @@ function escapeHtml(s) {
 
 function pieceSvgUrl(piece) {
   const color = piece === piece.toUpperCase() ? "w" : "b";
-  return `/static/pieces/${getPieceSet()}/${color}${piece.toUpperCase()}.svg`;
+  return `/static/pieces/${getPieceSet()}/${color}${piece.toUpperCase()}.${getPieceExt()}`;
 }
 
 function makePieceImg(piece, options = {}) {
@@ -334,9 +416,12 @@ function makeReviewBadge(cls) {
   return wrap;
 }
 
-// Build a green SVG-arrow overlay over the board (Stockfish's best
-// move + a couple of plies of the principal variation as fading
-// translucent arrows behind it). Called every renderBoard().
+// Build an SVG-arrow overlay over the board with one arrow per ply of
+// Stockfish's principal variation. Arrows are coloured by which side
+// is to move at that ply (white-ish for white, dark for black) and
+// fade with depth so the immediate best move is the most contrasty.
+// Each arrow gets a small numbered badge at its tail showing the
+// per-side order ("white's 1st move", "white's 2nd", etc.).
 function renderBoardArrows() {
   const existing = boardEl.querySelector(".board-arrows");
   if (existing) existing.remove();
@@ -350,72 +435,133 @@ function renderBoardArrows() {
   svg.setAttribute("viewBox", "0 0 8 8");
   svg.setAttribute("preserveAspectRatio", "none");
 
-  // Reusable arrowhead marker per opacity level.
+  // Side-of-move palette. White arrows are off-white with a thin dark
+  // outline so they stay visible on light squares; black arrows are
+  // a deep slate with a thin light outline.
+  const PALETTE = {
+    w: { fill: "245, 245, 245", outline: "rgba(15, 18, 25, 0.55)" },
+    b: { fill: "30, 32, 38",    outline: "rgba(255, 255, 255, 0.45)" },
+  };
+
+  // Side-to-move at the position currently displayed. PV[0] is played
+  // by this side; the colour of arrow `i` is decided by `(stm + i) % 2`.
+  const stm = state.sideToMove === "b" ? "b" : "w";
+  const count = _clampArrows(userSettings.pvArrowCount);
+  const maxPlies = count * 2;
+
+  // Build [ply][side] -> alpha lookup. Arrow alpha fades linearly
+  // within each side from 0.92 down to 0.30 across `count` arrows.
+  function alphaFor(orderInSide) {
+    const t = (orderInSide - 1) / Math.max(1, count - 1);
+    return Math.max(0.22, 0.92 - 0.62 * t);
+  }
+
+  // We need a marker per arrow because the head colour must match the
+  // line. Markers are minted on the fly and referenced by id.
   const defs = document.createElementNS(NS, "defs");
-  const tints = [
-    { id: "arrow-best", fill: "#5eaa46" },
-    { id: "arrow-pv1",  fill: "rgba(94, 170, 70, 0.55)" },
-    { id: "arrow-pv2",  fill: "rgba(94, 170, 70, 0.32)" },
-  ];
-  for (const t of tints) {
+  svg.appendChild(defs);
+  let markerSeq = 0;
+  function mintMarker(colorRgba) {
+    const id = `arrow-mk-${markerSeq++}`;
     const m = document.createElementNS(NS, "marker");
-    m.setAttribute("id", t.id);
+    m.setAttribute("id", id);
     m.setAttribute("viewBox", "0 0 10 10");
     m.setAttribute("refX", "7");
     m.setAttribute("refY", "5");
-    m.setAttribute("markerWidth", "3.4");
-    m.setAttribute("markerHeight", "3.4");
+    m.setAttribute("markerWidth", "2.6");
+    m.setAttribute("markerHeight", "2.6");
     m.setAttribute("orient", "auto");
     const tip = document.createElementNS(NS, "path");
-    tip.setAttribute("d", "M0,1 L9,5 L0,9 L2.5,5 Z");
-    tip.setAttribute("fill", t.fill);
+    tip.setAttribute("d", "M0,1.5 L9,5 L0,8.5 L2.5,5 Z");
+    tip.setAttribute("fill", colorRgba);
     m.appendChild(tip);
     defs.appendChild(m);
+    return id;
   }
-  svg.appendChild(defs);
 
-  function drawArrow(fromSq, toSq, color, markerId, width) {
+  function drawArrow(fromSq, toSq, side, orderInSide, totalIdx) {
     const a = squareToBoardXY(fromSq);
     const b = squareToBoardXY(toSq);
     if (!a || !b) return;
     const dx = b.x - a.x, dy = b.y - a.y;
     const len = Math.sqrt(dx * dx + dy * dy);
     if (len < 0.01) return;
-    // Pull the line back from both ends a little so the arrow
-    // sits *on* the squares instead of hiding the piece glyphs.
+    const pal = PALETTE[side] || PALETTE.w;
+    const alpha = alphaFor(orderInSide);
+    const fill = `rgba(${pal.fill}, ${alpha.toFixed(3)})`;
+    // Slightly thicker outline so the arrow body stays readable on
+    // both light and dark squares regardless of side colour.
+    const outline = pal.outline;
     const inset = 0.30;
     const x1 = a.x + (dx / len) * 0.18;
     const y1 = a.y + (dy / len) * 0.18;
     const x2 = b.x - (dx / len) * inset;
     const y2 = b.y - (dy / len) * inset;
+    // Width tapers slightly with depth so first move looks the boldest.
+    const w = 0.13 + (alpha - 0.22) * 0.08;
+    const markerId = mintMarker(fill);
+    // Outline pass (drawn first, slightly wider) for contrast.
+    const outl = document.createElementNS(NS, "line");
+    outl.setAttribute("x1", x1);
+    outl.setAttribute("y1", y1);
+    outl.setAttribute("x2", x2);
+    outl.setAttribute("y2", y2);
+    outl.setAttribute("stroke", outline);
+    outl.setAttribute("stroke-width", String(w + 0.035));
+    outl.setAttribute("stroke-linecap", "round");
+    svg.appendChild(outl);
     const ln = document.createElementNS(NS, "line");
     ln.setAttribute("x1", x1);
     ln.setAttribute("y1", y1);
     ln.setAttribute("x2", x2);
     ln.setAttribute("y2", y2);
-    ln.setAttribute("stroke", color);
-    ln.setAttribute("stroke-width", String(width));
+    ln.setAttribute("stroke", fill);
+    ln.setAttribute("stroke-width", String(w));
     ln.setAttribute("stroke-linecap", "round");
     ln.setAttribute("marker-end", `url(#${markerId})`);
     svg.appendChild(ln);
+    // Numbered badge near the source square. Position it ~0.32 units
+    // along the arrow so it sits just inside the from-square.
+    const bx = a.x + (dx / len) * 0.32;
+    const by = a.y + (dy / len) * 0.32;
+    const r = 0.22;
+    const ring = document.createElementNS(NS, "circle");
+    ring.setAttribute("cx", String(bx));
+    ring.setAttribute("cy", String(by));
+    ring.setAttribute("r", String(r));
+    ring.setAttribute("fill", side === "w" ? "#fafafa" : "#1b1d22");
+    ring.setAttribute("stroke", side === "w" ? "rgba(0,0,0,0.55)" : "rgba(255,255,255,0.55)");
+    ring.setAttribute("stroke-width", "0.04");
+    ring.setAttribute("opacity", String(Math.max(0.55, alpha + 0.05)));
+    svg.appendChild(ring);
+    const tx = document.createElementNS(NS, "text");
+    tx.setAttribute("x", String(bx));
+    tx.setAttribute("y", String(by + 0.015));
+    tx.setAttribute("text-anchor", "middle");
+    tx.setAttribute("dominant-baseline", "central");
+    tx.setAttribute("font-size", "0.30");
+    tx.setAttribute("font-weight", "700");
+    tx.setAttribute("font-family", "system-ui, -apple-system, Segoe UI, Roboto, sans-serif");
+    tx.setAttribute("fill", side === "w" ? "#1a1c20" : "#f7f7f9");
+    tx.textContent = String(orderInSide);
+    svg.appendChild(tx);
+    void totalIdx;  // currently unused, kept for future tooltips/keys.
   }
 
-  // Render translucent PV arrows underneath the primary green one.
-  // PV indices: 0 is the same as bestArrow, 1 is opponent's reply,
-  // 2 is our planned follow-up. Show 1 + 2 as supporting context.
   if (hasPv) {
-    for (let i = 1; i <= 2; i++) {
+    const n = Math.min(state.bestPv.length, maxPlies);
+    for (let i = 0; i < n; i++) {
       const m = state.bestPv[i];
       if (!m || m.length < 4) continue;
       const fromSq = m.slice(0, 2);
-      const toSq = m.slice(2, 4);
-      const markerId = i === 1 ? "arrow-pv1" : "arrow-pv2";
-      const color = i === 1 ? "rgba(94, 170, 70, 0.55)" : "rgba(94, 170, 70, 0.32)";
-      drawArrow(fromSq, toSq, color, markerId, 0.18);
+      const toSq   = m.slice(2, 4);
+      const side = ((stm === "w") === (i % 2 === 0)) ? "w" : "b";
+      const orderInSide = Math.floor(i / 2) + 1;
+      drawArrow(fromSq, toSq, side, orderInSide, i);
     }
-  }
-  if (hasBest) {
-    drawArrow(state.bestArrow.from, state.bestArrow.to, "#5eaa46", "arrow-best", 0.24);
+  } else if (hasBest) {
+    // No PV data (e.g. drill-mode hint): single arrow coloured by stm.
+    drawArrow(state.bestArrow.from, state.bestArrow.to, stm, 1, 0);
   }
 
   boardEl.appendChild(svg);
@@ -707,6 +853,8 @@ function tryFreeplayMove(from, to) {
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
+    // Note: no illegal sound in freeplay sandbox — the spec says illegal
+    // is only when you try a forbidden move while playing vs Stockfish.
     return;
   }
   snapshotForUndo();
@@ -716,6 +864,8 @@ function tryFreeplayMove(from, to) {
   state.legalTargets = [];
   renderBoard();
   setStatus(`Ход: ${move.san}.`);
+  // Freeplay: the user controls both sides, treat every move as "own".
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
 }
 
 function ensureFreeplayChess() {
@@ -923,19 +1073,27 @@ function openSettingsModal() {
   const themesEl = document.getElementById("settings-themes");
   const piecesEl = document.getElementById("settings-pieces");
   if (!modal || !themesEl || !piecesEl) return;
-  themesEl.innerHTML = Object.entries(BOARD_THEMES).map(([key, t]) => `
+  themesEl.innerHTML = Object.entries(BOARD_THEMES).map(([key, t]) => {
+    const previewStyle = t.image
+      ? `background-image:url("${t.image}");background-size:cover;background-position:center;`
+      : `background:linear-gradient(135deg, ${t.light} 0 50%, ${t.dark} 50% 100%);`;
+    return `
     <button type="button" class="theme-swatch ${userSettings.theme === key ? "is-active" : ""}" data-theme="${key}" title="${t.name}">
-      <span class="theme-swatch-preview" style="background:linear-gradient(135deg, ${t.light} 0 50%, ${t.dark} 50% 100%)"></span>
+      <span class="theme-swatch-preview" style="${previewStyle}"></span>
       <span class="theme-swatch-label">${t.name}</span>
     </button>
-  `).join("");
-  piecesEl.innerHTML = Object.entries(PIECE_SETS).map(([key, p]) => `
+  `;
+  }).join("");
+  piecesEl.innerHTML = Object.entries(PIECE_SETS).map(([key, p]) => {
+    const ext = p.ext || "svg";
+    return `
     <button type="button" class="piece-swatch ${userSettings.pieces === key ? "is-active" : ""}" data-pieces="${key}" title="${p.name}">
-      <img src="/static/pieces/${key}/wK.svg" alt="" />
-      <img src="/static/pieces/${key}/bN.svg" alt="" />
+      <img src="/static/pieces/${key}/wK.${ext}" alt="" />
+      <img src="/static/pieces/${key}/bN.${ext}" alt="" />
       <span class="piece-swatch-label">${p.name}</span>
     </button>
-  `).join("");
+  `;
+  }).join("");
   themesEl.querySelectorAll("[data-theme]").forEach((btn) => {
     btn.addEventListener("click", () => {
       userSettings.theme = btn.dataset.theme;
@@ -955,6 +1113,37 @@ function openSettingsModal() {
       btn.classList.add("is-active");
     });
   });
+  const pvInput = document.getElementById("settings-pv-arrows");
+  if (pvInput) {
+    pvInput.value = String(_clampArrows(userSettings.pvArrowCount));
+    const apply = () => {
+      const next = _clampArrows(pvInput.value);
+      pvInput.value = String(next);
+      if (next !== userSettings.pvArrowCount) {
+        userSettings.pvArrowCount = next;
+        saveSettings(userSettings);
+        renderBoard();   // re-draw arrows with the new cap
+      }
+    };
+    pvInput.addEventListener("change", apply);
+    pvInput.addEventListener("blur", apply);
+  }
+  const blInput = document.getElementById("settings-best-line");
+  if (blInput) {
+    blInput.value = String(_clampBestLine(userSettings.bestLineLength));
+    const apply = () => {
+      const next = _clampBestLine(blInput.value);
+      blInput.value = String(next);
+      if (next !== userSettings.bestLineLength) {
+        userSettings.bestLineLength = next;
+        saveSettings(userSettings);
+        // Re-render the active position's hint so the SAN line updates.
+        if (typeof renderBoardHint === "function") renderBoardHint();
+      }
+    };
+    blInput.addEventListener("change", apply);
+    blInput.addEventListener("blur", apply);
+  }
   modal.hidden = false;
 }
 function closeSettingsModal() {
@@ -1353,6 +1542,12 @@ async function engineMove() {
       return;
     }
     applyChessMoveToBoard(move);
+    // Engine-side move: opponent perspective unless the user picked the
+    // engine's colour (rare but possible mid-game flip).
+    playMoveSoundFor(move, {
+      isOwn: move.color === myGame.playerColor,
+      inCheck: myGame.chess.isCheck(),
+    });
     document.getElementById("play-status").textContent =
       `Ход движка: ${move.san} ${formatEval(r)}. ${gameStateText()}`;
     if (checkGameOver()) return;
@@ -1463,11 +1658,16 @@ function tryMakePlayerMove(from, to) {
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
+    // Per spec: illegal sound fires only when the user tries to play an
+    // illegal move while playing vs Stockfish.
+    playIllegalSound();
     return;
   }
   state.selectedSquare = null;
   state.legalTargets = [];
   applyChessMoveToBoard(move);
+  // Player move sound: always "own".
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   if (checkGameOver()) return;
   setTimeout(engineMove, 50);
 }
@@ -1772,8 +1972,51 @@ function fmtCp(cp) {
   return cp > 0 ? `+${v}` : v;
 }
 
+// Strip query/fragment/sub-paths from chess.com / lichess game URLs so users can
+// paste any flavour (live, analysis, ?username=…&move=…) and get the canonical
+// game link the importer expects.
+function normalizeReviewSource(raw) {
+  const src = (raw || "").trim();
+  if (!src) return src;
+  let url;
+  try { url = new URL(src); } catch { return src; }
+  const host = url.hostname.toLowerCase();
+  if (host.endsWith("chess.com")) {
+    const m = url.pathname.match(/\/game\/(live|daily|rapid|bullet|blitz)\/(\d+)/i)
+      || url.pathname.match(/\/(live|daily|rapid|bullet|blitz)\/(\d+)/i);
+    if (m) {
+      const kind = m[1].toLowerCase();
+      const id = m[2];
+      return `https://www.chess.com/game/${kind}/${id}`;
+    }
+    return src;
+  }
+  if (host.endsWith("lichess.org")) {
+    const m = url.pathname.match(/^\/(?:embed\/)?([a-zA-Z0-9]{8})/);
+    if (m) return `https://lichess.org/${m[1]}`;
+    return src;
+  }
+  return src;
+}
+
+(function wireReviewSourceAutoNormalize() {
+  const input = document.getElementById("review-source");
+  if (!input) return;
+  const normalize = () => {
+    const v = input.value;
+    const n = normalizeReviewSource(v);
+    if (n && n !== v) input.value = n;
+  };
+  input.addEventListener("paste", () => setTimeout(normalize, 0));
+  input.addEventListener("change", normalize);
+  input.addEventListener("blur", normalize);
+})();
+
 document.getElementById("btn-review-import").addEventListener("click", async () => {
-  const src = document.getElementById("review-source").value.trim();
+  const input = document.getElementById("review-source");
+  const normalized = normalizeReviewSource(input.value);
+  if (normalized !== input.value) input.value = normalized;
+  const src = normalized.trim();
   if (!src) { setStatus("Вставьте ссылку или PGN.", "error"); return; }
   document.getElementById("btn-review-import").disabled = true;
   document.getElementById("review-progress").textContent = "Загрузка партии…";
@@ -2372,6 +2615,7 @@ function tryDrillMove(from, to) {
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
+    // Drills are pure analysis — no Stockfish opponent — so no illegal sound.
     return;
   }
   // UCI of the player's attempt (always with q-promotion when applicable).
@@ -2395,6 +2639,7 @@ function tryDrillMove(from, to) {
     state.drill.feedback = "correct";
     renderBoard();
     renderDrillUi();
+    playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
     setTimeout(nextDrill, 1400);
   } else {
     state.drill.feedback = "wrong";
@@ -2732,8 +2977,18 @@ function jumpToReviewIdx(idx, opts) {
   const game = review.game;
   if (!game) return;
   const playSound = !opts || opts.playSound !== false;
-  if (playSound) playMoveSound();
   const moves = review.analysis ? review.analysis.moves : null;
+  if (playSound && idx >= 0) {
+    // Sound is decided by the move we're landing ON. With analysis we
+    // get SAN directly; without, fall back to a generic move tap.
+    if (moves && moves[idx]) {
+      const m = moves[idx];
+      const isOwn = review.userSide ? (m.side === review.userSide) : true;
+      playMoveSoundForSan(m.move_san, { isOwn });
+    } else {
+      playMoveSound();
+    }
+  }
   // idx == -1 means starting position; idx >= 0 means after that ply.
   review.activeIdx = idx;
   let fen, lastMove = null;
@@ -2844,7 +3099,8 @@ function renderBoardHint() {
     && m.best_pv_san.length >= 2
     && m.move_uci !== m.best_move_uci
   ) {
-    const sansHtml = m.best_pv_san.slice(0, 10)
+    const lineLen = _clampBestLine(userSettings.bestLineLength);
+    const sansHtml = m.best_pv_san.slice(0, lineLen)
       .map((s) => `<span class="pv-san">${escapeHtml(s)}</span>`).join("");
     pvLine = `<div class="pv-line"><span class="pv-label">Лучшая линия:</span>${sansHtml}</div>`;
   }
@@ -2868,7 +3124,7 @@ function refreshNavButtons() {
   if (review.autoplayId && (!game || idx >= total - 1)) stopAutoplay();
 }
 
-// Auto-step: every 500ms call nav-next while there are remaining moves.
+// Auto-step: every 800ms call nav-next while there are remaining moves.
 const PLAY_ICON_PATH = "M20.5 12.8L7.77 21.53C6.5 22.43 6 22.16 6 20.6V3.32999C6 1.79999 6.5 1.52999 7.77 2.42999L20.5 11.2C21.33 11.77 21.33 12.23 20.5 12.8Z";
 const PAUSE_ICON_PATH = "M17.33 22H16.66C14.66 22 13.99 21.33 13.99 19.33V4.65999C13.99 2.65999 14.66 1.98999 16.66 1.98999H17.33C19.33 1.98999 20 2.65999 20 4.65999V19.33C20 21.33 19.33 22 17.33 22ZM7.32999 22H6.65999C4.65999 22 3.98999 21.33 3.98999 19.33V4.65999C3.98999 2.65999 4.65999 1.98999 6.65999 1.98999H7.32999C9.32999 1.98999 9.99999 2.65999 9.99999 4.65999V19.33C9.99999 21.33 9.32999 22 7.32999 22Z";
 
@@ -2899,7 +3155,7 @@ function startAutoplay() {
       return;
     }
     jumpToReviewIdx(review.activeIdx + 1);
-  }, 500);
+  }, 800);
 }
 
 document.getElementById("nav-first").addEventListener("click", () => {
