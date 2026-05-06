@@ -2963,7 +2963,7 @@ function refreshNavButtons() {
   if (review.autoplayId && (!game || idx >= total - 1)) stopAutoplay();
 }
 
-// Auto-step: every 500ms call nav-next while there are remaining moves.
+// Auto-step: every 800ms call nav-next while there are remaining moves.
 const PLAY_ICON_PATH = "M20.5 12.8L7.77 21.53C6.5 22.43 6 22.16 6 20.6V3.32999C6 1.79999 6.5 1.52999 7.77 2.42999L20.5 11.2C21.33 11.77 21.33 12.23 20.5 12.8Z";
 const PAUSE_ICON_PATH = "M17.33 22H16.66C14.66 22 13.99 21.33 13.99 19.33V4.65999C13.99 2.65999 14.66 1.98999 16.66 1.98999H17.33C19.33 1.98999 20 2.65999 20 4.65999V19.33C20 21.33 19.33 22 17.33 22ZM7.32999 22H6.65999C4.65999 22 3.98999 21.33 3.98999 19.33V4.65999C3.98999 2.65999 4.65999 1.98999 6.65999 1.98999H7.32999C9.32999 1.98999 9.99999 2.65999 9.99999 4.65999V19.33C9.99999 21.33 9.32999 22 7.32999 22Z";
 
@@ -2994,7 +2994,7 @@ function startAutoplay() {
       return;
     }
     jumpToReviewIdx(review.activeIdx + 1);
-  }, 500);
+  }, 800);
 }
 
 document.getElementById("nav-first").addEventListener("click", () => {
