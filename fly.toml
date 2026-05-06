@@ -1,0 +1,38 @@
+# Fly.io deployment manifest. After installing flyctl
+# (https://fly.io/docs/hands-on/install-flyctl/) run:
+#
+#   flyctl auth login
+#   flyctl launch --no-deploy --copy-config            # picks an app name + region
+#   flyctl volumes create chess_data --size 1 --region <region>
+#   flyctl deploy
+#
+# The single mounted volume keeps users.json, leaderboard history and
+# any cached state across deploys. Bumping the machine size or memory
+# is safe — none of the puzzle data is regenerated at boot.
+
+app = "chess-sandbox"
+primary_region = "fra"
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+CHESS_DATA_DIR = "/data"
+CHESS_HOST = "0.0.0.0"
+CHESS_PORT = "8080"
+
+[[mounts]]
+source = "chess_data"
+destination = "/data"
+
+[http_service]
+internal_port = 8080
+force_https = true
+auto_stop_machines = "suspend"
+auto_start_machines = true
+min_machines_running = 0
+
+[[vm]]
+cpu_kind = "shared"
+cpus = 1
+memory_mb = 512

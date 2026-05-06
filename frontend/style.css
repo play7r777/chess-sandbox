@@ -1845,3 +1845,135 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
                          0 0 18px rgba(255, 196, 53, 0.75); }
 }
 .settings-actions button:hover { filter: brightness(1.15); }
+
+/* ---------- Party / Co-op ---------- */
+.party-card { width: min(560px, 92vw); padding: 24px; }
+.party-header { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.party-header h2 { margin: 0; font-size: 22px; font-weight: 800; letter-spacing: 0.2px; }
+.party-actions { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.party-join { display: flex; gap: 8px; align-items: stretch; }
+.party-code-input {
+  flex: 1;
+  background: #0f1521;
+  border: 1px solid #2a3550;
+  border-radius: 10px;
+  color: #e7eef9;
+  padding: 10px 12px;
+  font: 700 16px/1.2 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.party-code-input:focus { outline: none; border-color: #6da7ff; }
+.party-code-pill {
+  display: inline-block;
+  background: #1a2538;
+  border: 1px solid #2c3950;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font: 800 16px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 2px;
+  color: #ffd75e;
+}
+.party-error {
+  margin-top: 10px;
+  background: #3a1a22;
+  border: 1px solid #6a2330;
+  color: #ffb1bf;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.party-members { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.party-empty { color: #94a4be; font-size: 13px; padding: 8px; text-align: center; }
+.party-member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #1a2538;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+}
+.party-member.is-offline { opacity: 0.55; }
+.party-avatar { font-size: 22px; line-height: 1; }
+.party-name { color: #e7eef9; font-weight: 700; flex: 1; }
+.party-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.party-tag-host { background: #1f3a2c; color: #6cf2a6; }
+.party-tag-off { background: #2a2f40; color: #94a4be; }
+.party-results { list-style: none; margin: 14px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.party-result-row {
+  display: grid;
+  grid-template-columns: 36px 28px 1fr 80px 60px 110px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #1a2538;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+}
+.party-result-row.is-self { background: #1f2c44; border-color: #3a5188; }
+.party-rank { color: #94a4be; font-weight: 700; }
+.party-score { color: #6da7ff; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; }
+.party-solved { color: #6cf2a6; font-weight: 700; font-variant-numeric: tabular-nums; }
+.party-elo { color: #ffd75e; font-weight: 700; font-size: 12px; text-align: right; }
+
+/* Party HUD that lives next to the board during a match. */
+.party-side-panel {
+  position: fixed;
+  top: 80px;
+  right: 16px;
+  width: 280px;
+  background: linear-gradient(180deg, #1f2a3a, #161e2c);
+  border: 1px solid #2c3950;
+  border-radius: 14px;
+  padding: 14px;
+  z-index: 80;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.45);
+}
+.party-side-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.party-side-title { font-weight: 800; color: #e7eef9; letter-spacing: 0.3px; }
+.party-side-timer {
+  font: 800 22px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #ffd75e;
+  font-variant-numeric: tabular-nums;
+}
+.party-side-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.party-side-list .party-row {
+  display: grid;
+  grid-template-columns: 36px 22px 1fr 56px 46px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.party-side-list .party-row.is-self { background: rgba(109, 167, 255, 0.18); }
+.party-side-list .party-name { color: #e7eef9; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.party-side-list .party-score { color: #6da7ff; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; font-size: 13px; }
+.party-side-list .party-solved { color: #6cf2a6; font-size: 12px; }
+.party-side-leave {
+  margin-top: 10px;
+  width: 100%;
+}
+.puzzle-ghost {
+  background: transparent;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+  color: #c0cce0;
+  padding: 8px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.puzzle-ghost:hover { background: #1a2538; }

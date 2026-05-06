@@ -238,6 +238,21 @@ const state = {
   // Local user identity (nickname/avatar) loaded from localStorage and
   // synced to the backend so the leaderboard sees this client.
   user: { client_id: null, nickname: "", avatar: "♟", elo_history: null },
+  // Active party / co-op puzzle session, if any.
+  party: {
+    active: false,       // true between WS open and "finish" message
+    ws: null,
+    code: null,
+    party_id: null,
+    host_id: null,
+    status: "lobby",     // lobby | playing | finished
+    endsAt: 0,
+    members: [],
+    scoreboard: [],
+    finalResults: null,
+    selfScore: 0,
+    countdownInterval: null,
+  },
   // 64-cell array indexed 0..63 where 0 = a8, 7 = h8, 56 = a1, 63 = h1.
   // Each cell is a piece char (e.g. 'P','k') or null.
   board: new Array(64).fill(null),
@@ -3116,6 +3131,12 @@ function _puzzleRatingWindow() {
 }
 
 async function loadNextPuzzle() {
+  // In party mode the server pushes the next puzzle over the WebSocket;
+  // never reach into the solo /api/puzzle endpoint while a match is live.
+  if (state.party.active && state.party.status === "playing") {
+    renderPuzzleStatsBar();
+    return;
+  }
   const card = document.getElementById("puzzle-card");
   const actions = document.getElementById("puzzle-actions");
   if (card)    card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
@@ -3448,16 +3469,25 @@ function finalizePuzzle(result) {
   if (state.puzzle.history.length > 30) state.puzzle.history.length = 30;
   _savePuzzleSession();
   spawnPuzzleCelebration(outcome === "failed" || outcome === "skipped" ? "bad" : "ok");
-  // Sync this attempt to the backend so the user shows up in the
-  // leaderboard and their per-puzzle Elo history is preserved.
-  recordPuzzleAttemptOnServer({
-    outcome,
-    delta,
-    new_rating: state.puzzle.sessionRating,
-    puzzle_id: state.puzzle.current ? String(state.puzzle.current.id || "") : null,
-    puzzle_rating: pr,
-    solve_ms: state.puzzle.solveMs,
-  });
+  // In a live party match the official rating is frozen — we just push
+  // the attempt over the WebSocket and let the server push the next
+  // puzzle. Solo mode keeps the existing leaderboard sync.
+  if (state.party.active && state.party.status === "playing") {
+    sendPartyAttempt({
+      puzzle_id: state.puzzle.current ? String(state.puzzle.current.id || "") : "",
+      outcome: (outcome === "solved-hint") ? "solved" : outcome,
+      solve_ms: state.puzzle.solveMs,
+    });
+  } else {
+    recordPuzzleAttemptOnServer({
+      outcome,
+      delta,
+      new_rating: state.puzzle.sessionRating,
+      puzzle_id: state.puzzle.current ? String(state.puzzle.current.id || "") : null,
+      puzzle_rating: pr,
+      solve_ms: state.puzzle.solveMs,
+    });
+  }
   renderPuzzleUi();
   renderPuzzleStatsBar();
   renderPuzzleHistory();
@@ -4226,6 +4256,8 @@ userMenuDropdown?.querySelectorAll(".user-menu-item").forEach((btn) => {
       openProfileModal(state.user.client_id);
     } else if (action === "leaderboard") {
       openLeaderboardModal();
+    } else if (action === "party") {
+      openPartyModal();
     }
   });
 });
@@ -4462,6 +4494,345 @@ async function _bootUser() {
   }
   // Heartbeat every 60s so last-seen stays fresh on the leaderboard.
   setInterval(userHeartbeat, 60_000);
+}
+
+// ---------- Party (co-op puzzles over WebSocket) ----------
+
+function _partyWsUrl(code) {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const u = new URL(`${proto}//${location.host}/api/party/ws/${encodeURIComponent(code)}`);
+  u.searchParams.set("client_id", state.user.client_id || "");
+  u.searchParams.set("nickname", state.user.nickname || "");
+  u.searchParams.set("avatar", state.user.avatar || "");
+  return u.toString();
+}
+
+function _partyEnsureModal() {
+  const m = document.getElementById("party-modal");
+  if (m) m.hidden = false;
+  return document.getElementById("party-body");
+}
+
+function _formatPartyTimeLeft(endsAt) {
+  const ms = Math.max(0, endsAt * 1000 - Date.now());
+  const sec = Math.floor(ms / 1000);
+  const mm = Math.floor(sec / 60);
+  const ss = sec % 60;
+  return `${mm}:${String(ss).padStart(2, "0")}`;
+}
+
+function openPartyModal() {
+  if (!state.user.client_id) return;
+  const body = _partyEnsureModal();
+  if (!body) return;
+  if (state.party.active && state.party.status === "playing") {
+    closePartyModal();
+    return;
+  }
+  body.innerHTML = `
+    <header class="party-header">
+      <h2>🎉 Party</h2>
+      <p class="muted">Создайте комнату или подключитесь по коду. Каждому участнику даётся 10 минут на свой поток пазлов; в конце — общий лидерборд.</p>
+    </header>
+    <div class="party-actions">
+      <button id="btn-party-create" type="button" class="puzzle-primary">Создать комнату</button>
+      <div class="party-join">
+        <input id="party-join-code" type="text" maxlength="8" placeholder="КОД" class="party-code-input" />
+        <button id="btn-party-join" type="button" class="puzzle-secondary">Войти</button>
+      </div>
+    </div>
+    <div id="party-error" class="party-error" hidden></div>
+  `;
+  body.querySelector("#btn-party-create").addEventListener("click", () => {
+    partyCreate().catch((e) => _partyShowError(e));
+  });
+  body.querySelector("#btn-party-join").addEventListener("click", () => {
+    const code = (body.querySelector("#party-join-code").value || "").trim().toUpperCase();
+    if (!code) return;
+    partyJoin(code).catch((e) => _partyShowError(e));
+  });
+  body.querySelector("#party-join-code").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") body.querySelector("#btn-party-join").click();
+  });
+}
+
+function _partyShowError(e) {
+  const errEl = document.getElementById("party-error");
+  if (!errEl) return;
+  errEl.hidden = false;
+  errEl.textContent = e && e.message ? e.message : "Ошибка";
+}
+
+function closePartyModal() {
+  const m = document.getElementById("party-modal");
+  if (m) m.hidden = true;
+}
+
+async function partyCreate() {
+  const res = await fetch("/api/party/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname,
+      avatar: state.user.avatar,
+    }),
+  });
+  if (!res.ok) throw new Error(`Не удалось создать (HTTP ${res.status})`);
+  const data = await res.json();
+  partyConnect(data.code);
+}
+
+async function partyJoin(code) {
+  const res = await fetch(`/api/party/${encodeURIComponent(code)}`);
+  if (res.status === 404) throw new Error("Комната не найдена");
+  if (!res.ok) throw new Error(`Ошибка: HTTP ${res.status}`);
+  partyConnect(code);
+}
+
+function partyConnect(code) {
+  if (state.party.ws) {
+    try { state.party.ws.close(); } catch (_) {}
+  }
+  state.party.code = code;
+  state.party.active = true;
+  state.party.status = "lobby";
+  state.party.finalResults = null;
+  state.party.scoreboard = [];
+  state.party.members = [];
+  const ws = new WebSocket(_partyWsUrl(code));
+  state.party.ws = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handlePartyMessage(msg);
+  };
+  ws.onerror = () => _partyShowError(new Error("Соединение потеряно"));
+  ws.onclose = () => {
+    if (state.party.active && state.party.status !== "finished") {
+      // Disconnected before match end — surface as finished and keep board.
+      state.party.active = false;
+    }
+    if (state.party.countdownInterval) {
+      clearInterval(state.party.countdownInterval);
+      state.party.countdownInterval = null;
+    }
+  };
+}
+
+function handlePartyMessage(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "lobby":
+      state.party.party_id = msg.party_id;
+      state.party.host_id = msg.host_id;
+      state.party.status = msg.status;
+      state.party.endsAt = msg.ends_at || 0;
+      state.party.members = Array.isArray(msg.members) ? msg.members : [];
+      if (state.party.status === "lobby") renderPartyLobby();
+      break;
+    case "start":
+      state.party.status = "playing";
+      state.party.endsAt = msg.ends_at || 0;
+      state.party.selfScore = 0;
+      closePartyModal();
+      setView("puzzle");
+      _partyMountSidePanel();
+      _partyStartCountdown();
+      if (msg.your_puzzle) startPuzzle(_partyAdaptPuzzle(msg.your_puzzle));
+      break;
+    case "match_state":
+      state.party.endsAt = msg.ends_at || state.party.endsAt;
+      if (Array.isArray(msg.scoreboard)) state.party.scoreboard = msg.scoreboard;
+      _partyMountSidePanel();
+      _partyStartCountdown();
+      if (msg.your_puzzle) startPuzzle(_partyAdaptPuzzle(msg.your_puzzle));
+      break;
+    case "next_puzzle":
+      if (msg.puzzle) startPuzzle(_partyAdaptPuzzle(msg.puzzle));
+      break;
+    case "scoreboard":
+      state.party.endsAt = msg.ends_at || state.party.endsAt;
+      if (Array.isArray(msg.scoreboard)) state.party.scoreboard = msg.scoreboard;
+      _partyRenderScoreboard();
+      break;
+    case "finish":
+      state.party.status = "finished";
+      state.party.finalResults = Array.isArray(msg.results) ? msg.results : [];
+      state.party.active = false;
+      if (state.party.countdownInterval) {
+        clearInterval(state.party.countdownInterval);
+        state.party.countdownInterval = null;
+      }
+      _partyShowResults();
+      try { state.party.ws && state.party.ws.close(); } catch (_) {}
+      break;
+    case "error":
+      _partyShowError(new Error(msg.message || msg.code || "Ошибка"));
+      break;
+  }
+}
+
+function _partyAdaptPuzzle(p) {
+  // The party WS payload mirrors /api/puzzle/random — pass through.
+  return {
+    id: p.id,
+    fen: p.fen,
+    moves: p.moves || [],
+    rating: p.rating || 1200,
+    side_to_solve: p.side_to_solve || null,
+    themes: p.themes || [],
+    themes_ru: p.themes || [],
+    url: p.url || null,
+  };
+}
+
+function sendPartyAttempt(payload) {
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ type: "attempt", ...payload }));
+  } catch (_) { /* already closed */ }
+}
+
+function renderPartyLobby() {
+  const body = _partyEnsureModal();
+  if (!body) return;
+  const m = state.party;
+  const isHost = m.host_id === state.user.client_id;
+  const memberRows = (m.members || []).map((mem) => `
+    <li class="party-member ${mem.online ? "is-online" : "is-offline"}">
+      <span class="party-avatar">${escapeHtml(mem.avatar || "♟")}</span>
+      <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
+      ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
+      ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
+    </li>
+  `).join("");
+  body.innerHTML = `
+    <header class="party-header">
+      <h2>🎉 Party — лобби</h2>
+      <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code></p>
+    </header>
+    <ul class="party-members">${memberRows || `<li class="party-empty">Пока никого…</li>`}</ul>
+    <div class="party-actions">
+      ${isHost
+        ? `<button id="btn-party-start" type="button" class="puzzle-primary">Начать матч (10 мин)</button>`
+        : `<div class="muted">Ждём, пока хост запустит матч…</div>`}
+      <button id="btn-party-leave" type="button" class="puzzle-ghost">Выйти</button>
+    </div>
+    <div id="party-error" class="party-error" hidden></div>
+  `;
+  body.querySelector("#btn-party-leave")?.addEventListener("click", () => {
+    leaveParty();
+  });
+  body.querySelector("#btn-party-start")?.addEventListener("click", () => {
+    const ws = state.party.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "start" }));
+    }
+  });
+}
+
+function leaveParty() {
+  if (state.party.ws) {
+    try { state.party.ws.send(JSON.stringify({ type: "leave" })); } catch (_) {}
+    try { state.party.ws.close(); } catch (_) {}
+  }
+  state.party.active = false;
+  state.party.ws = null;
+  state.party.status = "lobby";
+  if (state.party.countdownInterval) {
+    clearInterval(state.party.countdownInterval);
+    state.party.countdownInterval = null;
+  }
+  closePartyModal();
+  _partyUnmountSidePanel();
+}
+
+function _partyStartCountdown() {
+  if (state.party.countdownInterval) {
+    clearInterval(state.party.countdownInterval);
+  }
+  state.party.countdownInterval = setInterval(_partyRenderHud, 1000);
+  _partyRenderHud();
+}
+
+function _partyMountSidePanel() {
+  let host = document.getElementById("party-side-panel");
+  if (host) return host;
+  host = document.createElement("aside");
+  host.id = "party-side-panel";
+  host.className = "party-side-panel";
+  document.body.appendChild(host);
+  return host;
+}
+
+function _partyUnmountSidePanel() {
+  const host = document.getElementById("party-side-panel");
+  if (host) host.remove();
+}
+
+function _partyRenderHud() {
+  _partyRenderScoreboard();
+}
+
+function _partyRenderScoreboard() {
+  const host = document.getElementById("party-side-panel");
+  if (!host) return;
+  const me = state.user.client_id;
+  const rows = (state.party.scoreboard || []).map((r, i) => `
+    <li class="party-row ${r.client_id === me ? "is-self" : ""}">
+      <span class="party-rank">#${i + 1}</span>
+      <span class="party-avatar">${escapeHtml(r.avatar || "♟")}</span>
+      <span class="party-name">${escapeHtml(r.nickname || "Гость")}</span>
+      <span class="party-score">${Number(r.score || 0)}</span>
+      <span class="party-solved">✔ ${Number(r.solved || 0)}</span>
+    </li>
+  `).join("");
+  const timer = state.party.status === "playing"
+    ? _formatPartyTimeLeft(state.party.endsAt)
+    : "—";
+  host.innerHTML = `
+    <header class="party-side-header">
+      <span class="party-side-title">🎉 Party</span>
+      <span class="party-side-timer">${timer}</span>
+    </header>
+    <ul class="party-side-list">${rows || `<li class="party-empty">…</li>`}</ul>
+    <button id="btn-party-leave-side" type="button" class="puzzle-ghost party-side-leave">Выйти из пати</button>
+  `;
+  host.querySelector("#btn-party-leave-side")?.addEventListener("click", leaveParty);
+}
+
+function _partyShowResults() {
+  const body = _partyEnsureModal();
+  if (!body) return;
+  _partyUnmountSidePanel();
+  const rows = (state.party.finalResults || []).map((r) => `
+    <li class="party-result-row ${r.client_id === state.user.client_id ? "is-self" : ""}">
+      <span class="party-rank">#${r.rank}</span>
+      <span class="party-avatar">${escapeHtml(r.avatar || "♟")}</span>
+      <span class="party-name">${escapeHtml(r.nickname || "Гость")}</span>
+      <span class="party-score">${Number(r.score || 0)} pts</span>
+      <span class="party-solved">✔ ${Number(r.solved || 0)}</span>
+      <span class="party-elo">+${Number(r.party_elo || 0)} elo (party)</span>
+    </li>
+  `).join("");
+  body.innerHTML = `
+    <header class="party-header">
+      <h2>🏁 Итоги пати</h2>
+      <p class="muted">Результат сохранён в истории профиля каждого участника. На официальный рейтинг это не влияет.</p>
+    </header>
+    <ol class="party-results">${rows || `<li class="party-empty">Никто ничего не решил.</li>`}</ol>
+    <div class="party-actions">
+      <button id="btn-party-close-results" type="button" class="puzzle-primary">Закрыть</button>
+    </div>
+  `;
+  body.querySelector("#btn-party-close-results")?.addEventListener("click", () => {
+    closePartyModal();
+    state.party.ws = null;
+    state.party.status = "lobby";
+    state.party.finalResults = null;
+  });
 }
 
 // ---------- Boot ----------

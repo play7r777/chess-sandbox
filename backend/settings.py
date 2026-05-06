@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     frontend_dir: Path = Path(__file__).resolve().parent.parent / "frontend"
     backend_root: Path = Path(__file__).resolve().parent
 
+    # Where mutable state lives (users / leaderboard / party history).
+    # Defaults next to the puzzle pack in development; in production the
+    # deploy mounts a persistent volume here (e.g. /data on Fly.io).
+    data_dir: Path = Path(__file__).resolve().parent / "data"
+
     def resolve_stockfish_path(self) -> str | None:
         """Return the Stockfish binary path, falling back to PATH lookup."""
         if self.stockfish_path:

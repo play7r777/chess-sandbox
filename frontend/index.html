@@ -51,6 +51,10 @@
               <span class="user-menu-glyph">🏆</span>
               <span>Leaderboard</span>
             </button>
+            <button type="button" class="user-menu-item" data-action="party" role="menuitem">
+              <span class="user-menu-glyph">🎉</span>
+              <span>Party</span>
+            </button>
           </div>
         </div>
       </div>
@@ -332,6 +336,13 @@
           <p class="muted">Игроки этого сервера. Нажми на игрока, чтобы открыть профиль.</p>
         </header>
         <div id="leaderboard-body" class="leaderboard-body"></div>
+      </div>
+    </div>
+
+    <div id="party-modal" class="modal-overlay" hidden>
+      <div class="modal-card party-card">
+        <button class="modal-close" data-close="party-modal" type="button" aria-label="Закрыть">×</button>
+        <div id="party-body" class="party-body"></div>
       </div>
     </div>
 

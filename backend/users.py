@@ -23,7 +23,7 @@ from typing import Any
 
 from .settings import settings
 
-_USERS_PATH = settings.backend_root / "data" / "users.json"
+_USERS_PATH = settings.data_dir / "users.json"
 _LOCK = threading.Lock()
 
 

@@ -7,11 +7,12 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import chess
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import party as party_room
 from . import puzzles as puzzles_db
 from . import users as users_db
 from .analysis import analyse_game, import_game_async
@@ -490,6 +491,79 @@ async def users_party_result(req: PartyResultRequest) -> dict[str, Any]:
         },
     )
     return {"ok": True}
+
+
+# ---- Party / Co-op puzzles ----
+
+class PartyCreateRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    nickname: str = Field(default="Гость", max_length=32)
+    avatar: str = Field(default="♟", max_length=8)
+
+
+@app.post("/api/party/create")
+async def party_create(req: PartyCreateRequest) -> dict[str, Any]:
+    party_room.reap_idle()
+    p = await party_room.create_party(req.client_id, req.nickname, req.avatar)
+    return {"party_id": p.party_id, "code": p.code, **p.public_state()}
+
+
+@app.get("/api/party/{code}")
+async def party_state(code: str) -> dict[str, Any]:
+    p = party_room.get_party(code)
+    if not p:
+        raise HTTPException(status_code=404, detail="Party not found.")
+    return p.public_state()
+
+
+@app.websocket("/api/party/ws/{code}")
+async def party_ws(ws: WebSocket, code: str) -> None:
+    client_id = ws.query_params.get("client_id") or ""
+    nickname = ws.query_params.get("nickname") or ""
+    avatar = ws.query_params.get("avatar") or ""
+    if not client_id or len(client_id) < 4:
+        await ws.close(code=4400)
+        return
+    party = party_room.get_party(code)
+    if not party:
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    try:
+        await party.attach(client_id, nickname, avatar, ws)
+    except party_room.PartyError as e:
+        await ws.send_json({"type": "error", "code": e.code, "message": e.message})
+        await ws.close(code=4400)
+        return
+    try:
+        while True:
+            msg = await ws.receive_json()
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "start":
+                try:
+                    await party.start(client_id)
+                except party_room.PartyError as e:
+                    await ws.send_json({"type": "error", "code": e.code, "message": e.message})
+            elif mtype == "attempt":
+                await party.attempt(
+                    client_id,
+                    puzzle_id=str(msg.get("puzzle_id") or ""),
+                    outcome=str(msg.get("outcome") or "skipped"),
+                    solve_ms=int(msg.get("solve_ms") or 0),
+                )
+            elif mtype == "ping":
+                await ws.send_json({"type": "pong"})
+            elif mtype == "leave":
+                await ws.close()
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("party ws error: %s", exc)
+    finally:
+        await party.detach(client_id)
 
 
 # ---- Static frontend ----
