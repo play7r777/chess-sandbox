@@ -270,6 +270,25 @@ const state = {
     selfScore: 0,
     countdownInterval: null,
   },
+  // Spectator session (view-only, separate from `party`).
+  spectator: {
+    active: false,
+    ws: null,
+    code: null,
+    party_id: null,
+    status: "lobby",
+    endsAt: 0,
+    players: {},        // client_id -> { fen, score, solved, ... }
+    scoreboard: [],
+    selectedId: null,
+    mode: "single",     // single | grid
+  },
+  // Inbound notifications (party invites etc.) from SSE.
+  notifications: {
+    es: null,           // EventSource
+    invitations: {},    // invite_id -> invitation payload
+    reconnectTimer: null,
+  },
   // 64-cell array indexed 0..63 where 0 = a8, 7 = h8, 56 = a1, 63 = h1.
   // Each cell is a piece char (e.g. 'P','k') or null.
   board: new Array(64).fill(null),
@@ -3345,6 +3364,7 @@ function tryPuzzleMove(from, to) {
   }
   // Correct! Apply the user's move visually.
   loadFen(c.fen());
+  _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
   state.reviewBadge = { square: move.to, classification: "best" };
   state.bestArrow = null;
@@ -3381,6 +3401,7 @@ function _playPuzzleOpponentReply() {
   } catch { move = null; }
   if (!move) return;
   loadFen(c.fen());
+  _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
   state.reviewBadge = null;
   renderBoard();
@@ -4511,6 +4532,8 @@ async function _bootUser() {
   }
   // Heartbeat every 60s so last-seen stays fresh on the leaderboard.
   setInterval(userHeartbeat, 60_000);
+  // Start the SSE notifications stream so party invitations pop up live.
+  _bootNotifications();
 }
 
 // ---------- Party (co-op puzzles over WebSocket) ----------
@@ -4549,18 +4572,37 @@ function openPartyModal() {
   body.innerHTML = `
     <header class="party-header">
       <h2>🎉 Party</h2>
-      <p class="muted">Создайте комнату или подключитесь по коду. Каждому участнику даётся 10 минут на свой поток пазлов; в конце — общий лидерборд.</p>
+      <p class="muted">Каждому участнику даётся 10 минут на свой поток пазлов; в конце — общий лидерборд.</p>
     </header>
+
+    <div class="party-section-title">Открытые пати</div>
+    <div id="party-open-list" class="party-open-list">
+      <div class="party-open-empty">Загружаю…</div>
+    </div>
+
+    <div class="party-section-title">Пригласить друзей</div>
+    <div id="party-friend-picker" class="party-friends">
+      <div class="party-friend-empty">Загружаю список игроков…</div>
+    </div>
     <div class="party-actions">
-      <button id="btn-party-create" type="button" class="puzzle-primary">Создать комнату</button>
-      <div class="party-join">
+      <button id="btn-party-create" type="button" class="puzzle-primary">Создать комнату и пригласить</button>
+      <button id="btn-party-create-empty" type="button" class="puzzle-secondary">Создать пустую (без приглашений)</button>
+    </div>
+
+    <details class="party-fallback" style="margin-top: 14px;">
+      <summary class="muted" style="cursor: pointer;">Войти по коду (старый способ)</summary>
+      <div class="party-actions" style="margin-top: 8px;">
         <input id="party-join-code" type="text" maxlength="8" placeholder="КОД" class="party-code-input" />
         <button id="btn-party-join" type="button" class="puzzle-secondary">Войти</button>
       </div>
-    </div>
+    </details>
+
     <div id="party-error" class="party-error" hidden></div>
   `;
   body.querySelector("#btn-party-create").addEventListener("click", () => {
+    partyCreateAndInvite().catch((e) => _partyShowError(e));
+  });
+  body.querySelector("#btn-party-create-empty").addEventListener("click", () => {
     partyCreate().catch((e) => _partyShowError(e));
   });
   body.querySelector("#btn-party-join").addEventListener("click", () => {
@@ -4571,6 +4613,9 @@ function openPartyModal() {
   body.querySelector("#party-join-code").addEventListener("keydown", (e) => {
     if (e.key === "Enter") body.querySelector("#btn-party-join").click();
   });
+  // Async fills.
+  _renderFriendPicker().catch(() => {});
+  _renderOpenPartiesList().catch(() => {});
 }
 
 function _partyShowError(e) {
@@ -4712,6 +4757,17 @@ function sendPartyAttempt(payload) {
   } catch (_) { /* already closed */ }
 }
 
+// Broadcast the player's current FEN to spectators (no-op outside a
+// live party). Throttling is handled server-side.
+function _partyReportPosition(fen) {
+  if (!state.party.active || state.party.status !== "playing") return;
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ type: "position", fen: String(fen || "") }));
+  } catch (_) { /* already closed */ }
+}
+
 function renderPartyLobby() {
   const body = _partyEnsureModal();
   if (!body) return;
@@ -4850,6 +4906,531 @@ function _partyShowResults() {
     state.party.status = "lobby";
     state.party.finalResults = null;
   });
+}
+
+// ---------- Notifications (SSE) + party invitations ----------
+
+function _bootNotifications() {
+  if (!state.user.client_id) return;
+  _notificationsConnect();
+}
+
+function _notificationsConnect() {
+  // Tear down any previous stream.
+  if (state.notifications.es) {
+    try { state.notifications.es.close(); } catch (_) {}
+    state.notifications.es = null;
+  }
+  if (state.notifications.reconnectTimer) {
+    clearTimeout(state.notifications.reconnectTimer);
+    state.notifications.reconnectTimer = null;
+  }
+  const url = `/api/notifications/stream?client_id=${encodeURIComponent(state.user.client_id)}`;
+  let es;
+  try {
+    es = new EventSource(url);
+  } catch (_) {
+    return;
+  }
+  state.notifications.es = es;
+  es.onmessage = (ev) => {
+    let payload;
+    try { payload = JSON.parse(ev.data); } catch (_) { return; }
+    handleNotificationEvent(payload);
+  };
+  es.onerror = () => {
+    // Browser auto-reconnects on most failures; if it really dies,
+    // schedule a manual reopen.
+    if (es.readyState === EventSource.CLOSED) {
+      state.notifications.reconnectTimer = setTimeout(_notificationsConnect, 4000);
+    }
+  };
+}
+
+function handleNotificationEvent(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "hello":
+      // Snapshot of pending invitations on (re)connect.
+      (msg.invitations || []).forEach((inv) => _showInvitationToast(inv));
+      break;
+    case "invitation":
+      if (msg.invitation) _showInvitationToast(msg.invitation);
+      break;
+    case "invitation_accepted":
+      if (msg.invitation) {
+        _showInfoToast(`✔ ${msg.invitation.host_id === state.user.client_id ? "Кент принял твоё приглашение" : "Принято"}`);
+      }
+      break;
+    case "invitation_declined":
+      if (msg.invitation && msg.invitation.host_id === state.user.client_id) {
+        _showInfoToast(`Кент отклонил приглашение`);
+      }
+      break;
+  }
+}
+
+function _showInvitationToast(inv) {
+  if (!inv || !inv.id) return;
+  // Already on screen?
+  if (state.notifications.invitations[inv.id]) return;
+  state.notifications.invitations[inv.id] = inv;
+
+  const stack = document.getElementById("toast-stack");
+  if (!stack) return;
+  const card = document.createElement("div");
+  card.className = "toast";
+  card.dataset.invitationId = inv.id;
+  card.innerHTML = `
+    <div class="toast-header">
+      <span class="toast-avatar">${escapeHtml(inv.host_avatar || "♟")}</span>
+      <div>
+        <div class="toast-title">${escapeHtml(inv.host_nickname || "Гость")} зовёт в пати</div>
+        <div class="toast-sub">Код комнаты: ${escapeHtml(inv.party_code)}</div>
+      </div>
+    </div>
+    <div class="toast-actions">
+      <button type="button" class="toast-btn toast-btn-decline">Отклонить</button>
+      <button type="button" class="toast-btn toast-btn-accept">Принять</button>
+    </div>
+  `;
+  card.querySelector(".toast-btn-accept").addEventListener("click", () => {
+    _acceptInvitation(inv.id).catch((e) => _showInfoToast(`Ошибка: ${e.message || e}`));
+  });
+  card.querySelector(".toast-btn-decline").addEventListener("click", () => {
+    _declineInvitation(inv.id).catch((e) => _showInfoToast(`Ошибка: ${e.message || e}`));
+  });
+  stack.appendChild(card);
+}
+
+function _dismissInvitationToast(invId) {
+  delete state.notifications.invitations[invId];
+  const stack = document.getElementById("toast-stack");
+  if (!stack) return;
+  const node = stack.querySelector(`[data-invitation-id="${CSS.escape(invId)}"]`);
+  if (node) node.remove();
+}
+
+function _showInfoToast(text, ttl = 3500) {
+  const stack = document.getElementById("toast-stack");
+  if (!stack) return;
+  const card = document.createElement("div");
+  card.className = "toast";
+  card.innerHTML = `
+    <div class="toast-header">
+      <span class="toast-avatar">ℹ</span>
+      <div><div class="toast-title">${escapeHtml(text)}</div></div>
+    </div>
+  `;
+  stack.appendChild(card);
+  setTimeout(() => card.remove(), ttl);
+}
+
+async function _acceptInvitation(invId) {
+  const res = await fetch(`/api/party/invitations/${encodeURIComponent(invId)}/accept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: state.user.client_id }),
+  });
+  _dismissInvitationToast(invId);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  // Auto-join the party.
+  partyConnect(data.code);
+  openPartyModal();
+}
+
+async function _declineInvitation(invId) {
+  await fetch(`/api/party/invitations/${encodeURIComponent(invId)}/decline`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: state.user.client_id }),
+  }).catch(() => {});
+  _dismissInvitationToast(invId);
+}
+
+// ---------- Friend picker + open-parties list (party-create modal) ----------
+
+async function _renderFriendPicker() {
+  const host = document.getElementById("party-friend-picker");
+  if (!host) return;
+  let users = [];
+  try {
+    const res = await fetch("/api/users");
+    const data = await res.json();
+    users = (data.users || []).filter((u) => u.client_id !== state.user.client_id);
+  } catch (_) {
+    host.innerHTML = `<div class="party-friend-empty">Не удалось загрузить список</div>`;
+    return;
+  }
+  if (!users.length) {
+    host.innerHTML = `<div class="party-friend-empty">Пока нет других зарегистрированных игроков. Поделись ссылкой на сервер.</div>`;
+    return;
+  }
+  // Show recent / online first.
+  users.sort((a, b) => (Number(b.last_seen || 0)) - (Number(a.last_seen || 0)));
+  const now = Math.floor(Date.now() / 1000);
+  host.innerHTML = users.map((u) => {
+    const recent = (now - Number(u.last_seen || 0)) < 300;
+    return `
+      <label class="party-friend-row">
+        <input type="checkbox" class="party-friend-cb" value="${escapeHtml(u.client_id)}" />
+        <span class="toast-avatar">${escapeHtml(u.avatar || "♟")}</span>
+        <span class="party-friend-name">${escapeHtml(u.nickname || "Гость")}</span>
+        <span class="party-friend-meta">${recent ? "● онлайн" : ""} ${Number(u.rating || 1500)} elo</span>
+      </label>
+    `;
+  }).join("");
+}
+
+async function _renderOpenPartiesList() {
+  const host = document.getElementById("party-open-list");
+  if (!host) return;
+  let parties = [];
+  try {
+    const res = await fetch("/api/party/list");
+    const data = await res.json();
+    parties = (data.parties || []).filter((p) => p.host_id !== state.user.client_id);
+  } catch (_) {
+    host.innerHTML = `<div class="party-open-empty">Не удалось загрузить</div>`;
+    return;
+  }
+  if (!parties.length) {
+    host.innerHTML = `<div class="party-open-empty">Сейчас нет открытых пати</div>`;
+    return;
+  }
+  host.innerHTML = parties.map((p) => {
+    const status = p.status === "playing" ? "идёт" : "лобби";
+    const cls = p.status === "playing" ? "is-playing" : "";
+    const joinable = p.status === "lobby";
+    return `
+      <div class="party-open-row" data-code="${escapeHtml(p.code)}">
+        <span class="toast-avatar">${escapeHtml(p.host_avatar || "♟")}</span>
+        <div class="party-open-info">
+          <div>${escapeHtml(p.host_nickname || "Гость")} · <span class="muted">${escapeHtml(p.code)}</span></div>
+          <div class="muted" style="font-size:11px;">${p.members} игроков${p.spectator_count ? ` · ${p.spectator_count} наблюдателей` : ""}</div>
+        </div>
+        <span class="party-open-status ${cls}">${status}</span>
+        <div class="party-open-actions">
+          ${joinable ? `<button type="button" class="puzzle-secondary btn-open-join">Войти</button>` : ""}
+          ${p.status === "playing" ? `<button type="button" class="puzzle-ghost btn-open-spectate">🔭 Наблюдать</button>` : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
+  host.querySelectorAll(".party-open-row").forEach((row) => {
+    const code = row.dataset.code;
+    row.querySelector(".btn-open-join")?.addEventListener("click", () => {
+      partyJoin(code).catch((e) => _partyShowError(e));
+    });
+    row.querySelector(".btn-open-spectate")?.addEventListener("click", () => {
+      spectatorConnect(code);
+      closePartyModal();
+    });
+  });
+}
+
+async function partyCreateAndInvite() {
+  // Gather selected friend IDs first; we'll fire one invite per checkbox.
+  const checked = Array.from(
+    document.querySelectorAll("#party-friend-picker .party-friend-cb:checked")
+  ).map((cb) => cb.value).filter(Boolean);
+  // Create the party (returns code) then invite each.
+  const res = await fetch("/api/party/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname,
+      avatar: state.user.avatar,
+    }),
+  });
+  if (!res.ok) throw new Error(`Не удалось создать (HTTP ${res.status})`);
+  const data = await res.json();
+  partyConnect(data.code);
+  if (checked.length) {
+    await Promise.allSettled(
+      checked.map((targetId) => fetch("/api/party/invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: state.user.client_id,
+          target_id: targetId,
+          code: data.code,
+        }),
+      }))
+    );
+  }
+}
+
+// ---------- Spectator (binoculars) mode ----------
+
+function _spectatorWsUrl(code) {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const u = new URL(`${proto}//${location.host}/api/party/ws/${encodeURIComponent(code)}`);
+  u.searchParams.set("client_id", state.user.client_id || "");
+  u.searchParams.set("nickname", state.user.nickname || "");
+  u.searchParams.set("avatar", state.user.avatar || "");
+  u.searchParams.set("role", "spectator");
+  return u.toString();
+}
+
+function spectatorConnect(code) {
+  if (state.spectator.ws) {
+    try { state.spectator.ws.close(); } catch (_) {}
+  }
+  state.spectator = {
+    active: true,
+    ws: null,
+    code,
+    party_id: null,
+    status: "lobby",
+    endsAt: 0,
+    players: {},
+    scoreboard: [],
+    selectedId: null,
+    mode: "single",
+  };
+  const ws = new WebSocket(_spectatorWsUrl(code));
+  state.spectator.ws = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handleSpectatorMessage(msg);
+  };
+  ws.onerror = () => {};
+  ws.onclose = () => {
+    state.spectator.active = false;
+  };
+  _spectatorRender();
+}
+
+function handleSpectatorMessage(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "spectator_init": {
+      const sp = state.spectator;
+      sp.status = msg.status || "lobby";
+      sp.endsAt = msg.ends_at || 0;
+      sp.party_id = (msg.state || {}).party_id || null;
+      sp.scoreboard = msg.scoreboard || [];
+      sp.players = {};
+      (msg.players || []).forEach((p) => { sp.players[p.client_id] = p; });
+      // Pick a default selected player.
+      if (!sp.selectedId) {
+        const first = (msg.players || [])[0];
+        sp.selectedId = first ? first.client_id : null;
+      }
+      _spectatorRender();
+      break;
+    }
+    case "lobby":
+      state.spectator.status = msg.status || state.spectator.status;
+      // Reset player set when lobby returns / changes.
+      if (Array.isArray(msg.members)) {
+        // Make sure every member has a slot in players map.
+        msg.members.forEach((m) => {
+          if (!state.spectator.players[m.client_id]) {
+            state.spectator.players[m.client_id] = {
+              client_id: m.client_id,
+              nickname: m.nickname,
+              avatar: m.avatar,
+              score: m.score || 0,
+              solved: m.solved || 0,
+              fen: "",
+            };
+          }
+        });
+      }
+      _spectatorRender();
+      break;
+    case "scoreboard":
+      state.spectator.endsAt = msg.ends_at || state.spectator.endsAt;
+      state.spectator.scoreboard = msg.scoreboard || state.spectator.scoreboard;
+      _spectatorRender();
+      break;
+    case "start":
+    case "match_state":
+      state.spectator.status = "playing";
+      state.spectator.endsAt = msg.ends_at || state.spectator.endsAt;
+      _spectatorRender();
+      break;
+    case "player_state": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      const prev = state.spectator.players[cid] || {};
+      state.spectator.players[cid] = { ...prev, ...msg };
+      _spectatorRender();
+      break;
+    }
+    case "finish":
+      state.spectator.status = "finished";
+      state.spectator.scoreboard = msg.results || state.spectator.scoreboard;
+      _spectatorRender();
+      break;
+  }
+}
+
+function spectatorLeave() {
+  if (state.spectator.ws) {
+    try { state.spectator.ws.send(JSON.stringify({ type: "leave" })); } catch (_) {}
+    try { state.spectator.ws.close(); } catch (_) {}
+  }
+  state.spectator.active = false;
+  state.spectator.ws = null;
+  const panel = document.getElementById("spectator-panel");
+  if (panel) panel.remove();
+}
+
+function _spectatorRender() {
+  let panel = document.getElementById("spectator-panel");
+  if (!state.spectator.active) {
+    if (panel) panel.remove();
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "spectator-panel";
+    panel.className = "spectator-panel";
+    document.body.appendChild(panel);
+  }
+  const sp = state.spectator;
+  const players = Object.values(sp.players);
+  // Pull live scores from scoreboard if present.
+  const sbMap = {};
+  (sp.scoreboard || []).forEach((r) => { sbMap[r.client_id] = r; });
+  players.forEach((p) => {
+    const r = sbMap[p.client_id];
+    if (r) {
+      p.score = r.score;
+      p.solved = r.solved;
+      p.failed = r.failed;
+      p.skipped = r.skipped;
+    }
+  });
+  // Sort by current score desc.
+  players.sort((a, b) => (b.score || 0) - (a.score || 0));
+  if (!sp.selectedId && players.length) sp.selectedId = players[0].client_id;
+  const selected = sp.players[sp.selectedId] || players[0] || null;
+
+  const timer = sp.status === "playing"
+    ? _formatPartyTimeLeft(sp.endsAt)
+    : (sp.status === "finished" ? "Финиш" : "Лобби");
+
+  panel.innerHTML = `
+    <div class="spectator-header">
+      <span class="spectator-title">🔭 Наблюдатель</span>
+      <span class="spectator-meta">${escapeHtml(sp.code || "")} · ${escapeHtml(timer)}</span>
+      <span class="spectator-spacer"></span>
+      <button type="button" class="spectator-toggle ${sp.mode === "single" ? "is-active" : ""}" data-mode="single">Одна доска</button>
+      <button type="button" class="spectator-toggle ${sp.mode === "grid" ? "is-active" : ""}" data-mode="grid">Все доски</button>
+      <button type="button" class="spectator-leave">Выйти</button>
+    </div>
+    <div class="spectator-body">
+      <aside class="spectator-side">
+        <h3>Игроки</h3>
+        ${players.map((p) => `
+          <div class="spectator-player-row ${p.client_id === sp.selectedId ? "is-selected" : ""}" data-cid="${escapeHtml(p.client_id)}">
+            <span class="toast-avatar">${escapeHtml(p.avatar || "♟")}</span>
+            <span class="pname">${escapeHtml(p.nickname || "Гость")}</span>
+            <span class="pscore">${Number(p.score || 0)}</span>
+          </div>
+        `).join("") || `<div class="muted" style="padding: 8px;">Никого…</div>`}
+      </aside>
+      <div class="spectator-stage">
+        ${sp.mode === "single"
+          ? _spectatorRenderSingle(selected)
+          : _spectatorRenderGrid(players)}
+      </div>
+    </div>
+  `;
+  panel.querySelectorAll(".spectator-toggle").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      sp.mode = btn.dataset.mode || "single";
+      _spectatorRender();
+    });
+  });
+  panel.querySelector(".spectator-leave").addEventListener("click", spectatorLeave);
+  panel.querySelectorAll(".spectator-player-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      sp.selectedId = row.dataset.cid;
+      sp.mode = "single";
+      _spectatorRender();
+    });
+  });
+}
+
+function _spectatorRenderSingle(p) {
+  if (!p) return `<div class="muted">Игрок не выбран</div>`;
+  const fen = p.fen || "";
+  return `
+    <div class="spectator-single">
+      <div class="board-host">${_renderMiniBoardFromFen(fen)}</div>
+      <div class="meta-host">
+        <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
+        <div class="row">Очки: <b>${Number(p.score || 0)}</b></div>
+        <div class="row">Решено: ${Number(p.solved || 0)} · ошибок: ${Number(p.failed || 0)} · пропущено: ${Number(p.skipped || 0)}</div>
+        <div class="row">Текущий пазл: ${escapeHtml(p.puzzle_id || "—")} ${p.puzzle_rating ? `· ${p.puzzle_rating}` : ""}</div>
+        <div class="row muted" style="font-size:11px;">Доска обновляется каждые ≥200мс по мере ходов.</div>
+      </div>
+    </div>
+  `;
+}
+
+function _spectatorRenderGrid(players) {
+  if (!players.length) return `<div class="muted">Никого нет</div>`;
+  return `
+    <div class="spectator-grid">
+      ${players.map((p) => `
+        <div class="grid-cell" data-cid="${escapeHtml(p.client_id)}">
+          <div class="grid-head">
+            <span>${escapeHtml(p.avatar || "♟")}</span>
+            <span class="gname">${escapeHtml(p.nickname || "Гость")}</span>
+            <span class="gscore">${Number(p.score || 0)}</span>
+          </div>
+          <div class="board-host">${_renderMiniBoardFromFen(p.fen || "")}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+// FEN -> SVG/HTML mini-board (read-only). Uses Unicode chess glyphs so
+// we don't need to ship sprites; matches the spectator-only UI tone.
+const _PIECE_GLYPH = {
+  K: "♔", Q: "♕", R: "♖", B: "♗", N: "♘", P: "♙",
+  k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟",
+};
+
+function _renderMiniBoardFromFen(fen) {
+  if (!fen || typeof fen !== "string") {
+    return `<div class="mini-board"></div>`;
+  }
+  const rows = fen.split(" ")[0].split("/");
+  if (rows.length !== 8) return `<div class="mini-board"></div>`;
+  const cells = [];
+  for (let r = 0; r < 8; r++) {
+    const row = rows[r];
+    const expanded = [];
+    for (const ch of row) {
+      if (/\d/.test(ch)) {
+        for (let i = 0; i < Number(ch); i++) expanded.push("");
+      } else {
+        expanded.push(ch);
+      }
+    }
+    if (expanded.length !== 8) {
+      // malformed — bail
+      return `<div class="mini-board"></div>`;
+    }
+    for (let f = 0; f < 8; f++) {
+      const isLight = (r + f) % 2 === 0;
+      const piece = expanded[f];
+      const glyph = _PIECE_GLYPH[piece] || "";
+      cells.push(`<div class="mb-square ${isLight ? "mb-light" : "mb-dark"}">${glyph}</div>`);
+    }
+  }
+  return `<div class="mini-board">${cells.join("")}</div>`;
 }
 
 // ---------- Boot ----------

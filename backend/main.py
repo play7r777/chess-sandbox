@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
 import chess
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import notifications as notifications_db
 from . import party as party_room
 from . import puzzles as puzzles_db
 from . import users as users_db
@@ -94,6 +96,16 @@ class PartyResultRequest(BaseModel):
     elo_gained: int = Field(default=0, ge=-1000, le=1000)
     duration_sec: int = Field(default=0, ge=0, le=86_400)
     notes: str | None = Field(default=None, max_length=240)
+
+
+class PartyInviteRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    target_id: str = Field(..., min_length=4, max_length=64)
+    code: str = Field(..., min_length=4, max_length=8)
+
+
+class InviteActionRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
 
 
 @asynccontextmanager
@@ -508,6 +520,60 @@ async def party_create(req: PartyCreateRequest) -> dict[str, Any]:
     return {"party_id": p.party_id, "code": p.code, **p.public_state()}
 
 
+@app.get("/api/party/list")
+async def party_list() -> dict[str, Any]:
+    party_room.reap_idle()
+    return {"parties": party_room.list_open()}
+
+
+@app.post("/api/party/invite")
+async def party_invite(req: PartyInviteRequest) -> dict[str, Any]:
+    p = party_room.get_party(req.code)
+    if not p:
+        raise HTTPException(status_code=404, detail="Party not found.")
+    if p.host_id != req.client_id:
+        raise HTTPException(status_code=403, detail="Only the host can invite.")
+    target = users_db.get_user(req.target_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Target user not found.")
+    host = users_db.get_user(req.client_id)
+    inv = await notifications_db.create_invitation(
+        host_id=req.client_id,
+        host_nickname=(host or {}).get("nickname") or "Гость",
+        host_avatar=(host or {}).get("avatar") or "♟",
+        target_id=req.target_id,
+        party_code=p.code,
+        party_id=p.party_id,
+    )
+    return {"invitation": inv.public()}
+
+
+@app.get("/api/party/invitations")
+async def party_invitations(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    return {"invitations": notifications_db.pending_invitations_for(client_id)}
+
+
+@app.post("/api/party/invitations/{invite_id}/accept")
+async def party_invitation_accept(invite_id: str, req: InviteActionRequest) -> dict[str, Any]:
+    inv = await notifications_db.accept_invitation(invite_id, req.client_id)
+    if inv is None:
+        raise HTTPException(status_code=404, detail="Invitation not found or not yours.")
+    return {"invitation": inv.public(), "code": inv.party_code}
+
+
+@app.post("/api/party/invitations/{invite_id}/decline")
+async def party_invitation_decline(invite_id: str, req: InviteActionRequest) -> dict[str, Any]:
+    inv = await notifications_db.decline_invitation(invite_id, req.client_id)
+    if inv is None:
+        raise HTTPException(status_code=404, detail="Invitation not found or not yours.")
+    return {"invitation": inv.public()}
+
+
+# NOTE: this catch-all ``/{code}`` route MUST come *after* the more
+# specific party endpoints above (``invite``, ``invitations``,
+# ``list``) so FastAPI's path matcher doesn't swallow them.
 @app.get("/api/party/{code}")
 async def party_state(code: str) -> dict[str, Any]:
     p = party_room.get_party(code)
@@ -516,11 +582,56 @@ async def party_state(code: str) -> dict[str, Any]:
     return p.public_state()
 
 
+@app.get("/api/notifications/stream")
+async def notifications_stream(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> StreamingResponse:
+    """Server-Sent Events stream of per-user notifications.
+
+    The browser opens an EventSource on this endpoint after the user is
+    bootstrapped; the server pushes JSON-encoded `data:` lines whenever
+    something happens to that user (party invitations, accept/decline
+    feedback to the host, etc).
+    """
+    sub = await notifications_db.subscribe(client_id)
+
+    async def event_gen() -> Any:
+        try:
+            # Send a hello frame with any pending invitations so the
+            # client doesn't have to do a separate REST call on boot.
+            hello = {
+                "type": "hello",
+                "invitations": notifications_db.pending_invitations_for(client_id),
+            }
+            yield f"data: {json.dumps(hello)}\n\n"
+            while True:
+                try:
+                    payload = await asyncio.wait_for(sub.queue.get(), timeout=20.0)
+                    yield f"data: {json.dumps(payload)}\n\n"
+                except asyncio.TimeoutError:
+                    # Heartbeat to keep proxies (ngrok, Cloudflare,
+                    # nginx) from dropping idle connections.
+                    yield ": ping\n\n"
+        finally:
+            await notifications_db.unsubscribe(sub)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @app.websocket("/api/party/ws/{code}")
 async def party_ws(ws: WebSocket, code: str) -> None:
     client_id = ws.query_params.get("client_id") or ""
     nickname = ws.query_params.get("nickname") or ""
     avatar = ws.query_params.get("avatar") or ""
+    role = (ws.query_params.get("role") or "player").lower()
     if not client_id or len(client_id) < 4:
         await ws.close(code=4400)
         return
@@ -529,6 +640,19 @@ async def party_ws(ws: WebSocket, code: str) -> None:
         await ws.close(code=4404)
         return
     await ws.accept()
+    if role == "spectator":
+        await _party_ws_spectator(ws, party, client_id, nickname, avatar)
+    else:
+        await _party_ws_player(ws, party, client_id, nickname, avatar)
+
+
+async def _party_ws_player(
+    ws: WebSocket,
+    party: party_room.Party,
+    client_id: str,
+    nickname: str,
+    avatar: str,
+) -> None:
     try:
         await party.attach(client_id, nickname, avatar, ws)
     except party_room.PartyError as e:
@@ -553,6 +677,9 @@ async def party_ws(ws: WebSocket, code: str) -> None:
                     outcome=str(msg.get("outcome") or "skipped"),
                     solve_ms=int(msg.get("solve_ms") or 0),
                 )
+            elif mtype == "position":
+                # Mid-puzzle FEN update for spectators.
+                await party.update_position(client_id, str(msg.get("fen") or ""))
             elif mtype == "ping":
                 await ws.send_json({"type": "pong"})
             elif mtype == "leave":
@@ -564,6 +691,38 @@ async def party_ws(ws: WebSocket, code: str) -> None:
         logger.warning("party ws error: %s", exc)
     finally:
         await party.detach(client_id)
+
+
+async def _party_ws_spectator(
+    ws: WebSocket,
+    party: party_room.Party,
+    client_id: str,
+    nickname: str,
+    avatar: str,
+) -> None:
+    try:
+        await party.attach_spectator(client_id, nickname, avatar, ws)
+    except Exception as exc:
+        logger.warning("party spectator attach error: %s", exc)
+        await ws.close(code=4400)
+        return
+    try:
+        while True:
+            msg = await ws.receive_json()
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "ping":
+                await ws.send_json({"type": "pong"})
+            elif mtype == "leave":
+                await ws.close()
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("party spectator ws error: %s", exc)
+    finally:
+        await party.detach_spectator(client_id)
 
 
 # ---- Static frontend ----

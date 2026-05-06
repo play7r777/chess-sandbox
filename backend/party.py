@@ -36,6 +36,10 @@ MAX_MEMBERS = 16
 # so 1000 leaves plenty of headroom while keeping the queue cheap to
 # build (one SQLite call) regardless of total bank size.
 PARTY_QUEUE_SIZE = 1000
+# Min interval between two consecutive player_state broadcasts for a
+# given player. Even on a fast solver who clicks a piece every 200ms
+# the spectator stream stays well-bounded (≤5 events/sec/player).
+PLAYER_STATE_THROTTLE_SEC = 0.2
 
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _PARTIES: dict[str, Party] = {}
@@ -91,9 +95,24 @@ class Member:
     puzzle_index: int = 0
     current_puzzle: dict[str, Any] | None = None
     current_started_at: float = 0.0
+    # Latest FEN we've seen the player at — pushed to spectators every
+    # PLAYER_STATE_THROTTLE_SEC so they can render the live board.
+    current_fen: str = ""
     last_solve_ms: int = 0
     disconnected_at: float | None = None
     is_host: bool = False
+    # Wallclock of the last spectator broadcast for this member; used
+    # to throttle spammy player_state events.
+    last_state_broadcast: float = 0.0
+
+
+@dataclass
+class Spectator:
+    client_id: str
+    nickname: str
+    avatar: str
+    ws: WebSocket | None = None
+    disconnected_at: float | None = None
 
 
 @dataclass
@@ -106,6 +125,7 @@ class Party:
     started_at: float = 0.0
     ends_at: float = 0.0
     members: dict[str, Member] = field(default_factory=dict)
+    spectators: dict[str, Spectator] = field(default_factory=dict)
     finish_task: asyncio.Task[None] | None = None
     finished_results: list[dict[str, Any]] = field(default_factory=list)
     # Shared, shuffled puzzle order for the whole match. Built in
@@ -135,6 +155,7 @@ class Party:
             "ends_at": int(self.ends_at),
             "duration_sec": PARTY_DURATION_SEC,
             "members": [self.public_member(m) for m in self.members.values()],
+            "spectator_count": sum(1 for s in self.spectators.values() if s.ws is not None),
         }
 
     def scoreboard(self) -> list[dict[str, Any]]:
@@ -143,16 +164,33 @@ class Party:
         return rows
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
-        dead: list[str] = []
+        """Send to every connected member AND spectator."""
+        dead_members: list[str] = []
         for cid, m in self.members.items():
             if m.ws is None:
                 continue
             try:
                 await m.ws.send_json(payload)
             except Exception:
-                dead.append(cid)
-        for cid in dead:
+                dead_members.append(cid)
+        for cid in dead_members:
             await self._mark_disconnect(cid)
+        await self.broadcast_spectators(payload)
+
+    async def broadcast_spectators(self, payload: dict[str, Any]) -> None:
+        dead_specs: list[str] = []
+        for cid, s in self.spectators.items():
+            if s.ws is None:
+                continue
+            try:
+                await s.ws.send_json(payload)
+            except Exception:
+                dead_specs.append(cid)
+        for cid in dead_specs:
+            sp = self.spectators.get(cid)
+            if sp:
+                sp.ws = None
+                sp.disconnected_at = time.time()
 
     async def _send(self, cid: str, payload: dict[str, Any]) -> None:
         m = self.members.get(cid)
@@ -162,6 +200,48 @@ class Party:
             await m.ws.send_json(payload)
         except Exception:
             await self._mark_disconnect(cid)
+
+    async def _send_spectator(self, cid: str, payload: dict[str, Any]) -> None:
+        s = self.spectators.get(cid)
+        if not s or s.ws is None:
+            return
+        try:
+            await s.ws.send_json(payload)
+        except Exception:
+            s.ws = None
+            s.disconnected_at = time.time()
+
+    def _player_state_payload(self, m: Member) -> dict[str, Any]:
+        cur = m.current_puzzle or {}
+        return {
+            "type": "player_state",
+            "client_id": m.client_id,
+            "nickname": m.nickname,
+            "avatar": m.avatar,
+            "score": m.score,
+            "solved": m.solved,
+            "failed": m.failed,
+            "skipped": m.skipped,
+            "puzzle_id": cur.get("id"),
+            "fen": m.current_fen or str(cur.get("fen") or ""),
+            "puzzle_rating": int(cur.get("rating") or 0),
+            "side_to_solve": _puzzle_payload(cur).get("side_to_solve") if cur else None,
+        }
+
+    async def broadcast_player_state(self, m: Member, *, force: bool = False) -> None:
+        """Push a player's current board to spectators.
+
+        Throttled at PLAYER_STATE_THROTTLE_SEC unless ``force`` is set
+        (e.g. a fresh puzzle starts) so a flurry of moves doesn't blast
+        the spectator stream.
+        """
+        if not self.spectators:
+            return
+        now = time.time()
+        if not force and now - m.last_state_broadcast < PLAYER_STATE_THROTTLE_SEC:
+            return
+        m.last_state_broadcast = now
+        await self.broadcast_spectators(self._player_state_payload(m))
 
     async def _mark_disconnect(self, cid: str) -> None:
         m = self.members.get(cid)
@@ -181,6 +261,7 @@ class Party:
         m.puzzle_index += 1
         m.current_puzzle = p
         m.current_started_at = time.time()
+        m.current_fen = str(p.get("fen") or "")
         return p
 
     async def attach(
@@ -242,6 +323,68 @@ class Party:
         await self._mark_disconnect(client_id)
         await self.broadcast({"type": "lobby", **self.public_state()})
 
+    async def attach_spectator(
+        self,
+        client_id: str,
+        nickname: str,
+        avatar: str,
+        ws: WebSocket,
+    ) -> Spectator:
+        existing = self.spectators.get(client_id)
+        if existing is None:
+            existing = Spectator(
+                client_id=client_id,
+                nickname=nickname[:32] or "Гость",
+                avatar=avatar[:8] or "♟",
+                ws=ws,
+            )
+            self.spectators[client_id] = existing
+        else:
+            existing.ws = ws
+            existing.disconnected_at = None
+            if nickname:
+                existing.nickname = nickname[:32]
+            if avatar:
+                existing.avatar = avatar[:8]
+
+        # Snapshot the room for the new spectator.
+        await self._send_spectator(
+            client_id,
+            {
+                "type": "spectator_init",
+                "state": self.public_state(),
+                "scoreboard": self.scoreboard(),
+                "ends_at": int(self.ends_at),
+                "players": [self._player_state_payload(m) for m in self.members.values()],
+                "status": self.status,
+                "results": self.finished_results if self.status == "finished" else [],
+            },
+        )
+        # Tell the room that spectator count went up.
+        await self.broadcast({"type": "lobby", **self.public_state()})
+        return existing
+
+    async def detach_spectator(self, client_id: str) -> None:
+        s = self.spectators.get(client_id)
+        if s is None:
+            return
+        s.ws = None
+        s.disconnected_at = time.time()
+        await self.broadcast({"type": "lobby", **self.public_state()})
+
+    async def update_position(self, client_id: str, fen: str) -> None:
+        """Player reports a mid-puzzle FEN (after a move attempt).
+
+        Lets spectators watch the move-by-move solve. Throttled.
+        """
+        if self.status != "playing":
+            return
+        m = self.members.get(client_id)
+        if m is None or m.current_puzzle is None:
+            return
+        m.current_fen = str(fen or "")
+        await self.broadcast_player_state(m)
+
     async def start(self, by_client_id: str) -> None:
         if by_client_id != self.host_id:
             raise PartyError("not_host", "Only the host can start")
@@ -275,6 +418,7 @@ class Party:
                         "your_puzzle": payload,
                     },
                 )
+                await self.broadcast_player_state(m, force=True)
         await self.broadcast(
             {
                 "type": "scoreboard",
@@ -322,6 +466,7 @@ class Party:
                 client_id,
                 {"type": "next_puzzle", "puzzle": _puzzle_payload(nxt)},
             )
+            await self.broadcast_player_state(m, force=True)
         await self.broadcast(
             {
                 "type": "scoreboard",
@@ -416,6 +561,35 @@ async def create_party(host_id: str, host_nickname: str, host_avatar: str) -> Pa
 
 def get_party(code: str) -> Party | None:
     return _PARTIES.get(code.upper())
+
+
+def list_open() -> list[dict[str, Any]]:
+    """Public list of joinable parties (lobby-status or in-flight matches).
+
+    Used by the frontend "backup-join" path: if a friend dismissed the
+    invitation toast they can still find the party here and click join.
+    """
+    rows: list[dict[str, Any]] = []
+    for p in _PARTIES.values():
+        if p.status == "finished":
+            continue
+        host = p.members.get(p.host_id)
+        rows.append(
+            {
+                "code": p.code,
+                "party_id": p.party_id,
+                "status": p.status,
+                "host_id": p.host_id,
+                "host_nickname": host.nickname if host else "Гость",
+                "host_avatar": host.avatar if host else "♟",
+                "members": len(p.members),
+                "spectator_count": sum(1 for s in p.spectators.values() if s.ws is not None),
+                "ends_at": int(p.ends_at) if p.status == "playing" else 0,
+                "created_at": int(p.created_at),
+            }
+        )
+    rows.sort(key=lambda r: -r["created_at"])
+    return rows
 
 
 def reap_idle() -> None:
