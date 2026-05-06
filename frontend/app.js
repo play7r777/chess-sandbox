@@ -231,6 +231,13 @@ const STARTPOS_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const EMPTY_FEN = "8/8/8/8/8/8/8/8 w - - 0 1";
 
 const state = {
+  // Active high-level view ('main' | 'analysis' | 'puzzle'). Mirrored
+  // by `document.body.classList`; tracked here so callers don't have to
+  // poke the DOM to gate behaviour like puzzle move dispatch.
+  view: "main",
+  // Local user identity (nickname/avatar) loaded from localStorage and
+  // synced to the backend so the leaderboard sees this client.
+  user: { client_id: null, nickname: "", avatar: "♟", elo_history: null },
   // 64-cell array indexed 0..63 where 0 = a8, 7 = h8, 56 = a1, 63 = h1.
   // Each cell is a piece char (e.g. 'P','k') or null.
   board: new Array(64).fill(null),
@@ -309,6 +316,7 @@ const state = {
     startedAt: 0,             // ms when solver-state began (after setup move)
     solveMs: 0,               // ms to solve last puzzle (for display)
     pendingNext: null,        // setTimeout handle for auto-next after fail
+    needsNextOnReturn: false, // user left mid-pendingNext; advance when they come back
     timerHandle: null,        // setInterval handle for live timer display
   },
 };
@@ -882,7 +890,7 @@ function tryFreeplayMove(from, to) {
     tryDrillMove(from, to);
     return;
   }
-  if (state.puzzle && state.puzzle.active) {
+  if (state.puzzle && state.puzzle.active && state.view === "puzzle") {
     tryPuzzleMove(from, to);
     return;
   }
@@ -1910,6 +1918,8 @@ function setView(view) {
   if (view === "analysis")    v = "analysis";
   else if (view === "puzzle") v = "puzzle";
   else                        v = "main";
+  const prev = state.view;
+  state.view = v;
   document.body.classList.toggle("view-main",     v === "main");
   document.body.classList.toggle("view-analysis", v === "analysis");
   document.body.classList.toggle("view-puzzle",   v === "puzzle");
@@ -1924,7 +1934,7 @@ function setView(view) {
   // the board back the way the user found it.
   if (v === "puzzle") {
     enterPuzzleView();
-  } else if (state.puzzle && state.puzzle.active) {
+  } else if (prev === "puzzle" && state.puzzle && state.puzzle.current) {
     leavePuzzleView();
   }
 }
@@ -3038,6 +3048,12 @@ function enterPuzzleView() {
   // drag/click attempts are routed through `tryFreeplayMove`.
   if (!state.legalMode) setBoardMode(true);
   _loadPuzzleSession();
+  // If we deferred an auto-next while the user was on Main, load it now.
+  if (state.puzzle.needsNextOnReturn) {
+    state.puzzle.needsNextOnReturn = false;
+    loadNextPuzzle();
+    return;
+  }
   // Auto-load a puzzle when entering an empty view.
   if (!state.puzzle.current) {
     loadNextPuzzle();
@@ -3045,18 +3061,31 @@ function enterPuzzleView() {
     // Replay the current puzzle's start position (in case the user
     // bounced between tabs).
     _restorePuzzleBoard();
+    // Re-flip board to the solver's side if user changed orientation
+    // on another view.
+    const wantFlipped = state.puzzle.side === "b";
+    if (state.flipped !== wantFlipped) {
+      state.flipped = wantFlipped;
+      renderBoard();
+    }
     renderPuzzleUi();
     if (state.puzzle.active) _startPuzzleTimer();
   }
 }
 
 function leavePuzzleView() {
-  // Stop accepting board input as a puzzle attempt.
-  state.puzzle.active = false;
+  // The puzzle stays live (timer keeps counting via wall-clock against
+  // `state.puzzle.startedAt`) so users can't dodge a hard puzzle by
+  // bouncing tabs and hitting "Следующая" without penalty. Board input
+  // is gated on `state.view === "puzzle"` instead of the active flag.
   _stopPuzzleTimer();
+  // If an auto-next was pending (after a fail), defer it until the
+  // user actually returns to the puzzle tab — otherwise loadNextPuzzle
+  // would slap a puzzle FEN onto the Main / Analysis board.
   if (state.puzzle.pendingNext) {
     clearTimeout(state.puzzle.pendingNext);
     state.puzzle.pendingNext = null;
+    state.puzzle.needsNextOnReturn = true;
   }
   // Restore orientation only if we were the one that flipped it.
   if (state.puzzle.flippedSnapshot !== null
@@ -3419,6 +3448,16 @@ function finalizePuzzle(result) {
   if (state.puzzle.history.length > 30) state.puzzle.history.length = 30;
   _savePuzzleSession();
   spawnPuzzleCelebration(outcome === "failed" || outcome === "skipped" ? "bad" : "ok");
+  // Sync this attempt to the backend so the user shows up in the
+  // leaderboard and their per-puzzle Elo history is preserved.
+  recordPuzzleAttemptOnServer({
+    outcome,
+    delta,
+    new_rating: state.puzzle.sessionRating,
+    puzzle_id: state.puzzle.current ? String(state.puzzle.current.id || "") : null,
+    puzzle_rating: pr,
+    solve_ms: state.puzzle.solveMs,
+  });
   renderPuzzleUi();
   renderPuzzleStatsBar();
   renderPuzzleHistory();
@@ -3440,14 +3479,7 @@ function renderPuzzleStatsBar() {
   const host = document.getElementById("puzzle-stats-bar");
   if (!host) return;
   const ss = state.puzzle.sessionStats;
-  const last = state.puzzle.history[0];
-  let pillCls = "";
-  let pillDelta = "";
-  if (last && typeof last.delta === "number" && last.delta !== 0) {
-    pillCls = last.delta > 0 ? "is-up" : "is-down";
-    pillDelta = (last.delta > 0 ? "▲ +" : "▼ ") + last.delta;
-  }
-  // Live timer for active puzzle, frozen solveMs for finished.
+  // Live timer for the running puzzle, frozen solveMs once finished.
   const ms = state.puzzle.startedAt
     ? (state.puzzle.solveMs || (Date.now() - state.puzzle.startedAt))
     : 0;
@@ -3455,20 +3487,17 @@ function renderPuzzleStatsBar() {
   const tm = Math.floor(sec / 60);
   const ts = sec % 60;
   const timer = `${tm}:${String(ts).padStart(2, "0")}`;
+  // Per spec: главный экран пазлов оставляет только серию + время
+  // текущего пазла. Решено/Ошибки/Пропуски/Рейтинг переехали в профиль.
   host.innerHTML = `
-    <div class="ps-block"><span class="ps-label">Решено</span><span class="ps-val ok">${ss.solved}</span></div>
+    <div class="ps-block ps-streak">
+      <span class="ps-label">Серия</span>
+      <span class="ps-val ${ss.streak >= 3 ? "ok" : ""}">🔥 ${ss.streak}</span>
+    </div>
     <div class="ps-divider"></div>
-    <div class="ps-block"><span class="ps-label">Ошиб.</span><span class="ps-val bad">${ss.wrong}</span></div>
-    <div class="ps-divider"></div>
-    <div class="ps-block"><span class="ps-label">Пропуск</span><span class="ps-val">${ss.skipped}</span></div>
-    <div class="ps-divider"></div>
-    <div class="ps-block"><span class="ps-label">Серия</span><span class="ps-val ${ss.streak >= 3 ? "ok" : ""}">🔥 ${ss.streak}</span></div>
-    <div class="ps-divider"></div>
-    <div class="ps-block ps-timer"><span class="ps-label">⏱</span><span class="ps-val" id="puzzle-timer-val">${timer}</span></div>
-    <div class="ps-rating-pill ${pillCls}">
-      <span class="ps-rating-label">Рейтинг</span>
-      <span>${state.puzzle.sessionRating}</span>
-      ${pillDelta ? `<span class="ps-rating-delta">${pillDelta}</span>` : ""}
+    <div class="ps-block ps-timer">
+      <span class="ps-label">Время</span>
+      <span class="ps-val" id="puzzle-timer-val">${timer}</span>
     </div>
   `;
 }
@@ -3505,6 +3534,8 @@ function renderPuzzleUi() {
   // Feedback box. We deliberately stay minimal — chess.com doesn't
   // expose theme/progress/move-count hints, neither do we. After
   // finalization the card shows the puzzle's rating and Δ once.
+  // Note: the side-to-move banner already says "Ход за <сторону>",
+  // so the in-progress feedback prompts only carry the call-to-action.
   let feedback = "";
   if (state.puzzle.feedback === "solved") {
     const last = state.puzzle.history[0];
@@ -3520,12 +3551,12 @@ function renderPuzzleUi() {
   } else if (state.puzzle.hintUsed) {
     feedback = `<div class="puzzle-feedback fb-info">Подсказка: исходная клетка подсвечена.</div>`;
   } else {
-    feedback = `<div class="puzzle-feedback fb-info">${sideLetter} Ход за <b>${sideLabel}</b>. Найди лучший ход.</div>`;
+    feedback = `<div class="puzzle-feedback fb-info">Найди лучший ход.</div>`;
   }
   card.innerHTML = `
     <div class="puzzle-side-banner">
       <span class="puzzle-side-icon ${sideCls}">${sideLetter}</span>
-      <span>Ход за <b>${sideLabel}</b>.</span>
+      <span class="puzzle-side-text">Ход за <b>${sideLabel}</b></span>
     </div>
     ${feedback}
   `;
@@ -4036,6 +4067,403 @@ document.getElementById("nav-play").addEventListener("click", () => {
   else startAutoplay();
 });
 
+// ---------- User / Profile / Leaderboard ----------
+
+const AVATAR_CHOICES = [
+  "♟", "♞", "♝", "♜", "♛", "♚",
+  "🦊", "🐺", "🐯", "🦁", "🐼", "🐨",
+  "🐉", "🦄", "🐢", "🦅", "🦉", "🐧",
+  "🤖", "👾", "👻", "🎯", "🎮", "🚀",
+  "⚡", "🔥", "🌟", "💎", "🏆", "🎖",
+  "🍀", "🍕",
+];
+
+function _uuidv4() {
+  // RFC4122-ish v4 — good enough for a local client_id.
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  // Fallback
+  let s = "";
+  const hex = "0123456789abcdef";
+  for (let i = 0; i < 32; i++) {
+    let r = (Math.random() * 16) | 0;
+    if (i === 12) r = 4;
+    if (i === 16) r = (r & 0x3) | 0x8;
+    s += hex[r];
+    if (i === 7 || i === 11 || i === 15 || i === 19) s += "-";
+  }
+  return s;
+}
+
+function _loadLocalUser() {
+  try {
+    const raw = localStorage.getItem("cs.user");
+    if (!raw) return null;
+    const u = JSON.parse(raw);
+    if (!u || typeof u.client_id !== "string" || u.client_id.length < 4) return null;
+    return u;
+  } catch { return null; }
+}
+
+function _saveLocalUser() {
+  try {
+    localStorage.setItem("cs.user", JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname,
+      avatar: state.user.avatar,
+    }));
+  } catch (_) { /* ignore */ }
+}
+
+async function syncUserProfile() {
+  if (!state.user.client_id) return null;
+  try {
+    return await api("/api/users/upsert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: state.user.client_id,
+        nickname: state.user.nickname || "Гость",
+        avatar: state.user.avatar || "♟",
+      }),
+    });
+  } catch { return null; }
+}
+
+async function userHeartbeat() {
+  if (!state.user.client_id) return;
+  try {
+    await api("/api/users/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: state.user.client_id }),
+    });
+  } catch { /* ignore */ }
+}
+
+async function recordPuzzleAttemptOnServer(payload) {
+  if (!state.user.client_id) return null;
+  try {
+    return await api("/api/users/puzzle_attempt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: state.user.client_id, ...payload }),
+    });
+  } catch { return null; }
+}
+
+function _renderOnboardingAvatars(selected) {
+  const host = document.getElementById("onboarding-avatars");
+  if (!host) return;
+  host.innerHTML = AVATAR_CHOICES.map((a) => {
+    const cls = a === selected ? "onboarding-avatar is-selected" : "onboarding-avatar";
+    return `<button type="button" class="${cls}" data-avatar="${escapeHtml(a)}">${escapeHtml(a)}</button>`;
+  }).join("");
+  host.querySelectorAll(".onboarding-avatar").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      host.querySelectorAll(".onboarding-avatar").forEach((b) => b.classList.remove("is-selected"));
+      btn.classList.add("is-selected");
+    });
+  });
+}
+
+function showOnboarding() {
+  const modal = document.getElementById("onboarding-modal");
+  if (!modal) return;
+  const nickInput = document.getElementById("onboarding-nick");
+  if (nickInput) nickInput.value = state.user.nickname || "";
+  _renderOnboardingAvatars(state.user.avatar || "♟");
+  modal.hidden = false;
+  setTimeout(() => nickInput && nickInput.focus(), 50);
+}
+
+function hideOnboarding() {
+  const modal = document.getElementById("onboarding-modal");
+  if (modal) modal.hidden = true;
+}
+
+function _selectedOnboardingAvatar() {
+  const sel = document.querySelector("#onboarding-avatars .onboarding-avatar.is-selected");
+  return (sel && sel.dataset.avatar) || "♟";
+}
+
+document.getElementById("btn-onboarding-save")?.addEventListener("click", async () => {
+  const nickInput = document.getElementById("onboarding-nick");
+  const nickname = (nickInput?.value || "").trim().slice(0, 32) || "Гость";
+  const avatar = _selectedOnboardingAvatar();
+  if (!state.user.client_id) state.user.client_id = _uuidv4();
+  state.user.nickname = nickname;
+  state.user.avatar = avatar;
+  _saveLocalUser();
+  await syncUserProfile();
+  hideOnboarding();
+});
+
+// Hamburger menu (Profile / Leaderboard).
+const userMenuBtn = document.getElementById("btn-user-menu");
+const userMenuDropdown = document.getElementById("user-menu-dropdown");
+function toggleUserMenu(force) {
+  if (!userMenuDropdown || !userMenuBtn) return;
+  const next = typeof force === "boolean" ? force : userMenuDropdown.hidden;
+  userMenuDropdown.hidden = !next;
+  userMenuBtn.setAttribute("aria-expanded", next ? "true" : "false");
+}
+userMenuBtn?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleUserMenu();
+});
+document.addEventListener("click", (e) => {
+  if (!userMenuDropdown || userMenuDropdown.hidden) return;
+  if (e.target instanceof Node && (userMenuBtn?.contains(e.target) || userMenuDropdown.contains(e.target))) return;
+  toggleUserMenu(false);
+});
+userMenuDropdown?.querySelectorAll(".user-menu-item").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    toggleUserMenu(false);
+    const action = btn.dataset.action;
+    if (action === "profile") {
+      openProfileModal(state.user.client_id);
+    } else if (action === "leaderboard") {
+      openLeaderboardModal();
+    }
+  });
+});
+
+// Modal close handlers.
+document.querySelectorAll("[data-close]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const id = btn.dataset.close;
+    const modal = id && document.getElementById(id);
+    if (modal) modal.hidden = true;
+  });
+});
+document.querySelectorAll(".modal-overlay").forEach((overlay) => {
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.hidden = true;
+  });
+});
+
+function _formatLastSeen(ts) {
+  if (!ts) return "—";
+  const sec = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (sec < 60)        return "только что";
+  if (sec < 60 * 60)   return `${Math.floor(sec / 60)} мин назад`;
+  if (sec < 86400)     return `${Math.floor(sec / 3600)} ч назад`;
+  if (sec < 7 * 86400) return `${Math.floor(sec / 86400)} дн назад`;
+  const d = new Date(ts * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+function _eloHistoryFiltered(history, period) {
+  if (!Array.isArray(history) || history.length === 0) return [];
+  const nowSec = Math.floor(Date.now() / 1000);
+  let cutoff = 0;
+  if (period === "7d")  cutoff = nowSec - 7 * 86400;
+  if (period === "90d") cutoff = nowSec - 90 * 86400;
+  return history.filter((h) => (typeof h.ts === "number" ? h.ts >= cutoff : true));
+}
+
+function renderEloGraph(host, history) {
+  if (!host) return;
+  if (!history || history.length < 2) {
+    host.innerHTML = `<div class="elo-graph-empty">Недостаточно данных. Реши пару пазлов, чтобы увидеть график.</div>`;
+    return;
+  }
+  const points = history.map((h) => ({
+    ts: typeof h.ts === "number" ? h.ts : 0,
+    rating: typeof h.rating === "number" ? h.rating : 1200,
+  }));
+  const ratings = points.map((p) => p.rating);
+  const tmin = points[0].ts;
+  const tmax = points[points.length - 1].ts;
+  const tspan = Math.max(1, tmax - tmin);
+  const rmin = Math.min(...ratings);
+  const rmax = Math.max(...ratings);
+  const rpad = Math.max(20, (rmax - rmin) * 0.15);
+  const ylo = Math.max(0, Math.floor(rmin - rpad));
+  const yhi = Math.ceil(rmax + rpad);
+  const w = 600, h = 160, padL = 32, padR = 8, padT = 10, padB = 22;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+  const xOf = (ts) => padL + ((ts - tmin) / tspan) * innerW;
+  const yOf = (r)  => padT + (1 - (r - ylo) / Math.max(1, yhi - ylo)) * innerH;
+  let path = "";
+  points.forEach((p, i) => {
+    const x = xOf(p.ts), y = yOf(p.rating);
+    path += (i === 0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(1) + " ";
+  });
+  const fillPath = path + `L ${xOf(tmax).toFixed(1)} ${(padT + innerH).toFixed(1)} L ${xOf(tmin).toFixed(1)} ${(padT + innerH).toFixed(1)} Z`;
+  const yticks = 4;
+  const tickLines = [];
+  for (let i = 0; i <= yticks; i++) {
+    const r = Math.round(ylo + ((yhi - ylo) * i) / yticks);
+    const y = yOf(r);
+    tickLines.push(
+      `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${(w - padR).toFixed(1)}" y2="${y.toFixed(1)}" stroke="#1f2a3a" stroke-width="1" />`,
+      `<text x="${padL - 6}" y="${(y + 4).toFixed(1)}" fill="#94a4be" font-size="10" text-anchor="end">${r}</text>`
+    );
+  }
+  host.innerHTML = `
+    <svg class="elo-graph" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      ${tickLines.join("")}
+      <path d="${fillPath}" fill="url(#elo-grad)" opacity="0.3" />
+      <path d="${path}" fill="none" stroke="#6da7ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+      <defs>
+        <linearGradient id="elo-grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="#6da7ff" stop-opacity="0.6" />
+          <stop offset="100%" stop-color="#6da7ff" stop-opacity="0" />
+        </linearGradient>
+      </defs>
+    </svg>
+  `;
+}
+
+async function openProfileModal(clientId) {
+  const modal = document.getElementById("profile-modal");
+  const body = document.getElementById("profile-body");
+  if (!modal || !body) return;
+  body.innerHTML = `<div class="profile-empty">Загружаю профиль…</div>`;
+  modal.hidden = false;
+  let user = null;
+  if (clientId) {
+    try {
+      user = await api(`/api/users/${encodeURIComponent(clientId)}`);
+    } catch { user = null; }
+  }
+  if (!user) {
+    body.innerHTML = `<div class="profile-empty">Профиль не найден на этом сервере.</div>`;
+    return;
+  }
+  state.user.elo_history = clientId === state.user.client_id ? user.elo_history : null;
+  const stats = user.stats || {};
+  const games = stats.games || 0;
+  const solved = stats.solved || 0;
+  const wrong = stats.wrong || 0;
+  const skipped = stats.skipped || 0;
+  const winPct = games ? (solved / games * 100).toFixed(1) : "0";
+  const isSelf = user.client_id === state.user.client_id;
+  body.innerHTML = `
+    <header class="profile-header">
+      <div class="profile-avatar">${escapeHtml(user.avatar || "♟")}</div>
+      <div class="profile-name">
+        <h3>${escapeHtml(user.nickname || "Гость")}${isSelf ? " <span class=\"muted\" style=\"font-size:13px; font-weight:500;\">(вы)</span>" : ""}</h3>
+        <div class="muted">Последний раз: ${_formatLastSeen(user.last_seen)}</div>
+      </div>
+      ${isSelf ? `<button id="btn-profile-edit" type="button" class="puzzle-secondary" style="margin-left:auto;">Изменить</button>` : ""}
+    </header>
+    <section class="profile-stats-grid">
+      <div class="profile-stat"><span class="ps-label">Рейтинг</span><span class="ps-val rating">${user.rating || 1200}</span></div>
+      <div class="profile-stat"><span class="ps-label">Игр</span><span class="ps-val">${games}</span></div>
+      <div class="profile-stat"><span class="ps-label">Винрейт</span><span class="ps-val">${winPct}%</span></div>
+      <div class="profile-stat"><span class="ps-label">Решено</span><span class="ps-val ok">${solved}</span></div>
+      <div class="profile-stat"><span class="ps-label">Ошибок</span><span class="ps-val bad">${wrong}</span></div>
+      <div class="profile-stat"><span class="ps-label">Пропуск</span><span class="ps-val">${skipped}</span></div>
+      <div class="profile-stat"><span class="ps-label">Серия</span><span class="ps-val warn">🔥 ${stats.current_streak || 0}</span></div>
+      <div class="profile-stat"><span class="ps-label">Макс серия</span><span class="ps-val warn">${stats.best_streak || 0}</span></div>
+    </section>
+    <section class="profile-section">
+      <h4>График Эло</h4>
+      <div class="elo-period-tabs" id="elo-period-tabs">
+        <button type="button" class="elo-period-tab is-active" data-period="all">Всё время</button>
+        <button type="button" class="elo-period-tab" data-period="90d">90 дней</button>
+        <button type="button" class="elo-period-tab" data-period="7d">7 дней</button>
+      </div>
+      <div id="elo-graph-host"></div>
+    </section>
+    ${Array.isArray(user.parties) && user.parties.length ? `
+    <section class="profile-section">
+      <h4>История пати-матчей</h4>
+      <div>${user.parties.slice(-10).reverse().map((p) => `
+        <div class="profile-stat" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <span><b>#${p.placement}</b> из ${p.participants}</span>
+          <span class="muted">${p.solved} решено · ${p.elo_gained >= 0 ? "+" : ""}${p.elo_gained} эло</span>
+        </div>
+      `).join("")}</div>
+    </section>` : ""}
+  `;
+  const eloHost = document.getElementById("elo-graph-host");
+  renderEloGraph(eloHost, user.elo_history || []);
+  document.getElementById("elo-period-tabs")?.querySelectorAll(".elo-period-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#elo-period-tabs .elo-period-tab").forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+      const filtered = _eloHistoryFiltered(user.elo_history || [], btn.dataset.period);
+      renderEloGraph(eloHost, filtered);
+    });
+  });
+  document.getElementById("btn-profile-edit")?.addEventListener("click", () => {
+    modal.hidden = true;
+    showOnboarding();
+  });
+}
+
+async function openLeaderboardModal() {
+  const modal = document.getElementById("leaderboard-modal");
+  const body = document.getElementById("leaderboard-body");
+  if (!modal || !body) return;
+  body.innerHTML = `<div class="profile-empty">Загружаю лидерборд…</div>`;
+  modal.hidden = false;
+  let users = [];
+  try {
+    const r = await api("/api/users");
+    users = (r && r.users) || [];
+  } catch { users = []; }
+  if (!users.length) {
+    body.innerHTML = `<div class="profile-empty">Пока никого нет. Реши первый пазл, чтобы появиться здесь.</div>`;
+    return;
+  }
+  const rowsHtml = users.map((u, idx) => {
+    const isSelf = u.client_id === state.user.client_id;
+    return `
+      <tr class="leaderboard-row ${isSelf ? "is-self" : ""}" data-cid="${escapeHtml(u.client_id)}">
+        <td class="lb-rank">#${idx + 1}</td>
+        <td>
+          <span class="lb-avatar">${escapeHtml(u.avatar || "♟")}</span>
+          <span class="lb-name">${escapeHtml(u.nickname || "Гость")}${isSelf ? " <span class=\"muted\">(вы)</span>" : ""}</span>
+        </td>
+        <td class="lb-rating">${u.rating}</td>
+        <td>${u.games}</td>
+        <td class="lb-pct">${u.win_pct}%</td>
+        <td class="lb-pct">${u.best_streak}</td>
+        <td class="muted">${_formatLastSeen(u.last_seen)}</td>
+      </tr>
+    `;
+  }).join("");
+  body.innerHTML = `
+    <table class="leaderboard-table">
+      <thead>
+        <tr>
+          <th>#</th><th>Игрок</th><th>Эло</th><th>Игр</th><th>Винрейт</th><th>Макс серия</th><th>В сети</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+  `;
+  body.querySelectorAll(".leaderboard-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      modal.hidden = true;
+      openProfileModal(row.dataset.cid);
+    });
+  });
+}
+
+async function _bootUser() {
+  const stored = _loadLocalUser();
+  if (stored) {
+    state.user.client_id = stored.client_id;
+    state.user.nickname = stored.nickname || "Гость";
+    state.user.avatar = stored.avatar || "♟";
+    await syncUserProfile();
+  } else {
+    state.user.client_id = _uuidv4();
+    showOnboarding();
+  }
+  // Heartbeat every 60s so last-seen stays fresh on the leaderboard.
+  setInterval(userHeartbeat, 60_000);
+}
+
 // ---------- Boot ----------
 
 loadFen(STARTPOS_FEN);
@@ -4043,6 +4471,7 @@ renderPalette();
 renderBoard();
 setBoardMode(true);
 refreshEngineStatus();
+_bootUser();
 
 // Expose for debugging.
 window.__chess = { state, buildFen, loadFen };

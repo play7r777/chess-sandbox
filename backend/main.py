@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import puzzles as puzzles_db
+from . import users as users_db
 from .analysis import analyse_game, import_game_async
 from .recognize import diagnostics as recognize_diagnostics
 from .recognize import recognize as recognize_position
@@ -61,6 +62,37 @@ class GameAnalyseRequest(BaseModel):
     movetime_ms: int | None = Field(default=None, ge=50, le=60_000)
     depth: int | None = Field(default=22, ge=1, le=40)
     multipv: int = Field(default=2, ge=1, le=4)
+
+
+class UserUpsertRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    nickname: str = Field(default="Гость", max_length=32)
+    avatar: str = Field(default="♟", max_length=8)
+
+
+class HeartbeatRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+
+
+class PuzzleAttemptRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    outcome: str = Field(..., description="solved|solved-hint|failed|skipped")
+    delta: int = Field(default=0, ge=-200, le=200)
+    new_rating: int = Field(default=1200, ge=400, le=3000)
+    puzzle_id: str | None = Field(default=None, max_length=64)
+    puzzle_rating: int | None = Field(default=None, ge=0, le=4000)
+    solve_ms: int | None = Field(default=None, ge=0, le=10_000_000)
+
+
+class PartyResultRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    party_id: str = Field(..., max_length=64)
+    placement: int = Field(..., ge=1, le=64)
+    participants: int = Field(..., ge=1, le=64)
+    solved: int = Field(default=0, ge=0, le=10_000)
+    elo_gained: int = Field(default=0, ge=-1000, le=1000)
+    duration_sec: int = Field(default=0, ge=0, le=86_400)
+    notes: str | None = Field(default=None, max_length=240)
 
 
 @asynccontextmanager
@@ -394,6 +426,70 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
         "depth": result.depth,
         "pv": result.pv,
     }
+
+
+# ---- Users / Profile / Leaderboard ----
+
+@app.post("/api/users/upsert")
+async def users_upsert(req: UserUpsertRequest) -> dict[str, Any]:
+    """Register or update profile for a given client_id."""
+    return users_db.upsert_user(
+        client_id=req.client_id,
+        nickname=req.nickname,
+        avatar=req.avatar,
+    )
+
+
+@app.post("/api/users/heartbeat")
+async def users_heartbeat(req: HeartbeatRequest) -> dict[str, Any]:
+    users_db.heartbeat(req.client_id)
+    return {"ok": True}
+
+
+@app.get("/api/users")
+async def users_list() -> dict[str, Any]:
+    return {"users": users_db.list_users()}
+
+
+@app.get("/api/users/{client_id}")
+async def users_get(client_id: str) -> dict[str, Any]:
+    u = users_db.get_user(client_id)
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return u
+
+
+@app.post("/api/users/puzzle_attempt")
+async def users_puzzle_attempt(req: PuzzleAttemptRequest) -> dict[str, Any]:
+    u = users_db.record_puzzle_attempt(
+        client_id=req.client_id,
+        outcome=req.outcome,
+        delta=req.delta,
+        new_rating=req.new_rating,
+        puzzle_id=req.puzzle_id,
+        puzzle_rating=req.puzzle_rating,
+        solve_ms=req.solve_ms,
+    )
+    if not u:
+        raise HTTPException(status_code=400, detail="Bad outcome.")
+    return u
+
+
+@app.post("/api/users/party_result")
+async def users_party_result(req: PartyResultRequest) -> dict[str, Any]:
+    users_db.record_party_result(
+        req.client_id,
+        {
+            "party_id": req.party_id,
+            "placement": req.placement,
+            "participants": req.participants,
+            "solved": req.solved,
+            "elo_gained": req.elo_gained,
+            "duration_sec": req.duration_sec,
+            "notes": req.notes,
+        },
+    )
+    return {"ok": True}
 
 
 # ---- Static frontend ----

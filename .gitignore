@@ -26,3 +26,5 @@ models/
 *.onnx
 test-plan.md
 test-report.md
+backend/data/users.json
+backend/data/users.json.tmp
