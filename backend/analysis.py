@@ -1095,13 +1095,14 @@ async def analyse_game(
         if best_move is not None:
             best_san = pre_board.san(best_move)
 
-        # Serialise the engine's top-1 PV (up to 5 plies) for the UI
-        # to draw arrows / show best-line continuation.
+        # Serialise the engine's top-1 PV (up to 24 plies) for the UI
+        # to draw arrows / show best-line continuation. The frontend caps
+        # how many arrows are actually drawn via the user's setting.
         best_pv_uci: list[str] = []
         best_pv_san: list[str] = []
         if best_pv:
             sim = pre_board.copy(stack=False)
-            for pv_move in best_pv[:10]:
+            for pv_move in best_pv[:24]:
                 if pv_move not in sim.legal_moves:
                     break
                 best_pv_uci.append(pv_move.uci())

@@ -978,6 +978,16 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 .settings-options {
   display: flex; flex-wrap: wrap; gap: 10px;
+  align-items: center;
+}
+.settings-options input[type="number"] {
+  width: 80px;
+  background: #11151f;
+  border: 1px solid #2a3140;
+  border-radius: 6px;
+  color: #eaeef5;
+  padding: 6px 8px;
+  font-size: 14px;
 }
 .theme-swatch, .piece-swatch {
   display: flex; flex-direction: column; align-items: center; gap: 6px;

@@ -51,8 +51,20 @@ const PIECE_SETS = {
   set1:       { name: "#1", ext: "png" },
 };
 
+const DEFAULT_PV_ARROW_COUNT = 6;
+const MAX_PV_ARROW_COUNT = 12;
+function _clampArrows(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_PV_ARROW_COUNT;
+  return Math.max(1, Math.min(MAX_PV_ARROW_COUNT, Math.round(v)));
+}
 function loadSettings() {
-  const fallback = { theme: DEFAULT_BOARD_THEME, pieces: DEFAULT_PIECE_SET, soundOn: true };
+  const fallback = {
+    theme: DEFAULT_BOARD_THEME,
+    pieces: DEFAULT_PIECE_SET,
+    soundOn: true,
+    pvArrowCount: DEFAULT_PV_ARROW_COUNT,
+  };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return fallback;
@@ -61,6 +73,7 @@ function loadSettings() {
       theme: BOARD_THEMES[parsed.theme] ? parsed.theme : DEFAULT_BOARD_THEME,
       pieces: PIECE_SETS[parsed.pieces] ? parsed.pieces : DEFAULT_PIECE_SET,
       soundOn: parsed.soundOn !== false,
+      pvArrowCount: _clampArrows(parsed.pvArrowCount ?? DEFAULT_PV_ARROW_COUNT),
     };
   } catch { return fallback; }
 }
@@ -394,9 +407,12 @@ function makeReviewBadge(cls) {
   return wrap;
 }
 
-// Build a green SVG-arrow overlay over the board (Stockfish's best
-// move + a couple of plies of the principal variation as fading
-// translucent arrows behind it). Called every renderBoard().
+// Build an SVG-arrow overlay over the board with one arrow per ply of
+// Stockfish's principal variation. Arrows are coloured by which side
+// is to move at that ply (white-ish for white, dark for black) and
+// fade with depth so the immediate best move is the most contrasty.
+// Each arrow gets a small numbered badge at its tail showing the
+// per-side order ("white's 1st move", "white's 2nd", etc.).
 function renderBoardArrows() {
   const existing = boardEl.querySelector(".board-arrows");
   if (existing) existing.remove();
@@ -410,16 +426,36 @@ function renderBoardArrows() {
   svg.setAttribute("viewBox", "0 0 8 8");
   svg.setAttribute("preserveAspectRatio", "none");
 
-  // Reusable arrowhead marker per opacity level.
+  // Side-of-move palette. White arrows are off-white with a thin dark
+  // outline so they stay visible on light squares; black arrows are
+  // a deep slate with a thin light outline.
+  const PALETTE = {
+    w: { fill: "245, 245, 245", outline: "rgba(15, 18, 25, 0.55)" },
+    b: { fill: "30, 32, 38",    outline: "rgba(255, 255, 255, 0.45)" },
+  };
+
+  // Side-to-move at the position currently displayed. PV[0] is played
+  // by this side; the colour of arrow `i` is decided by `(stm + i) % 2`.
+  const stm = state.sideToMove === "b" ? "b" : "w";
+  const count = _clampArrows(userSettings.pvArrowCount);
+  const maxPlies = count * 2;
+
+  // Build [ply][side] -> alpha lookup. Arrow alpha fades linearly
+  // within each side from 0.92 down to 0.30 across `count` arrows.
+  function alphaFor(orderInSide) {
+    const t = (orderInSide - 1) / Math.max(1, count - 1);
+    return Math.max(0.22, 0.92 - 0.62 * t);
+  }
+
+  // We need a marker per arrow because the head colour must match the
+  // line. Markers are minted on the fly and referenced by id.
   const defs = document.createElementNS(NS, "defs");
-  const tints = [
-    { id: "arrow-best", fill: "#5eaa46" },
-    { id: "arrow-pv1",  fill: "rgba(94, 170, 70, 0.55)" },
-    { id: "arrow-pv2",  fill: "rgba(94, 170, 70, 0.32)" },
-  ];
-  for (const t of tints) {
+  svg.appendChild(defs);
+  let markerSeq = 0;
+  function mintMarker(colorRgba) {
+    const id = `arrow-mk-${markerSeq++}`;
     const m = document.createElementNS(NS, "marker");
-    m.setAttribute("id", t.id);
+    m.setAttribute("id", id);
     m.setAttribute("viewBox", "0 0 10 10");
     m.setAttribute("refX", "7");
     m.setAttribute("refY", "5");
@@ -428,54 +464,95 @@ function renderBoardArrows() {
     m.setAttribute("orient", "auto");
     const tip = document.createElementNS(NS, "path");
     tip.setAttribute("d", "M0,1 L9,5 L0,9 L2.5,5 Z");
-    tip.setAttribute("fill", t.fill);
+    tip.setAttribute("fill", colorRgba);
     m.appendChild(tip);
     defs.appendChild(m);
+    return id;
   }
-  svg.appendChild(defs);
 
-  function drawArrow(fromSq, toSq, color, markerId, width) {
+  function drawArrow(fromSq, toSq, side, orderInSide, totalIdx) {
     const a = squareToBoardXY(fromSq);
     const b = squareToBoardXY(toSq);
     if (!a || !b) return;
     const dx = b.x - a.x, dy = b.y - a.y;
     const len = Math.sqrt(dx * dx + dy * dy);
     if (len < 0.01) return;
-    // Pull the line back from both ends a little so the arrow
-    // sits *on* the squares instead of hiding the piece glyphs.
+    const pal = PALETTE[side] || PALETTE.w;
+    const alpha = alphaFor(orderInSide);
+    const fill = `rgba(${pal.fill}, ${alpha.toFixed(3)})`;
+    // Slightly thicker outline so the arrow body stays readable on
+    // both light and dark squares regardless of side colour.
+    const outline = pal.outline;
     const inset = 0.30;
     const x1 = a.x + (dx / len) * 0.18;
     const y1 = a.y + (dy / len) * 0.18;
     const x2 = b.x - (dx / len) * inset;
     const y2 = b.y - (dy / len) * inset;
+    // Width tapers slightly with depth so first move looks the boldest.
+    const w = 0.20 + (alpha - 0.22) * 0.10;
+    const markerId = mintMarker(fill);
+    // Outline pass (drawn first, slightly wider) for contrast.
+    const outl = document.createElementNS(NS, "line");
+    outl.setAttribute("x1", x1);
+    outl.setAttribute("y1", y1);
+    outl.setAttribute("x2", x2);
+    outl.setAttribute("y2", y2);
+    outl.setAttribute("stroke", outline);
+    outl.setAttribute("stroke-width", String(w + 0.05));
+    outl.setAttribute("stroke-linecap", "round");
+    svg.appendChild(outl);
     const ln = document.createElementNS(NS, "line");
     ln.setAttribute("x1", x1);
     ln.setAttribute("y1", y1);
     ln.setAttribute("x2", x2);
     ln.setAttribute("y2", y2);
-    ln.setAttribute("stroke", color);
-    ln.setAttribute("stroke-width", String(width));
+    ln.setAttribute("stroke", fill);
+    ln.setAttribute("stroke-width", String(w));
     ln.setAttribute("stroke-linecap", "round");
     ln.setAttribute("marker-end", `url(#${markerId})`);
     svg.appendChild(ln);
+    // Numbered badge near the source square. Position it ~0.32 units
+    // along the arrow so it sits just inside the from-square.
+    const bx = a.x + (dx / len) * 0.32;
+    const by = a.y + (dy / len) * 0.32;
+    const r = 0.22;
+    const ring = document.createElementNS(NS, "circle");
+    ring.setAttribute("cx", String(bx));
+    ring.setAttribute("cy", String(by));
+    ring.setAttribute("r", String(r));
+    ring.setAttribute("fill", side === "w" ? "#fafafa" : "#1b1d22");
+    ring.setAttribute("stroke", side === "w" ? "rgba(0,0,0,0.55)" : "rgba(255,255,255,0.55)");
+    ring.setAttribute("stroke-width", "0.04");
+    ring.setAttribute("opacity", String(Math.max(0.55, alpha + 0.05)));
+    svg.appendChild(ring);
+    const tx = document.createElementNS(NS, "text");
+    tx.setAttribute("x", String(bx));
+    tx.setAttribute("y", String(by + 0.015));
+    tx.setAttribute("text-anchor", "middle");
+    tx.setAttribute("dominant-baseline", "central");
+    tx.setAttribute("font-size", "0.30");
+    tx.setAttribute("font-weight", "700");
+    tx.setAttribute("font-family", "system-ui, -apple-system, Segoe UI, Roboto, sans-serif");
+    tx.setAttribute("fill", side === "w" ? "#1a1c20" : "#f7f7f9");
+    tx.textContent = String(orderInSide);
+    svg.appendChild(tx);
+    void totalIdx;  // currently unused, kept for future tooltips/keys.
   }
 
-  // Render translucent PV arrows underneath the primary green one.
-  // PV indices: 0 is the same as bestArrow, 1 is opponent's reply,
-  // 2 is our planned follow-up. Show 1 + 2 as supporting context.
   if (hasPv) {
-    for (let i = 1; i <= 2; i++) {
+    const n = Math.min(state.bestPv.length, maxPlies);
+    for (let i = 0; i < n; i++) {
       const m = state.bestPv[i];
       if (!m || m.length < 4) continue;
       const fromSq = m.slice(0, 2);
-      const toSq = m.slice(2, 4);
-      const markerId = i === 1 ? "arrow-pv1" : "arrow-pv2";
-      const color = i === 1 ? "rgba(94, 170, 70, 0.55)" : "rgba(94, 170, 70, 0.32)";
-      drawArrow(fromSq, toSq, color, markerId, 0.18);
+      const toSq   = m.slice(2, 4);
+      const side = ((stm === "w") === (i % 2 === 0)) ? "w" : "b";
+      const orderInSide = Math.floor(i / 2) + 1;
+      drawArrow(fromSq, toSq, side, orderInSide, i);
     }
-  }
-  if (hasBest) {
-    drawArrow(state.bestArrow.from, state.bestArrow.to, "#5eaa46", "arrow-best", 0.24);
+  } else if (hasBest) {
+    // No PV data (e.g. drill-mode hint): single arrow coloured by stm.
+    drawArrow(state.bestArrow.from, state.bestArrow.to, stm, 1, 0);
   }
 
   boardEl.appendChild(svg);
@@ -1027,6 +1104,21 @@ function openSettingsModal() {
       btn.classList.add("is-active");
     });
   });
+  const pvInput = document.getElementById("settings-pv-arrows");
+  if (pvInput) {
+    pvInput.value = String(_clampArrows(userSettings.pvArrowCount));
+    const apply = () => {
+      const next = _clampArrows(pvInput.value);
+      pvInput.value = String(next);
+      if (next !== userSettings.pvArrowCount) {
+        userSettings.pvArrowCount = next;
+        saveSettings(userSettings);
+        renderBoard();   // re-draw arrows with the new cap
+      }
+    };
+    pvInput.addEventListener("change", apply);
+    pvInput.addEventListener("blur", apply);
+  }
   modal.hidden = false;
 }
 function closeSettingsModal() {
