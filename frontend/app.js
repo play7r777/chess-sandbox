@@ -421,7 +421,9 @@ function makeReviewBadge(cls) {
 // is to move at that ply (white-ish for white, dark for black) and
 // fade with depth so the immediate best move is the most contrasty.
 // Each arrow gets a small numbered badge at its tail showing the
-// per-side order ("white's 1st move", "white's 2nd", etc.).
+// ply number across both sides (white = 1, 3, 5… / black = 2, 4, 6…,
+// reversed when black is to move first), so the parity of the badge
+// number tells the viewer whose move it is.
 function renderBoardArrows() {
   const existing = boardEl.querySelector(".board-arrows");
   if (existing) existing.remove();
@@ -479,7 +481,7 @@ function renderBoardArrows() {
     return id;
   }
 
-  function drawArrow(fromSq, toSq, side, orderInSide, totalIdx) {
+  function drawArrow(fromSq, toSq, side, orderInSide, totalIdx, plyNum) {
     const a = squareToBoardXY(fromSq);
     const b = squareToBoardXY(toSq);
     if (!a || !b) return;
@@ -543,7 +545,7 @@ function renderBoardArrows() {
     tx.setAttribute("font-weight", "700");
     tx.setAttribute("font-family", "system-ui, -apple-system, Segoe UI, Roboto, sans-serif");
     tx.setAttribute("fill", side === "w" ? "#1a1c20" : "#f7f7f9");
-    tx.textContent = String(orderInSide);
+    tx.textContent = String(plyNum != null ? plyNum : orderInSide);
     svg.appendChild(tx);
     void totalIdx;  // currently unused, kept for future tooltips/keys.
   }
@@ -557,11 +559,14 @@ function renderBoardArrows() {
       const toSq   = m.slice(2, 4);
       const side = ((stm === "w") === (i % 2 === 0)) ? "w" : "b";
       const orderInSide = Math.floor(i / 2) + 1;
-      drawArrow(fromSq, toSq, side, orderInSide, i);
+      // Sequential ply number across both sides: i=0 is the side-to-move's
+      // first ply ("1"), i=1 is the opponent's first ply ("2"), and so on.
+      const plyNum = i + 1;
+      drawArrow(fromSq, toSq, side, orderInSide, i, plyNum);
     }
   } else if (hasBest) {
     // No PV data (e.g. drill-mode hint): single arrow coloured by stm.
-    drawArrow(state.bestArrow.from, state.bestArrow.to, stm, 1, 0);
+    drawArrow(state.bestArrow.from, state.bestArrow.to, stm, 1, 0, 1);
   }
 
   boardEl.appendChild(svg);
@@ -2494,7 +2499,9 @@ function renderEvalGraph(moves) {
       const v = (cp / 100).toFixed(2);
       return cp > 0 ? `+${v}` : v;
     })();
-    tip.textContent = `${m.ply}. ${m.move_san} ${evalText}`;
+    const moveNum = Math.ceil(m.ply / 2);
+    const dot = m.side === "b" ? "..." : ".";
+    tip.textContent = `${moveNum}${dot} ${m.move_san} ${evalText}`;
     tip.hidden = false;
     // Position tip in the wrap, in pixel coords.
     const wrapRect = wrap.getBoundingClientRect();
@@ -2525,8 +2532,9 @@ function renderKeyMoments(moments) {
   if (!moments || moments.length === 0) { host.innerHTML = ""; return; }
   const rows = moments.map((k) => {
     const side = k.side === "w" ? "Белые" : "Чёрные";
+    const moveNum = Math.ceil(k.ply / 2);
     return `<li data-ply="${k.ply}" title="${escapeHtml(k.note || "")}">
-      <span class="km-ply">${k.ply}.</span>
+      <span class="km-ply">${moveNum}${k.side === "b" ? "..." : "."}</span>
       <span class="km-icon cls-${k.classification}" style="color:inherit">${REVIEW_ICONS[k.classification] || ""}</span>
       <span class="km-san">${side} ${escapeHtml(k.move_san)}</span>
       <span class="km-delta">ΔWP ${k.wp_delta}%</span>
@@ -2949,14 +2957,12 @@ function renderReviewMoves() {
     if (review.filter.size > 0 && !review.filter.has(m.classification)) {
       li.classList.add("is-hidden");
     }
-    // Sequential ply numbering: white = 1,3,5… and black = 2,4,6…
-    // (or the reverse when the analysed game starts on black's move),
-    // so the side to move is unambiguous from the number's parity.
-    const moveNum = `${m.ply}.`;
+    const moveNum = Math.ceil(m.ply / 2) + ".";
+    const dots = m.side === "b" ? "…" : "";
     const coachHtml = (m.coach && m.coach.length)
       ? `<span class="coach">${m.coach.map(escapeHtml).join(" · ")}</span>` : "";
     li.innerHTML = `
-      <span class="ply">${moveNum}</span>
+      <span class="ply">${moveNum}${dots}</span>
       <span class="icon">${REVIEW_ICONS[m.classification] || ""}</span>
       <span class="san">${m.move_san}</span>
       <span class="note">${m.note || ""}${coachHtml}</span>
