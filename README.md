@@ -132,7 +132,14 @@ pip install -e .
 1. Качаешь с [ngrok.com/download](https://ngrok.com/download).
 2. Регистрируешься, копируешь authtoken из дашборда.
 3. Один раз: `ngrok config add-authtoken <твой_токен>`.
-4. Запускаешь скрипт выше — он сам стартанёт `ngrok http 8001`,
+4. **Где разместить `ngrok.exe`** (скрипт смотрит в этом порядке):
+   - В папке `scripts\` рядом со `start-public.ps1` — самый простой вариант,
+     ничего не настраивать.
+   - В корне проекта (рядом с `pyproject.toml`).
+   - В `PATH` (Win+R → `sysdm.cpl` → «Дополнительно» → «Переменные среды» →
+     `Path` → «Изменить» → добавить путь к папке с `ngrok.exe` → закрыть
+     все окна PowerShell и открыть новое).
+5. Запускаешь скрипт выше — он сам стартанёт `ngrok http 8001`,
    опросит локальный API ngrok (`http://127.0.0.1:4040/api/tunnels`)
    и напечатает публичный URL вида `https://abc-123.ngrok-free.app`.
 
@@ -144,13 +151,19 @@ pip install -e .
 
 1. Качаешь агента с [playit.gg/download](https://playit.gg/download),
    регистрируешься.
-2. Запускаешь скрипт с `-Tunnel playit` (или `--tunnel playit`).
-3. В веб-консоли [playit.gg/account/tunnels/add](https://playit.gg/account/tunnels/add)
+2. `playit.exe` положи рядом со скриптом (`scripts\`), в корень проекта,
+   или в `PATH` — как и ngrok.
+3. Запускаешь скрипт с `-Tunnel playit` (или `--tunnel playit`).
+4. В веб-консоли [playit.gg/account/tunnels/add](https://playit.gg/account/tunnels/add)
    создаёшь туннель типа **HTTPS**, локальный порт **8001**.
-4. Получаешь URL вида `https://*.playit.gg` — кидаешь кентам.
+5. Получаешь URL вида `https://*.playit.gg` — кидаешь кентам.
 
 В отличие от ngrok, у playit нужно вручную настроить туннель в
 веб-интерфейсе один раз — потом он постоянный и бесплатный.
+
+> Бинарники `ngrok.exe` / `playit.exe` уже добавлены в `.gitignore` —
+> можешь смело класть их в `scripts\` или корень проекта, в коммит они
+> не попадут.
 
 ### Что важно знать
 

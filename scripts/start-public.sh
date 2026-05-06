@@ -26,7 +26,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
+
+# Resolve a tunnel binary by name. Looks in scripts/, then repo root,
+# then PATH.
+resolve_bin() {
+    local name="$1"
+    if [[ -x "$SCRIPT_DIR/$name" ]]; then echo "$SCRIPT_DIR/$name"; return 0; fi
+    if [[ -x "$REPO_ROOT/$name"   ]]; then echo "$REPO_ROOT/$name";   return 0; fi
+    command -v "$name" 2>/dev/null && return 0
+    return 1
+}
 
 PY="$REPO_ROOT/.venv/bin/python"
 [[ -x "$PY" ]] || PY="$(command -v python3 || true)"
@@ -52,12 +63,15 @@ sleep 2
 
 case "$TUNNEL" in
     ngrok)
-        if ! command -v ngrok >/dev/null 2>&1; then
-            echo "ngrok не найден. Скачай: https://ngrok.com/download" >&2
+        NGROK="$(resolve_bin ngrok || true)"
+        if [[ -z "$NGROK" ]]; then
+            echo "ngrok не найден." >&2
+            echo "Положи ngrok в одно из: $SCRIPT_DIR, $REPO_ROOT, или \$PATH." >&2
+            echo "Скачать: https://ngrok.com/download" >&2
             exit 1
         fi
-        echo "→ Старт ngrok ..."
-        ngrok http "$PORT" --log=stdout >/tmp/chess-ngrok.log 2>&1 &
+        echo "→ Старт ngrok ($NGROK) ..."
+        "$NGROK" http "$PORT" --log=stdout >/tmp/chess-ngrok.log 2>&1 &
         TUNNEL_PID=$!
         URL=""
         for _ in $(seq 1 20); do
@@ -77,12 +91,15 @@ case "$TUNNEL" in
         fi
         ;;
     playit)
-        if ! command -v playit >/dev/null 2>&1; then
-            echo "playit не найден. Скачай: https://playit.gg/download" >&2
+        PLAYIT="$(resolve_bin playit || true)"
+        if [[ -z "$PLAYIT" ]]; then
+            echo "playit не найден." >&2
+            echo "Положи playit в одно из: $SCRIPT_DIR, $REPO_ROOT, или \$PATH." >&2
+            echo "Скачать: https://playit.gg/download" >&2
             exit 1
         fi
-        echo "→ Старт playit ..."
-        playit &
+        echo "→ Старт playit ($PLAYIT) ..."
+        "$PLAYIT" &
         TUNNEL_PID=$!
         echo
         echo "playit запущен. Дальше:"

@@ -27,6 +27,23 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $repoRoot
 
+# Resolve a tunnel binary by name. Looks in this order:
+#   1) <repoRoot>\scripts\<name>.exe   (drop the binary next to this script)
+#   2) <repoRoot>\<name>.exe            (drop the binary in the project root)
+#   3) PATH
+function Resolve-TunnelBinary($name) {
+    $candidates = @(
+        (Join-Path $PSScriptRoot "$name.exe"),
+        (Join-Path $repoRoot "$name.exe")
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
 # Locate Python: prefer .venv\Scripts\python.exe, fall back to PATH.
 $pythonExe = Join-Path $repoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $pythonExe)) {
@@ -55,14 +72,19 @@ $tunnelProc = $null
 $publicUrl = $null
 try {
     if ($Tunnel -eq "ngrok") {
-        $ngrok = Get-Command ngrok -ErrorAction SilentlyContinue
-        if (-not $ngrok) {
-            Write-Host "ngrok not found in PATH. Install: https://ngrok.com/download" -ForegroundColor Red
-            Write-Host "After install: ngrok config add-authtoken <YOUR_TOKEN>" -ForegroundColor Yellow
+        $ngrokPath = Resolve-TunnelBinary "ngrok"
+        if (-not $ngrokPath) {
+            Write-Host "ngrok not found." -ForegroundColor Red
+            Write-Host "Either:" -ForegroundColor Yellow
+            Write-Host "  - drop ngrok.exe into  $PSScriptRoot" -ForegroundColor Yellow
+            Write-Host "  - drop ngrok.exe into  $repoRoot" -ForegroundColor Yellow
+            Write-Host "  - add the ngrok folder to PATH (and restart this terminal)" -ForegroundColor Yellow
+            Write-Host "Get ngrok: https://ngrok.com/download" -ForegroundColor Yellow
+            Write-Host "First-run setup: ngrok config add-authtoken <YOUR_TOKEN>" -ForegroundColor Yellow
             throw "ngrok missing"
         }
-        Write-Host "-> Starting ngrok ..." -ForegroundColor Cyan
-        $tunnelProc = Start-Process -PassThru -FilePath $ngrok.Source `
+        Write-Host "-> Starting ngrok ($ngrokPath) ..." -ForegroundColor Cyan
+        $tunnelProc = Start-Process -PassThru -FilePath $ngrokPath `
             -ArgumentList "http", "$Port", "--log=stdout" -NoNewWindow
 
         # ngrok exposes a local admin API on :4040 - poll it for the URL.
@@ -92,13 +114,18 @@ try {
         }
     }
     elseif ($Tunnel -eq "playit") {
-        $playit = Get-Command playit -ErrorAction SilentlyContinue
-        if (-not $playit) {
-            Write-Host "playit not found in PATH. Install: https://playit.gg/download" -ForegroundColor Red
+        $playitPath = Resolve-TunnelBinary "playit"
+        if (-not $playitPath) {
+            Write-Host "playit not found." -ForegroundColor Red
+            Write-Host "Either:" -ForegroundColor Yellow
+            Write-Host "  - drop playit.exe into  $PSScriptRoot" -ForegroundColor Yellow
+            Write-Host "  - drop playit.exe into  $repoRoot" -ForegroundColor Yellow
+            Write-Host "  - add the playit folder to PATH (and restart this terminal)" -ForegroundColor Yellow
+            Write-Host "Get playit: https://playit.gg/download" -ForegroundColor Yellow
             throw "playit missing"
         }
-        Write-Host "-> Starting playit ..." -ForegroundColor Cyan
-        $tunnelProc = Start-Process -PassThru -FilePath $playit.Source -NoNewWindow
+        Write-Host "-> Starting playit ($playitPath) ..." -ForegroundColor Cyan
+        $tunnelProc = Start-Process -PassThru -FilePath $playitPath -NoNewWindow
         Write-Host ""
         Write-Host "playit started. Configure the tunnel via the web console:" -ForegroundColor Green
         Write-Host "  1. Open https://playit.gg/account/tunnels/add"

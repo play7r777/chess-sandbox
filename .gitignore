@@ -30,3 +30,13 @@ backend/data/users.json
 backend/data/users.json.tmp
 backend/data/puzzles.sqlite
 backend/data/*.csv.zst
+# Tunnel binaries — users drop these into repo root or scripts/ so the
+# start-public scripts can find them without touching PATH.
+ngrok
+ngrok.exe
+playit
+playit.exe
+scripts/ngrok
+scripts/ngrok.exe
+scripts/playit
+scripts/playit.exe
