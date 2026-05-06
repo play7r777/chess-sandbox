@@ -28,3 +28,5 @@ test-plan.md
 test-report.md
 backend/data/users.json
 backend/data/users.json.tmp
+backend/data/puzzles.sqlite
+backend/data/*.csv.zst

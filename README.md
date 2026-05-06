@@ -1,6 +1,7 @@
 # Chess Sandbox
 
-Локальная веб-песочница для шахмат:
+Локальная веб-песочница для шахмат, всё крутится у тебя на машине,
+никаких облаков:
 
 - 🎲 **Редактор позиции** — стартовая позиция, перетаскивание фигур обеими сторонами,
   любая расстановка через палитру (добавить/удалить любую фигуру в любой клетке),
@@ -12,6 +13,9 @@
   диаграммой (lichess, chess.com, chesscom-like, рендеры python-chess), бэкенд
   возвращает FEN, который тут же подставляется в редактор. Можно подправить
   вручную и продолжить.
+- 🧩 **500 000+ пазлов из открытой базы Lichess** (CC0). Скрипт импорта
+  скачивает официальный CSV, семплирует нужное количество и кладёт в
+  локальный SQLite. Соло-режим и пати-комнаты тянут пазлы из той же базы.
 
 Бэкенд на FastAPI + python-chess; фронтенд — нативный JS/HTML/CSS, без бандлеров.
 Кросс-платформенный (тестировался на Linux, целевая ОС — Windows).
@@ -49,7 +53,38 @@ pip install -e .
    ```
 3. Положить `stockfish.exe` в `PATH` — приложение само его найдёт.
 
-### 3. Запуск сервера
+### 3. (Опционально) База пазлов из Lichess
+
+Без этого шага доступно только 90 встроенных пазлов (для разработки).
+Чтобы подтянуть полноценную базу 500 000 пазлов из открытого датасета
+[Lichess Puzzle Database](https://database.lichess.org/#puzzles) (CC0),
+запусти один раз:
+
+```powershell
+.venv\Scripts\python -m backend.import_puzzles
+```
+
+Скрипт:
+
+1. Скачает `lichess_db_puzzle.csv.zst` (~600 MB) в `backend/data/`.
+   Если файл уже там — скачивание пропускается.
+2. Стримом распакует и пройдёт по всем ~5.5 млн пазлов.
+3. Reservoir-семплингом отберёт 500 000 случайных и сложит в
+   `backend/data/puzzles.sqlite` (~150 MB) с индексами по рейтингу
+   и сложности.
+
+Полный прогон занимает ~10–15 минут на нормальном интернете.
+Параметры:
+
+- `--target N` — другое количество пазлов (например `--target 100000`).
+- `--all` — без семплинга, импортировать все пазлы (~5.5 млн, ~1.5 GB SQLite).
+- `--url …` — другой источник CSV.
+
+Если SQLite-базы нет, сервер автоматически работает с встроенными
+90 пазлами (бэкенд это покажет в `/api/puzzle/stats` поле
+`source: "json"`).
+
+### 4. Запуск сервера
 
 ```powershell
 .venv\Scripts\python -m uvicorn backend.main:app --host 127.0.0.1 --port 8001
@@ -123,6 +158,16 @@ backend/
   settings.py         # Настройки через env + UI override
   stockfish_engine.py # Async-обёртка над python-chess.engine.SimpleEngine
   recognize.py        # CV pipeline: chesscog → template → occupancy
+  puzzles.py          # Фасад: SQLite (если есть) или JSON-fallback
+  puzzle_db.py        # Read-only обёртка над puzzles.sqlite
+  import_puzzles.py   # CLI для импорта Lichess Puzzle DB (CC0)
+  party.py            # Пати-комнаты на WebSocket, общий queue
+  users.py            # Профиль / лидерборд / история ELO
+  analysis.py         # Импорт партии (PGN/URL) + анализ Stockfish
+  data/
+    puzzles.json      # Встроенные ~90 пазлов (fallback для разработки)
+    puzzles.sqlite    # 500k пазлов после `python -m backend.import_puzzles`
+    users.json        # JSON-стор пользователей и лидерборда
 frontend/
   index.html          # Один экран SPA
   style.css           # Тёмная тема
@@ -143,6 +188,10 @@ API:
 | POST  | `/api/move/apply`          | применить UCI-ход к FEN            |
 | POST  | `/api/legal_moves`         | легальные ходы из клетки           |
 | POST  | `/api/recognize`           | FEN из изображения (multipart)     |
+| GET   | `/api/puzzle/stats`        | количество пазлов, источник (sqlite/json) |
+| GET   | `/api/puzzle/random`       | случайный пазл (`difficulty`, `theme`, `min_rating`, `max_rating`) |
+| GET   | `/api/puzzle/{id}`         | пазл по Lichess id                 |
+| WS    | `/api/party/ws/{code}`     | пати-комната: общий queue 1000 пазлов на матч |
 
 ### Настройки (env, префикс `CHESS_`)
 

@@ -31,6 +31,11 @@ PARTY_DURATION_SEC = 600
 LOBBY_GRACE_SEC = 1800
 RECONNECT_GRACE_SEC = 30
 MAX_MEMBERS = 16
+# How many puzzles each match samples up-front. With a 10-minute
+# duration even the fastest solver rarely cracks more than a few hundred,
+# so 1000 leaves plenty of headroom while keeping the queue cheap to
+# build (one SQLite call) regardless of total bank size.
+PARTY_QUEUE_SIZE = 1000
 
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _PARTIES: dict[str, Party] = {}
@@ -248,15 +253,14 @@ class Party:
         self.status = "playing"
         self.started_at = now
         self.ends_at = now + PARTY_DURATION_SEC
-        # Shuffle the entire puzzle pool once per match. Every member
-        # then walks through that same ordered list, so the comparison
-        # is fair (same puzzles, same order); a different shuffle each
-        # match keeps players from seeing the exact same opening every
-        # time. With only ~90 puzzles in the bundled pack, repeats
-        # *across* matches are unavoidable, but never *within* a match.
-        pool = list(puzzle_pack.all_puzzles())
-        random.shuffle(pool)
-        self.puzzle_queue = pool
+        # Sample a fresh queue from the puzzle bank for each match. Every
+        # member walks through that same ordered list, so the comparison
+        # is fair (same puzzles, same order); a different sample per match
+        # keeps players from seeing identical openings. With the SQLite
+        # bank backing 500k+ puzzles repeats inside a match are
+        # essentially impossible.
+        self.puzzle_queue = list(puzzle_pack.sample_puzzles(PARTY_QUEUE_SIZE))
+        random.shuffle(self.puzzle_queue)
         for m in self.members.values():
             m.puzzle_index = 0
             p = self._next_puzzle_for(m)
