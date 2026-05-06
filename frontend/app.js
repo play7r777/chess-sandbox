@@ -288,6 +288,28 @@ const state = {
     finished: false,         // toggles summary screen in renderDrillUi
     sourceMoments: [],       // unfiltered list to allow "Заново"
   },
+  // Puzzle mode (chess.com-style tactics trainer; data from Lichess pack).
+  puzzle: {
+    active: false,            // true while a puzzle is being solved
+    current: null,            // serialized puzzle dict from /api/puzzle/random
+    moves: [],                // full UCI list (setup move + alternating user/opponent)
+    nextIdx: 0,               // index in `moves` of the next ply we're waiting on
+    side: null,               // 'w' | 'b' — solver's side
+    fenStart: null,           // FEN at puzzle start (before setup move)
+    flippedSnapshot: null,    // board.flipped snapshot to restore on exit
+    feedback: null,           // 'correct' | 'wrong' | 'solved' | 'shown' | null
+    attempts: 0,              // wrong attempts on current ply
+    hintUsed: false,          // hint used on current puzzle?
+    answerShown: false,       // user pressed "Show solution"?
+    difficulty: "any",        // active filter
+    recentIds: [],            // last N served puzzle ids (anti-dup)
+    history: [],              // [{ id, outcome, rating, themes }]
+    sessionRating: 1200,      // rolling personal rating (Glicko-lite)
+    sessionStats: {           // counters for the stats bar
+      solved: 0, withHint: 0, wrong: 0, skipped: 0,
+      streak: 0, bestStreak: 0,
+    },
+  },
 };
 
 // ---------- Helpers: board indexing ----------
@@ -853,10 +875,14 @@ function handleDrop(e, cell) {
 }
 
 function tryFreeplayMove(from, to) {
-  // Drill mode hijacks freeplay drops: instead of mutating the
-  // sandbox we treat the drop as the user's "answer" to the puzzle.
+  // Drill / Puzzle modes hijack freeplay drops: instead of mutating
+  // the sandbox we treat the drop as the user's "answer".
   if (state.drill.active) {
     tryDrillMove(from, to);
+    return;
+  }
+  if (state.puzzle && state.puzzle.active) {
+    tryPuzzleMove(from, to);
     return;
   }
   const c = ensureFreeplayChess();
@@ -1879,15 +1905,27 @@ if (dropzone) {
 // ---------- View tabs (Main / Analysis) ----------
 
 function setView(view) {
-  const v = view === "analysis" ? "analysis" : "main";
+  let v;
+  if (view === "analysis")    v = "analysis";
+  else if (view === "puzzle") v = "puzzle";
+  else                        v = "main";
   document.body.classList.toggle("view-main",     v === "main");
   document.body.classList.toggle("view-analysis", v === "analysis");
+  document.body.classList.toggle("view-puzzle",   v === "puzzle");
   document.querySelectorAll(".view-tab").forEach((btn) => {
     const isActive = btn.dataset.view === v;
     btn.classList.toggle("is-active", isActive);
     btn.setAttribute("aria-selected", isActive ? "true" : "false");
   });
   try { localStorage.setItem("cs.view", v); } catch (_) { /* ignore */ }
+  // Puzzle mode owns the board while it's the active view; entering
+  // and leaving the view is the natural place to load a puzzle / put
+  // the board back the way the user found it.
+  if (v === "puzzle") {
+    enterPuzzleView();
+  } else if (state.puzzle && state.puzzle.active) {
+    leavePuzzleView();
+  }
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
@@ -2949,6 +2987,561 @@ function renderDrillUi() {
   if (skipBtn) skipBtn.onclick = nextDrill;
   const nextBtn = document.getElementById("drill-next");
   if (nextBtn) nextBtn.onclick = nextDrill;
+}
+
+// ---------- Puzzle mode (chess.com-style tactics trainer) ----------
+
+// Number of recently-served puzzle ids to remember when asking the
+// backend for the next random puzzle (so the same puzzle doesn't
+// come up twice in a row).
+const PUZZLE_RECENT_HISTORY = 25;
+
+// Persistent counters survive a full reload — the user keeps their
+// rating + streak across sessions.
+function _loadPuzzleSession() {
+  try {
+    const raw = localStorage.getItem("cs.puzzle.session");
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data && typeof data === "object") {
+      if (typeof data.sessionRating === "number") {
+        state.puzzle.sessionRating = data.sessionRating;
+      }
+      if (data.sessionStats && typeof data.sessionStats === "object") {
+        state.puzzle.sessionStats = {
+          ...state.puzzle.sessionStats,
+          ...data.sessionStats,
+        };
+      }
+      if (Array.isArray(data.history)) {
+        state.puzzle.history = data.history.slice(-30);
+      }
+      if (typeof data.difficulty === "string") {
+        state.puzzle.difficulty = data.difficulty;
+      }
+    }
+  } catch (_) { /* ignore */ }
+}
+function _savePuzzleSession() {
+  try {
+    localStorage.setItem("cs.puzzle.session", JSON.stringify({
+      sessionRating: state.puzzle.sessionRating,
+      sessionStats: state.puzzle.sessionStats,
+      history: state.puzzle.history.slice(-30),
+      difficulty: state.puzzle.difficulty,
+    }));
+  } catch (_) { /* ignore */ }
+}
+
+function enterPuzzleView() {
+  // Snapshot board orientation so we can restore it on the way out.
+  if (state.puzzle.flippedSnapshot === null) {
+    state.puzzle.flippedSnapshot = state.flipped;
+  }
+  // Puzzle mode requires legal-move dispatch — force legal mode on so
+  // drag/click attempts are routed through `tryFreeplayMove`.
+  if (!state.legalMode) setBoardMode(true);
+  _loadPuzzleSession();
+  // Wire up the static controls (idempotent — safe to call repeatedly).
+  document.querySelectorAll(".puzzle-diff-btn").forEach((btn) => {
+    btn.onclick = () => {
+      const d = btn.dataset.difficulty || "any";
+      state.puzzle.difficulty = d;
+      document.querySelectorAll(".puzzle-diff-btn").forEach((b) => {
+        b.classList.toggle("is-active", b.dataset.difficulty === d);
+      });
+      _savePuzzleSession();
+      // Re-roll a puzzle that matches the new difficulty.
+      loadNextPuzzle();
+    };
+    btn.classList.toggle(
+      "is-active",
+      btn.dataset.difficulty === state.puzzle.difficulty
+    );
+  });
+  const newBtn = document.getElementById("btn-puzzle-new");
+  if (newBtn) newBtn.onclick = () => loadNextPuzzle();
+  // Auto-load a puzzle when entering an empty view.
+  if (!state.puzzle.current) {
+    loadNextPuzzle();
+  } else {
+    // Replay the current puzzle's start position (in case the user
+    // bounced between tabs).
+    _restorePuzzleBoard();
+    renderPuzzleUi();
+  }
+}
+
+function leavePuzzleView() {
+  // Stop accepting board input as a puzzle attempt.
+  state.puzzle.active = false;
+  // Restore orientation only if we were the one that flipped it.
+  if (state.puzzle.flippedSnapshot !== null
+      && state.flipped !== state.puzzle.flippedSnapshot) {
+    state.flipped = state.puzzle.flippedSnapshot;
+  }
+  state.puzzle.flippedSnapshot = null;
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.reviewBadge = null;
+  state.lastMove = null;
+  // Reset board to a neutral starting position so Main / Analysis
+  // views aren't littered with a half-finished puzzle.
+  try { loadFen(STARTPOS_FEN); } catch (_) { /* ignore */ }
+  renderBoard();
+}
+
+async function loadNextPuzzle() {
+  const card = document.getElementById("puzzle-card");
+  const actions = document.getElementById("puzzle-actions");
+  if (card)    card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
+  if (actions) actions.innerHTML = "";
+  renderPuzzleStatsBar();
+  renderPuzzleHistory();
+  const params = new URLSearchParams();
+  if (state.puzzle.difficulty && state.puzzle.difficulty !== "any") {
+    params.set("difficulty", state.puzzle.difficulty);
+  }
+  if (state.puzzle.recentIds.length) {
+    params.set("exclude", state.puzzle.recentIds.join(","));
+  }
+  let p;
+  try {
+    p = await api(`/api/puzzle/random?${params.toString()}`);
+  } catch (err) {
+    if (card) card.innerHTML =
+      `<div class="puzzle-empty">Не удалось загрузить задачу: ${escapeHtml(String(err && err.message || err))}</div>`;
+    return;
+  }
+  startPuzzle(p);
+}
+
+function startPuzzle(puzzle) {
+  if (!puzzle || !puzzle.fen || !Array.isArray(puzzle.moves) || puzzle.moves.length < 2) {
+    const card = document.getElementById("puzzle-card");
+    if (card) card.innerHTML = `<div class="puzzle-empty">Задача повреждена.</div>`;
+    return;
+  }
+  state.puzzle.current = puzzle;
+  state.puzzle.moves = puzzle.moves.slice();
+  state.puzzle.fenStart = puzzle.fen;
+  state.puzzle.side = puzzle.side_to_solve || "w";
+  state.puzzle.feedback = null;
+  state.puzzle.attempts = 0;
+  state.puzzle.hintUsed = false;
+  state.puzzle.answerShown = false;
+  state.puzzle.active = true;
+  // Anti-dup history.
+  state.puzzle.recentIds.unshift(puzzle.id);
+  if (state.puzzle.recentIds.length > PUZZLE_RECENT_HISTORY) {
+    state.puzzle.recentIds.length = PUZZLE_RECENT_HISTORY;
+  }
+  // Restore the board to FEN-before-setup, then animate the setup move
+  // so the user sees the threat that triggered the puzzle.
+  try { loadFen(puzzle.fen); } catch (e) {
+    const card = document.getElementById("puzzle-card");
+    if (card) card.innerHTML = `<div class="puzzle-empty">Bad FEN: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  // Auto-flip board so the solver always faces their own pieces from
+  // the bottom (chess.com convention).
+  const wantFlipped = state.puzzle.side === "b";
+  if (state.flipped !== wantFlipped) {
+    state.flipped = wantFlipped;
+  }
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.reviewBadge = null;
+  state.lastMove = null;
+  renderBoard();
+  renderPuzzleUi();
+  // After a brief beat, animate the opponent's setup move.
+  state.puzzle.nextIdx = 0;
+  setTimeout(() => _playPuzzleSetupMove(), 450);
+}
+
+function _restorePuzzleBoard() {
+  // Idempotent re-render of the current puzzle's *initial* position
+  // (after the setup move has been applied). Used when the user
+  // navigates away and back to the puzzle tab.
+  if (!state.puzzle.current) return;
+  try { loadFen(state.puzzle.fenStart); } catch (_) { return; }
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  // Apply the setup move (and any solver moves already made before
+  // bouncing tabs). For simplicity we just re-apply moves[0..nextIdx-1].
+  for (let i = 0; i < state.puzzle.nextIdx; i++) {
+    const u = state.puzzle.moves[i];
+    if (!u || u.length < 4) break;
+    try {
+      c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" });
+    } catch { break; }
+  }
+  loadFen(c.fen());
+  renderBoard();
+}
+
+function _playPuzzleSetupMove() {
+  if (!state.puzzle.active || !state.puzzle.current) return;
+  const u = state.puzzle.moves[0];
+  if (!u || u.length < 4) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  let move;
+  try {
+    move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" });
+  } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.puzzle.nextIdx = 1;
+  renderPuzzleUi();
+}
+
+function tryPuzzleMove(from, to) {
+  if (!state.puzzle.active) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  const moveTo = freeplayCastlingTarget(c, from, to) || to;
+  let move;
+  try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
+  if (!move) {
+    setStatus("Нелегальный ход.", "error");
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  const playedUci =
+    move.from + move.to + (move.promotion ? move.promotion : "");
+  const expected = state.puzzle.moves[state.puzzle.nextIdx] || "";
+  const sameMove =
+    playedUci === expected
+    || (expected.length >= 4
+        && playedUci.slice(0, 4) === expected.slice(0, 4)
+        && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
+  if (!sameMove) {
+    // Don't apply the wrong move — undo it on the chess.js board too.
+    try { c.undo(); } catch (_) { /* ignore */ }
+    state.puzzle.attempts += 1;
+    state.puzzle.feedback = "wrong";
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderPuzzleUi();
+    const cell = boardEl && boardEl.querySelector(`.square[data-square="${move.to}"]`);
+    if (cell) {
+      cell.classList.add("puzzle-flash-bad");
+      setTimeout(() => cell.classList.remove("puzzle-flash-bad"), 700);
+    }
+    return;
+  }
+  // Correct! Apply the user's move visually.
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  state.reviewBadge = { square: move.to, classification: "best" };
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.puzzle.feedback = "correct";
+  state.puzzle.nextIdx += 1;
+  renderBoard();
+  renderPuzzleUi();
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
+  const okCell = boardEl && boardEl.querySelector(`.square[data-square="${move.to}"]`);
+  if (okCell) {
+    okCell.classList.add("puzzle-flash-ok");
+    setTimeout(() => okCell.classList.remove("puzzle-flash-ok"), 600);
+  }
+  // Check if puzzle is fully solved.
+  if (state.puzzle.nextIdx >= state.puzzle.moves.length) {
+    finalizePuzzle("solved");
+    return;
+  }
+  // Otherwise play the forced opponent reply after a short delay.
+  setTimeout(() => _playPuzzleOpponentReply(), 600);
+}
+
+function _playPuzzleOpponentReply() {
+  if (!state.puzzle.active) return;
+  const u = state.puzzle.moves[state.puzzle.nextIdx];
+  if (!u || u.length < 4) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  let move;
+  try {
+    move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" });
+  } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  state.reviewBadge = null;
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.puzzle.nextIdx += 1;
+  // Clear the per-move "correct" feedback once the opponent has moved.
+  state.puzzle.feedback = null;
+  renderPuzzleUi();
+  if (state.puzzle.nextIdx >= state.puzzle.moves.length) {
+    finalizePuzzle("solved");
+  }
+}
+
+// Glicko-lite rating delta — symmetrical, capped, and biased so easy
+// puzzles only nudge a couple of points either way while big upsets
+// move the user noticeably.
+function _ratingDelta(userRating, puzzleRating, didSolve) {
+  const expected = 1 / (1 + Math.pow(10, (puzzleRating - userRating) / 400));
+  const score = didSolve ? 1 : 0;
+  // K-factor scales with how much the puzzle rating differs from the
+  // user's rating — small moves on routine puzzles, larger swings on
+  // out-of-band attempts.
+  const k = 18;
+  return Math.round(k * (score - expected));
+}
+
+function finalizePuzzle(result) {
+  if (!state.puzzle.active && result !== "skipped") return;
+  state.puzzle.active = false;
+  let outcome;          // 'solved' | 'solved-hint' | 'failed' | 'skipped'
+  let didSolve = false; // for rating math
+  if (result === "solved") {
+    if (state.puzzle.answerShown)      outcome = "failed";
+    else if (state.puzzle.attempts > 0
+          || state.puzzle.hintUsed)    outcome = "solved-hint";
+    else                               outcome = "solved";
+    didSolve = (outcome !== "failed");
+  } else if (result === "skipped") {
+    outcome = "skipped";
+  } else {
+    outcome = "failed";
+  }
+  state.puzzle.feedback = (outcome === "solved" || outcome === "solved-hint")
+    ? "solved" : "shown";
+  // Update session counters.
+  const ss = state.puzzle.sessionStats;
+  if (outcome === "solved") {
+    ss.solved += 1;
+    ss.streak += 1;
+    if (ss.streak > ss.bestStreak) ss.bestStreak = ss.streak;
+  } else if (outcome === "solved-hint") {
+    ss.withHint += 1;
+    ss.streak = 0;
+  } else if (outcome === "failed") {
+    ss.wrong += 1;
+    ss.streak = 0;
+  } else {
+    ss.skipped += 1;
+    ss.streak = 0;
+  }
+  // Rating change.
+  const pr = state.puzzle.current ? state.puzzle.current.rating : 1500;
+  const delta = _ratingDelta(state.puzzle.sessionRating, pr, didSolve);
+  state.puzzle.sessionRating = Math.max(
+    400, Math.min(3000, state.puzzle.sessionRating + delta)
+  );
+  state.puzzle.history.unshift({
+    id: state.puzzle.current ? state.puzzle.current.id : "?",
+    outcome,
+    rating: pr,
+    delta,
+  });
+  if (state.puzzle.history.length > 30) state.puzzle.history.length = 30;
+  _savePuzzleSession();
+  spawnPuzzleCelebration(didSolve ? "ok" : "bad");
+  renderPuzzleUi();
+  renderPuzzleStatsBar();
+  renderPuzzleHistory();
+}
+
+function spawnPuzzleCelebration(kind) {
+  if (!boardEl) return;
+  let glyph, cls;
+  if (kind === "ok")  { glyph = "✔"; cls = "drill-burst-ok"; }
+  else                { glyph = "✖"; cls = "drill-burst-bad"; }
+  const el = document.createElement("div");
+  el.className = `drill-burst ${cls}`;
+  el.textContent = glyph;
+  boardEl.appendChild(el);
+  setTimeout(() => el.remove(), 900);
+}
+
+function renderPuzzleStatsBar() {
+  const host = document.getElementById("puzzle-stats-bar");
+  if (!host) return;
+  const ss = state.puzzle.sessionStats;
+  const last = state.puzzle.history[0];
+  let pillCls = "";
+  let pillDelta = "";
+  if (last && typeof last.delta === "number" && last.delta !== 0) {
+    pillCls = last.delta > 0 ? "is-up" : "is-down";
+    pillDelta = (last.delta > 0 ? "▲ +" : "▼ ") + last.delta;
+  }
+  host.innerHTML = `
+    <div class="ps-block"><span class="ps-label">Решено</span><span class="ps-val ok">${ss.solved}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block"><span class="ps-label">С подск.</span><span class="ps-val warn">${ss.withHint}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block"><span class="ps-label">Ошиб.</span><span class="ps-val bad">${ss.wrong}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block"><span class="ps-label">Пропуск</span><span class="ps-val">${ss.skipped}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block"><span class="ps-label">Серия</span><span class="ps-val ${ss.streak >= 3 ? "ok" : ""}">🔥 ${ss.streak}</span></div>
+    <div class="ps-rating-pill ${pillCls}">
+      <span class="ps-rating-label">Рейтинг</span>
+      <span>${state.puzzle.sessionRating}</span>
+      ${pillDelta ? `<span class="ps-rating-delta">${pillDelta}</span>` : ""}
+    </div>
+  `;
+}
+
+function renderPuzzleHistory() {
+  const host = document.getElementById("puzzle-history");
+  if (!host) return;
+  const items = state.puzzle.history.slice(0, 12);
+  if (!items.length) { host.innerHTML = ""; return; }
+  host.innerHTML = items.map((h) => {
+    let cls = "h-skip", glyph = "—";
+    if (h.outcome === "solved")          { cls = "h-ok";  glyph = "✓"; }
+    else if (h.outcome === "solved-hint"){ cls = "h-ok";  glyph = "✓?"; }
+    else if (h.outcome === "failed")     { cls = "h-bad"; glyph = "✕"; }
+    return `<span class="puzzle-history-pill ${cls}" title="#${escapeHtml(h.id)} · ${h.rating}">${glyph} ${h.rating}</span>`;
+  }).join("");
+}
+
+function renderPuzzleUi() {
+  const card = document.getElementById("puzzle-card");
+  const actions = document.getElementById("puzzle-actions");
+  renderPuzzleStatsBar();
+  renderPuzzleHistory();
+  if (!card || !actions) return;
+  const p = state.puzzle.current;
+  if (!p) {
+    card.innerHTML = `<div class="puzzle-empty">Жми <b>🎲 Новая задача</b>, чтобы начать.</div>`;
+    actions.innerHTML = "";
+    return;
+  }
+  const sideCls = state.puzzle.side === "w" ? "side-w" : "side-b";
+  const sideLetter = state.puzzle.side === "w" ? "♔" : "♚";
+  const sideLabel = state.puzzle.side === "w" ? "белые" : "чёрные";
+  const diffMap = { easy: "Лёгкая", medium: "Средняя", hard: "Сложная" };
+  // Per-ply progress dots: one dot per solver ply.
+  const totalPlies = state.puzzle.moves.length;
+  const solverPlies = [];
+  for (let i = 1; i < totalPlies; i += 2) solverPlies.push(i);
+  const dotsHtml = solverPlies.map((plyIdx) => {
+    let cls = "";
+    if (plyIdx < state.puzzle.nextIdx) cls = "is-done";
+    else if (plyIdx === state.puzzle.nextIdx) cls = "is-current";
+    return `<span class="puzzle-ply-dot ${cls}"></span>`;
+  }).join("");
+  const themesHtml = (p.themes_ru || p.themes || [])
+    .slice(0, 4)
+    .map((t) => `<span class="puzzle-theme-tag">${escapeHtml(t)}</span>`)
+    .join("");
+  // Feedback box.
+  let feedback = "";
+  if (state.puzzle.feedback === "solved") {
+    if (state.puzzle.answerShown) {
+      feedback = `<div class="puzzle-feedback fb-bad">😕 Решение показано. Попробуй следующую задачу.</div>`;
+    } else if (state.puzzle.hintUsed || state.puzzle.attempts > 0) {
+      feedback = `<div class="puzzle-feedback fb-solved">✓ Решено с подсказкой/повтором — рейтинг подрос на ${_lastDelta()}.</div>`;
+    } else {
+      feedback = `<div class="puzzle-feedback fb-solved">🏆 Идеально! Решено с первой попытки. ${_lastDeltaText()}</div>`;
+    }
+  } else if (state.puzzle.feedback === "shown") {
+    feedback = `<div class="puzzle-feedback fb-bad">Решение показано — задача не засчитана. ${_lastDeltaText()}</div>`;
+  } else if (state.puzzle.feedback === "correct") {
+    feedback = `<div class="puzzle-feedback fb-ok">Верно! Жди ответ соперника…</div>`;
+  } else if (state.puzzle.feedback === "wrong") {
+    const tip = state.puzzle.attempts >= 2
+      ? "Попробуй <b>подсказку</b> — она подсветит исходную клетку."
+      : "Не тот ход. Подумай ещё.";
+    feedback = `<div class="puzzle-feedback fb-bad">✕ ${tip}</div>`;
+  } else if (state.puzzle.answerShown) {
+    feedback = `<div class="puzzle-feedback fb-info">Решение показано. Сыграй ход или нажми «Дальше».</div>`;
+  } else if (state.puzzle.hintUsed) {
+    feedback = `<div class="puzzle-feedback fb-info">Подсказка: исходная клетка подсвечена.</div>`;
+  } else {
+    feedback = `<div class="puzzle-feedback fb-info">${sideLetter} Ход за <b>${sideLabel}</b>. Найди лучший ход.</div>`;
+  }
+  card.innerHTML = `
+    <div class="puzzle-card-header">
+      <span class="puzzle-card-id">#${escapeHtml(p.id || "?")}</span>
+      <span class="puzzle-card-rating">⚡ ${p.rating || "?"}</span>
+      <span class="puzzle-card-difficulty diff-${escapeHtml(p.difficulty || "medium")}">${escapeHtml(diffMap[p.difficulty] || "—")}</span>
+      <div class="puzzle-card-themes">${themesHtml}</div>
+    </div>
+    <div class="puzzle-side-banner">
+      <span class="puzzle-side-icon ${sideCls}">${sideLetter}</span>
+      <span>Ход за <b>${sideLabel}</b>. Найди лучшие ходы за всю комбинацию.</span>
+    </div>
+    <div class="puzzle-progress-row">
+      <span class="muted" style="font-size:11px;">Прогресс:</span>
+      <span class="puzzle-ply-dots">${dotsHtml}</span>
+    </div>
+    ${feedback}
+  `;
+  // Action buttons depend on whether we're solving or finished.
+  const finished = !state.puzzle.active;
+  if (finished) {
+    actions.innerHTML = `
+      <button id="btn-puzzle-next" type="button" class="puzzle-primary">→ Следующая</button>
+      <button id="btn-puzzle-replay" type="button" class="puzzle-secondary">↻ Сыграть ещё раз</button>
+    `;
+  } else {
+    actions.innerHTML = `
+      <button id="btn-puzzle-hint" type="button" class="puzzle-secondary" ${state.puzzle.answerShown ? "disabled" : ""}>💡 Подсказка</button>
+      <button id="btn-puzzle-show" type="button" class="puzzle-secondary" ${state.puzzle.answerShown ? "disabled" : ""}>👁 Показать ход</button>
+      <button id="btn-puzzle-skip" type="button" class="puzzle-secondary">⤳ Пропустить</button>
+    `;
+  }
+  // Wire up actions.
+  const hintBtn  = document.getElementById("btn-puzzle-hint");
+  const showBtn  = document.getElementById("btn-puzzle-show");
+  const skipBtn  = document.getElementById("btn-puzzle-skip");
+  const nextBtn  = document.getElementById("btn-puzzle-next");
+  const replayBtn= document.getElementById("btn-puzzle-replay");
+  if (hintBtn) hintBtn.onclick = () => {
+    const u = state.puzzle.moves[state.puzzle.nextIdx];
+    if (u && u.length >= 4) {
+      state.puzzle.hintUsed = true;
+      state.bestArrow = { from: u.slice(0, 2), to: u.slice(0, 2) };
+      renderBoard();
+      renderPuzzleUi();
+    }
+  };
+  if (showBtn) showBtn.onclick = () => {
+    const u = state.puzzle.moves[state.puzzle.nextIdx];
+    if (u && u.length >= 4) {
+      state.puzzle.answerShown = true;
+      state.puzzle.feedback = null;
+      state.bestArrow = { from: u.slice(0, 2), to: u.slice(2, 4) };
+      renderBoard();
+      renderPuzzleUi();
+    }
+  };
+  if (skipBtn) skipBtn.onclick = () => {
+    finalizePuzzle("skipped");
+  };
+  if (nextBtn) nextBtn.onclick = () => loadNextPuzzle();
+  if (replayBtn) replayBtn.onclick = () => {
+    if (state.puzzle.current) startPuzzle(state.puzzle.current);
+  };
+}
+
+function _lastDelta() {
+  const h = state.puzzle.history[0];
+  return h && typeof h.delta === "number"
+    ? (h.delta > 0 ? "+" + h.delta : String(h.delta))
+    : "0";
+}
+function _lastDeltaText() {
+  const h = state.puzzle.history[0];
+  if (!h || typeof h.delta !== "number") return "";
+  if (h.delta > 0) return `Рейтинг +${h.delta}.`;
+  if (h.delta < 0) return `Рейтинг ${h.delta}.`;
+  return "";
 }
 
 async function renderOpeningExplorer(fen) {

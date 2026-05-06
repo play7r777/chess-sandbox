@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     frontend_dir: Path = Path(__file__).resolve().parent.parent / "frontend"
+    backend_root: Path = Path(__file__).resolve().parent
 
     def resolve_stockfish_path(self) -> str | None:
         """Return the Stockfish binary path, falling back to PATH lookup."""

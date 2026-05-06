@@ -14,6 +14,7 @@
         <div class="view-tabs" role="tablist" aria-label="Режим интерфейса">
           <button id="tab-main"     class="view-tab is-active" type="button" role="tab" aria-selected="true"  data-view="main">Main</button>
           <button id="tab-analysis" class="view-tab"           type="button" role="tab" aria-selected="false" data-view="analysis">Analysis</button>
+          <button id="tab-puzzle"   class="view-tab"           type="button" role="tab" aria-selected="false" data-view="puzzle">Puzzle</button>
         </div>
       </div>
       <div class="topbar-actions">
@@ -170,6 +171,23 @@
           </div>
           <div id="play-status" class="muted">Не активна</div>
           <ol id="move-history" class="move-history"></ol>
+        </section>
+
+        <section class="panel" id="panel-puzzle" data-view="puzzle">
+          <h2>Puzzle <span class="puzzle-h-sub">— тактические задачи</span></h2>
+          <div class="puzzle-controls">
+            <div class="puzzle-difficulty" role="group" aria-label="Сложность">
+              <button class="puzzle-diff-btn is-active" data-difficulty="any"    type="button">Любая</button>
+              <button class="puzzle-diff-btn"           data-difficulty="easy"   type="button">Лёгкая</button>
+              <button class="puzzle-diff-btn"           data-difficulty="medium" type="button">Средняя</button>
+              <button class="puzzle-diff-btn"           data-difficulty="hard"   type="button">Сложная</button>
+            </div>
+            <button id="btn-puzzle-new" class="puzzle-primary" type="button">🎲 Новая задача</button>
+          </div>
+          <div id="puzzle-stats-bar" class="puzzle-stats-bar"></div>
+          <div id="puzzle-card" class="puzzle-card"></div>
+          <div id="puzzle-actions" class="puzzle-actions"></div>
+          <div id="puzzle-history" class="puzzle-history"></div>
         </section>
 
         <section class="panel" id="panel-review" data-view="analysis">
