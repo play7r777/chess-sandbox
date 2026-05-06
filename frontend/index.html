@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chess Sandbox</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-piece">♛</span>
+        <span class="brand-name">Chess Sandbox</span>
+        <div class="view-tabs" role="tablist" aria-label="Режим интерфейса">
+          <button id="tab-main"     class="view-tab is-active" type="button" role="tab" aria-selected="true"  data-view="main">Main</button>
+          <button id="tab-analysis" class="view-tab"           type="button" role="tab" aria-selected="false" data-view="analysis">Analysis</button>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button id="btn-undo" type="button" title="Отменить (Ctrl+Z)" disabled>↶</button>
+        <button id="btn-redo" type="button" title="Повторить (Ctrl+Shift+Z)" disabled>↷</button>
+        <button id="btn-sound" type="button" class="settings-btn icon-btn" title="Звук ходов" aria-pressed="true">
+          <svg id="btn-sound-on" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 24 24" height="20" width="20"><path d="M17.33 17C16.93 17.43 16.5 17.47 16.06 17.07L15.93 16.94C15.5 16.54 15.46 16.04 15.86 15.61C16.69 14.44 16.99 13.21 16.99 11.91C16.99 10.71 16.72 9.53996 15.89 8.40996C15.49 7.97996 15.52 7.47996 15.96 7.03996L16.03 6.96996C16.46 6.53996 16.93 6.56996 17.33 6.99996C18.53 8.56996 19 10.27 19 11.9C19 13.6 18.57 15.37 17.33 17ZM20.67 21C20.27 21.47 19.8 21.47 19.37 21.03L19.3 20.96C18.87 20.53 18.87 20.06 19.27 19.59C21.17 17.29 22 14.62 22 11.92C22 9.28996 21.17 6.68996 19.23 4.38996C18.83 3.91996 18.83 3.45996 19.26 3.05996L19.39 2.92996C19.82 2.52996 20.29 2.52996 20.69 2.99996C22.96 5.66996 23.99 8.82996 23.99 11.93C23.99 15.1 22.99 18.3 20.66 21H20.67ZM14 1.49996V22.5C14 23.43 12.9 23.67 12.23 22.9L8.92999 19.1C8.25999 18.3 7.59999 18 6.55999 18H2.65999C0.65999 18 -0.0100098 17.33 -0.0100098 15.33V8.65996C-0.0100098 6.65996 0.65999 5.98995 2.65999 5.98995H6.55999C7.58999 5.68996 8.25999 5.68996 8.92999 4.88996L12.23 1.08996C12.9 0.319955 14 0.559955 14 1.48996V1.49996Z"/></svg>
+        </button>
+        <button id="btn-flip" type="button" title="Визуально перевернуть доску">⇅ Flip</button>
+        <button id="btn-phys-flip" type="button" title="Физический разворот позиции 180°">⟳ Phys</button>
+        <button id="btn-reset" type="button" title="Стартовая позиция">⟲ Start</button>
+        <button id="btn-clear" type="button" title="Очистить доску">⌫ Clear</button>
+        <label class="mode-toggle">
+          <input type="checkbox" id="erase-mode" />
+          <span>Erase mode</span>
+        </label>
+        <div class="mode-switch" role="group" aria-label="Режим доски">
+          <button id="btn-mode-legal" type="button" class="mode-btn is-active" title="Только легальные ходы по правилам">⚖ Легальный</button>
+          <button id="btn-mode-sandbox" type="button" class="mode-btn" title="Свободная расстановка, любые ходы">🧪 Песочница</button>
+        </div>
+        <button id="btn-settings" type="button" class="settings-btn" title="Настройки доски">⚙</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="board-area">
+        <div class="board-frame">
+          <div id="player-top" class="player-strip" data-view="analysis" hidden></div>
+          <div class="board-with-coords">
+            <div id="eval-bar" class="eval-bar" data-view="analysis" hidden>
+              <div class="eval-bar-black"></div>
+              <div class="eval-bar-white"></div>
+              <div class="eval-bar-label" id="eval-bar-label">0.0</div>
+            </div>
+            <div id="board-ranks" class="board-ranks" aria-hidden="true"></div>
+            <div id="board" class="board" aria-label="Chess board"></div>
+          </div>
+          <div class="board-files-row">
+            <div id="board-files" class="board-files" aria-hidden="true"></div>
+          </div>
+          <div id="player-bottom" class="player-strip" data-view="analysis" hidden></div>
+        </div>
+        <div class="board-nav" id="board-nav">
+          <button id="nav-first" type="button" title="В начало партии" disabled>
+            <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 24 24" height="20" width="20"><path d="M6.07001 22H5.94001C4.34001 22 4.01001 21.67 4.01001 20.07V3.94C4.01001 2.34 4.34001 2.01 5.94001 2.01H6.07001C7.67001 2.01 8.00001 2.34 8.00001 3.94V20.07C8.00001 21.67 7.67001 22 6.07001 22ZM19.93 21.13L19.86 21.2C18.73 22.33 18.26 22.33 17.13 21.2L10.73 14.83C9.00001 13.06 9.00001 10.93 10.73 9.16L17.13 2.79C18.26 1.66 18.73 1.66 19.86 2.79L19.93 2.86C21.06 3.99 21.06 4.46 19.93 5.59L13.56 11.99L19.93 18.39C21.06 19.52 21.06 19.99 19.93 21.12V21.13Z"/></svg>
+          </button>
+          <button id="nav-prev" type="button" title="Ход назад" disabled>
+            <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 24 24" height="20" width="20"><path d="M16.27 21.13L16.2 21.2C15.07 22.33 14.6 22.33 13.47 21.2L7.06996 14.83C5.33996 13.06 5.33996 10.93 7.06996 9.16L13.47 2.79C14.6 1.66 15.07 1.66 16.2 2.79L16.27 2.86C17.4 3.99 17.4 4.46 16.27 5.59L9.89996 11.99L16.27 18.39C17.4 19.52 17.4 19.99 16.27 21.12V21.13Z"/></svg>
+          </button>
+          <button id="nav-play" type="button" title="Авто-проигрывание" disabled>
+            <svg id="nav-play-icon" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 24 24" height="20" width="20"><path d="M20.5 12.8L7.77 21.53C6.5 22.43 6 22.16 6 20.6V3.32999C6 1.79999 6.5 1.52999 7.77 2.42999L20.5 11.2C21.33 11.77 21.33 12.23 20.5 12.8Z"/></svg>
+          </button>
+          <button id="nav-next" type="button" title="Ход вперёд" disabled>
+            <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 24 24" height="20" width="20"><path d="M7.73007 2.87L7.80007 2.8C8.93007 1.67 9.40007 1.67 10.5301 2.8L16.9301 9.17C18.6601 10.94 18.6601 13.07 16.9301 14.84L10.5301 21.21C9.40007 22.34 8.93007 22.34 7.80007 21.21L7.73007 21.14C6.60007 20.01 6.60007 19.54 7.73007 18.41L14.1001 12.01L7.73007 5.61C6.60007 4.48 6.60007 4.01 7.73007 2.88V2.87Z"/></svg>
+          </button>
+          <button id="nav-last" type="button" title="В конец партии" disabled>
+            <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 24 24" height="20" width="20"><path d="M17.9299 2H18.0599C19.6599 2 19.9899 2.33 19.9899 3.93V20.06C19.9899 21.66 19.6599 21.99 18.0599 21.99H17.9299C16.3299 21.99 15.9999 21.66 15.9999 20.06V3.93C15.9999 2.33 16.3299 2 17.9299 2ZM4.06991 2.87L4.13991 2.8C5.26991 1.67 5.73991 1.67 6.86991 2.8L13.2699 9.17C14.9999 10.94 14.9999 13.07 13.2699 14.84L6.86991 21.21C5.73991 22.34 5.26991 22.34 4.13991 21.21L4.06991 21.14C2.93991 20.01 2.93991 19.54 4.06991 18.41L10.4399 12.01L4.06991 5.61C2.93991 4.48 2.93991 4.01 4.06991 2.88V2.87Z"/></svg>
+          </button>
+        </div>
+        <div id="board-hint" class="board-hint muted"></div>
+        <div class="board-meta">
+          <label>
+            Ход:
+            <select id="side-to-move">
+              <option value="w">Белые</option>
+              <option value="b">Чёрные</option>
+            </select>
+          </label>
+          <fieldset class="castling">
+            <legend>Рокировки</legend>
+            <label><input type="checkbox" id="cr-K" checked /> K</label>
+            <label><input type="checkbox" id="cr-Q" checked /> Q</label>
+            <label><input type="checkbox" id="cr-k" checked /> k</label>
+            <label><input type="checkbox" id="cr-q" checked /> q</label>
+          </fieldset>
+          <label>
+            En-passant:
+            <input type="text" id="ep-square" placeholder="-" maxlength="2" size="3" />
+          </label>
+          <label>
+            Halfmove:
+            <input type="number" id="halfmove" min="0" value="0" size="3" />
+          </label>
+          <label>
+            Fullmove:
+            <input type="number" id="fullmove" min="1" value="1" size="3" />
+          </label>
+        </div>
+        <div class="fen-row">
+          <input type="text" id="fen-input" spellcheck="false" />
+          <button id="btn-load-fen" type="button">Load FEN</button>
+          <button id="btn-copy-fen" type="button">Copy</button>
+        </div>
+        <div class="status" id="status-line">Готов</div>
+      </section>
+
+      <aside class="sidebar">
+        <section class="palette" data-view="main">
+          <h2>Палитра фигур <small>перетащи на доску</small></h2>
+          <div class="palette-row" data-color="w" id="palette-white"></div>
+          <div class="palette-row" data-color="b" id="palette-black"></div>
+        </section>
+
+        <section class="panel" id="panel-engine" data-view="main">
+          <h2>Движок Stockfish</h2>
+          <div class="row">
+            <label>
+              Path:
+              <input
+                type="text"
+                id="engine-path"
+                placeholder="C:\\stockfish\\stockfish-windows-x86-64-avx2.exe"
+              />
+            </label>
+          </div>
+          <div class="row">
+            <label>Threads <input type="number" id="engine-threads" min="1" max="64" value="2" /></label>
+            <label>Hash MB <input type="number" id="engine-hash" min="16" max="8192" value="256" /></label>
+            <label>Skill <input type="number" id="engine-skill" min="0" max="20" value="20" /></label>
+          </div>
+          <div class="row">
+            <button id="btn-engine-configure" type="button">Запустить движок</button>
+            <button id="btn-engine-stop" type="button">Остановить</button>
+            <span id="engine-status" class="muted">не настроен</span>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-play" data-view="main">
+          <h2>Игра против Stockfish из этой позиции</h2>
+          <div class="row">
+            <label>
+              Ваш цвет:
+              <select id="player-color">
+                <option value="w">Белые</option>
+                <option value="b">Чёрные</option>
+              </select>
+            </label>
+            <label>
+              Сейчас ходит:
+              <select id="turn-select">
+                <option value="w">Белые</option>
+                <option value="b">Чёрные</option>
+              </select>
+            </label>
+            <label>
+              Время на ход (мс):
+              <input type="number" id="movetime" min="50" max="60000" value="1000" />
+            </label>
+          </div>
+          <div class="row">
+            <button id="btn-play-start" type="button">Играть отсюда</button>
+            <button id="btn-play-stop" type="button" disabled>Прервать</button>
+            <button id="btn-engine-think" type="button">Подсказать ход</button>
+          </div>
+          <div id="play-status" class="muted">Не активна</div>
+          <ol id="move-history" class="move-history"></ol>
+        </section>
+
+        <section class="panel" id="panel-review" data-view="analysis">
+          <h2>Анализ партии (как chess.com)</h2>
+          <div class="row">
+            <input id="review-source" type="text" placeholder="https://www.chess.com/game/live/... или https://lichess.org/... или PGN" style="flex:1; min-width:260px;" />
+            <button id="btn-review-import" type="button">Загрузить</button>
+          </div>
+          <div class="row">
+            <label>Глубина (depth):
+              <input id="review-depth" type="number" min="6" max="40" value="8" title="Stockfish depth — chess.com Game Review uses ~22 (deeper = slower but more accurate)" />
+            </label>
+            <label class="muted">или время (мс):
+              <input id="review-movetime" type="number" min="50" max="60000" value="" placeholder="—" title="Если задано, используется вместо depth" />
+            </label>
+            <button id="btn-review-analyse" type="button" disabled>Анализировать</button>
+            <span id="review-progress" class="muted"></span>
+          </div>
+          <div id="review-summary" class="review-summary"></div>
+          <div id="review-rating" class="review-rating"></div>
+          <div id="review-phases" class="review-phases"></div>
+          <div id="review-graph-wrap" class="review-graph-wrap" hidden>
+            <svg id="review-graph" class="review-graph" preserveAspectRatio="none"></svg>
+            <div id="review-graph-tip" class="review-graph-tip" hidden></div>
+          </div>
+          <div id="review-key-moments" class="review-key-moments"></div>
+          <div id="drill-panel" class="drill-panel" style="display:none"></div>
+          <div id="opening-explorer" class="opening-explorer"></div>
+          <ol id="review-moves" class="review-moves"></ol>
+        </section>
+
+        <section class="panel" id="panel-recognize" data-view="main">
+          <h2>Распознать со скриншота</h2>
+          <div id="recognize-dropzone" class="dropzone" tabindex="0">
+            Вставь сюда (Ctrl+V) или брось файл — распознается автоматически.
+          </div>
+          <div class="row">
+            <input type="file" id="recognize-file" accept="image/*" />
+            <button id="btn-recognize" type="button">Распознать</button>
+            <button id="btn-paste-clipboard" type="button" title="Вставить картинку из буфера">📋 Вставить из буфера</button>
+          </div>
+          <div id="recognize-output" class="muted">Загрузите изображение шахматной доски.</div>
+        </section>
+
+        <section class="panel" id="panel-about" data-view="main">
+          <h2>Подсказки</h2>
+          <ul class="hints">
+            <li>Перетащи фигуру с палитры на любую клетку, чтобы добавить.</li>
+            <li>Включи <em>Erase mode</em> — клик по клетке удаляет фигуру.</li>
+            <li>В режиме игры легальность ходов проверяется по правилам.</li>
+            <li>В свободной редакции (когда игра не запущена) можно ставить любую фигуру в любое место — даже невозможные позиции.</li>
+            <li>Скриншот можно вставить через <em>Ctrl+V</em> или бросить файл в зону распознавания — позиция применится автоматически.</li>
+          </ul>
+        </section>
+      </aside>
+    </main>
+
+    <div id="settings-modal" class="settings-modal" hidden>
+      <div class="settings-modal-card">
+        <h3>Настройки доски</h3>
+        <div class="settings-row">
+          <label>Цвет доски</label>
+          <div class="settings-options" id="settings-themes"></div>
+        </div>
+        <div class="settings-row">
+          <label>Набор фигур</label>
+          <div class="settings-options" id="settings-pieces"></div>
+        </div>
+        <div class="settings-actions">
+          <button type="button" id="btn-settings-close">Готово</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="side-modal" class="side-modal" hidden>
+      <div class="side-modal-card">
+        <h3>За какую сторону вы играли?</h3>
+        <p class="muted">Это нужно только для подсветки в отчёте — анализ строится за обе стороны.</p>
+        <div class="side-modal-actions">
+          <button type="button" data-side="w" class="side-btn side-btn-white">Белые</button>
+          <button type="button" data-side="b" class="side-btn side-btn-black">Чёрные</button>
+          <button type="button" data-side="" class="side-btn side-btn-none">Не указывать</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

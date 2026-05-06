@@ -1,0 +1,1 @@
+"""Chess sandbox backend package."""
