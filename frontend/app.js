@@ -10,6 +10,23 @@
 
 import { Chess } from "/static/lib/chess.js";
 
+// When the page is opened through a Basic-Auth-protected tunnel
+// (e.g. `https://user:pass@host/`), Chrome strips the credentials
+// from the address bar but `document.baseURI` may still keep them,
+// which makes `fetch("/api/...")` and the WebSocket constructor throw
+// `Request cannot be constructed from a URL that includes credentials`.
+// Resolve every relative request against an explicitly clean origin
+// (`location.protocol + location.host`) so the wrapper is a no-op on
+// normal hosting and only kicks in for credentialed tunnels.
+const _CLEAN_ORIGIN = `${location.protocol}//${location.host}`;
+const _origFetch = window.fetch.bind(window);
+window.fetch = function patchedFetch(input, init) {
+  if (typeof input === "string" && input.startsWith("/")) {
+    return _origFetch(_CLEAN_ORIGIN + input, init);
+  }
+  return _origFetch(input, init);
+};
+
 // Persistent UI settings (localStorage). Falls back to defaults if unset.
 const SETTINGS_KEY = "chess-sandbox/settings/v1";
 const DEFAULT_PIECE_SET = "merida";
