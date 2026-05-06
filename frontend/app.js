@@ -53,10 +53,17 @@ const PIECE_SETS = {
 
 const DEFAULT_PV_ARROW_COUNT = 6;
 const MAX_PV_ARROW_COUNT = 12;
+const DEFAULT_BEST_LINE_LENGTH = 10;
+const MAX_BEST_LINE_LENGTH = 24;
 function _clampArrows(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return DEFAULT_PV_ARROW_COUNT;
   return Math.max(1, Math.min(MAX_PV_ARROW_COUNT, Math.round(v)));
+}
+function _clampBestLine(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_BEST_LINE_LENGTH;
+  return Math.max(1, Math.min(MAX_BEST_LINE_LENGTH, Math.round(v)));
 }
 function loadSettings() {
   const fallback = {
@@ -64,6 +71,7 @@ function loadSettings() {
     pieces: DEFAULT_PIECE_SET,
     soundOn: true,
     pvArrowCount: DEFAULT_PV_ARROW_COUNT,
+    bestLineLength: DEFAULT_BEST_LINE_LENGTH,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -74,6 +82,7 @@ function loadSettings() {
       pieces: PIECE_SETS[parsed.pieces] ? parsed.pieces : DEFAULT_PIECE_SET,
       soundOn: parsed.soundOn !== false,
       pvArrowCount: _clampArrows(parsed.pvArrowCount ?? DEFAULT_PV_ARROW_COUNT),
+      bestLineLength: _clampBestLine(parsed.bestLineLength ?? DEFAULT_BEST_LINE_LENGTH),
     };
   } catch { return fallback; }
 }
@@ -459,11 +468,11 @@ function renderBoardArrows() {
     m.setAttribute("viewBox", "0 0 10 10");
     m.setAttribute("refX", "7");
     m.setAttribute("refY", "5");
-    m.setAttribute("markerWidth", "3.4");
-    m.setAttribute("markerHeight", "3.4");
+    m.setAttribute("markerWidth", "2.6");
+    m.setAttribute("markerHeight", "2.6");
     m.setAttribute("orient", "auto");
     const tip = document.createElementNS(NS, "path");
-    tip.setAttribute("d", "M0,1 L9,5 L0,9 L2.5,5 Z");
+    tip.setAttribute("d", "M0,1.5 L9,5 L0,8.5 L2.5,5 Z");
     tip.setAttribute("fill", colorRgba);
     m.appendChild(tip);
     defs.appendChild(m);
@@ -489,7 +498,7 @@ function renderBoardArrows() {
     const x2 = b.x - (dx / len) * inset;
     const y2 = b.y - (dy / len) * inset;
     // Width tapers slightly with depth so first move looks the boldest.
-    const w = 0.20 + (alpha - 0.22) * 0.10;
+    const w = 0.13 + (alpha - 0.22) * 0.08;
     const markerId = mintMarker(fill);
     // Outline pass (drawn first, slightly wider) for contrast.
     const outl = document.createElementNS(NS, "line");
@@ -498,7 +507,7 @@ function renderBoardArrows() {
     outl.setAttribute("x2", x2);
     outl.setAttribute("y2", y2);
     outl.setAttribute("stroke", outline);
-    outl.setAttribute("stroke-width", String(w + 0.05));
+    outl.setAttribute("stroke-width", String(w + 0.035));
     outl.setAttribute("stroke-linecap", "round");
     svg.appendChild(outl);
     const ln = document.createElementNS(NS, "line");
@@ -1118,6 +1127,22 @@ function openSettingsModal() {
     };
     pvInput.addEventListener("change", apply);
     pvInput.addEventListener("blur", apply);
+  }
+  const blInput = document.getElementById("settings-best-line");
+  if (blInput) {
+    blInput.value = String(_clampBestLine(userSettings.bestLineLength));
+    const apply = () => {
+      const next = _clampBestLine(blInput.value);
+      blInput.value = String(next);
+      if (next !== userSettings.bestLineLength) {
+        userSettings.bestLineLength = next;
+        saveSettings(userSettings);
+        // Re-render the active position's hint so the SAN line updates.
+        if (typeof renderBoardHint === "function") renderBoardHint();
+      }
+    };
+    blInput.addEventListener("change", apply);
+    blInput.addEventListener("blur", apply);
   }
   modal.hidden = false;
 }
@@ -3074,7 +3099,8 @@ function renderBoardHint() {
     && m.best_pv_san.length >= 2
     && m.move_uci !== m.best_move_uci
   ) {
-    const sansHtml = m.best_pv_san.slice(0, 10)
+    const lineLen = _clampBestLine(userSettings.bestLineLength);
+    const sansHtml = m.best_pv_san.slice(0, lineLen)
       .map((s) => `<span class="pv-san">${escapeHtml(s)}</span>`).join("");
     pvLine = `<div class="pv-line"><span class="pv-label">Лучшая линия:</span>${sansHtml}</div>`;
   }
