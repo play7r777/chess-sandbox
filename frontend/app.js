@@ -12,11 +12,13 @@ import { Chess } from "/static/lib/chess.js";
 
 // Persistent UI settings (localStorage). Falls back to defaults if unset.
 const SETTINGS_KEY = "chess-sandbox/settings/v1";
-const DEFAULT_PIECE_SET = "cburnett";
+const DEFAULT_PIECE_SET = "merida";
 const DEFAULT_BOARD_THEME = "brown";
 
-// Available board themes — each is just a colour pair (light, dark) +
-// last-move highlight tint. Adding new themes is purely cosmetic.
+// Available board themes — each is either a flat colour pair (light, dark)
+// or an `image` describing a full pre-rendered board sprite. When `image`
+// is set the per-square light/dark backgrounds are dropped and the image
+// is stretched across the whole 8×8 grid (see `applyBoardTheme`).
 const BOARD_THEMES = {
   brown:      { name: "Brown",      light: "#edd6b0", dark: "#b88762", highlight: "rgba(220, 200, 90, 0.45)" },
   green:      { name: "Green",      light: "#eeeed2", dark: "#769656", highlight: "rgba(255, 240, 90, 0.45)" },
@@ -28,15 +30,17 @@ const BOARD_THEMES = {
   forest:     { name: "Forest",     light: "#d6e3c4", dark: "#3f6a3a", highlight: "rgba(255, 230, 100, 0.45)" },
   tournament: { name: "Tournament", light: "#c9c9c9", dark: "#5d6470", highlight: "rgba(180, 200, 255, 0.40)" },
   newspaper:  { name: "Newspaper",  light: "#ffffff", dark: "#9b9b9b", highlight: "rgba(255, 230, 90, 0.45)" },
+  set1:       { name: "#1",         image: "/static/board-themes/set1.png", highlight: "rgba(255, 220, 90, 0.45)" },
 };
 
 // Available piece sets. Files live under /static/pieces/<key>/ and are
 // open-source pulls from the lichess project (which kindly hosts them
 // under permissive licenses). Names are mapped to the closest chess.com
 // counterpart in the UI for familiarity, but the assets are independent.
+// `ext` defaults to "svg" — set it explicitly for raster sets.
 const PIECE_SETS = {
-  cburnett:   { name: "Classic" },
   merida:     { name: "Merida" },
+  cburnett:   { name: "Classic" },
   alpha:      { name: "Alpha" },
   maestro:    { name: "Maestro" },
   california: { name: "California" },
@@ -44,6 +48,7 @@ const PIECE_SETS = {
   staunty:    { name: "Staunty" },
   fantasy:    { name: "Fantasy" },
   pirouetti:  { name: "Wood" },
+  set1:       { name: "#1", ext: "png" },
 };
 
 function loadSettings() {
@@ -66,45 +71,100 @@ function saveSettings(s) {
 
 const userSettings = loadSettings();
 function getPieceSet() { return userSettings.pieces; }
+function getPieceExt() {
+  const set = PIECE_SETS[getPieceSet()];
+  return (set && set.ext) || "svg";
+}
 function applyBoardTheme() {
   const t = BOARD_THEMES[userSettings.theme] || BOARD_THEMES[DEFAULT_BOARD_THEME];
   const root = document.documentElement;
-  root.style.setProperty("--light-sq", t.light);
-  root.style.setProperty("--dark-sq", t.dark);
+  // Always update highlight tint.
   root.style.setProperty("--highlight", t.highlight);
+  // Image-backed themes: the whole board uses one PNG/JPG; squares stay
+  // transparent so the image shows through. Otherwise fall back to
+  // per-square flat colours.
+  if (t.image) {
+    root.style.setProperty("--board-image", `url("${t.image}")`);
+    root.style.setProperty("--light-sq", "transparent");
+    root.style.setProperty("--dark-sq", "transparent");
+    document.body.classList.add("board-theme-image");
+  } else {
+    root.style.setProperty("--board-image", "none");
+    root.style.setProperty("--light-sq", t.light);
+    root.style.setProperty("--dark-sq", t.dark);
+    document.body.classList.remove("board-theme-image");
+  }
 }
 applyBoardTheme();
 
-// ----- Move sound (synthesized via WebAudio so we don't ship a binary) -----
-let _audioCtx = null;
-function _getAudioCtx() {
-  if (_audioCtx) return _audioCtx;
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  if (!Ctx) return null;
-  try { _audioCtx = new Ctx(); } catch { _audioCtx = null; }
-  return _audioCtx;
+// ----- Move sounds (real .wav assets shipped under /static/sounds) -----
+//
+// Mirrors chess.com semantics: each chess event (plain move, capture,
+// castle, promote, check, illegal) plays its own short sample. We use
+// HTMLAudioElement here — `Audio.cloneNode()` cheaply gives us an
+// independent playback so two rapid moves never cancel each other.
+const SOUND_FILES = {
+  "move-self":     "/static/sounds/move-self.wav",
+  "move-opponent": "/static/sounds/move-opponent.wav",
+  "move-check":    "/static/sounds/move-check.wav",
+  "capture":       "/static/sounds/capture.wav",
+  "castle":        "/static/sounds/castle.wav",
+  "promote":       "/static/sounds/promote.wav",
+  "illegal":       "/static/sounds/illegal.wav",
+};
+const _soundCache = {};
+function _getSound(name) {
+  if (_soundCache[name]) return _soundCache[name];
+  const url = SOUND_FILES[name];
+  if (!url) return null;
+  try {
+    const a = new Audio(url);
+    a.preload = "auto";
+    _soundCache[name] = a;
+    return a;
+  } catch { return null; }
 }
-// Short tonal "click" approximating a chess.com piece-drop sound: a quick
-// burst of low-mid frequencies with fast exponential decay. ~70ms total.
-function playMoveSound() {
+function _playWav(name) {
   if (!userSettings.soundOn) return;
-  const ctx = _getAudioCtx();
-  if (!ctx) return;
-  if (ctx.state === "suspended") { try { ctx.resume(); } catch { /* ignore */ } }
-  const t0 = ctx.currentTime;
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.type = "triangle";
-  // Slight pitch envelope from 320 → 220 Hz gives the wooden "tonk" feel.
-  osc.frequency.setValueAtTime(320, t0);
-  osc.frequency.exponentialRampToValueAtTime(220, t0 + 0.05);
-  gain.gain.setValueAtTime(0.0001, t0);
-  gain.gain.exponentialRampToValueAtTime(0.35, t0 + 0.005);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.10);
-  osc.connect(gain).connect(ctx.destination);
-  osc.start(t0);
-  osc.stop(t0 + 0.12);
+  const base = _getSound(name);
+  if (!base) return;
+  try {
+    // Cloning lets overlapping playbacks coexist without clobbering each
+    // other (engine reply + animation can collide otherwise).
+    const a = base.cloneNode();
+    const p = a.play();
+    if (p && typeof p.catch === "function") p.catch(() => { /* autoplay blocked */ });
+  } catch { /* ignore */ }
 }
+// Pre-load all samples eagerly so the first move is never silent on
+// poor connections.
+Object.keys(SOUND_FILES).forEach(_getSound);
+
+// Pick a sound key from a chess.js move object. `inCheck` is the result
+// of `chess.isCheck()` (or `isCheckmate()`) AFTER the move was applied.
+function _moveSoundKey(move, { isOwn, inCheck }) {
+  if (inCheck) return "move-check";
+  const flags = (move && move.flags) || "";
+  if (flags.includes("p")) return "promote";
+  if (flags.includes("k") || flags.includes("q")) return "castle";
+  if (flags.includes("c") || flags.includes("e")) return "capture";
+  return isOwn ? "move-self" : "move-opponent";
+}
+// SAN-only fallback used by the analysis review (we don't always have a
+// chess.js move object there, just `move_san` from the backend).
+function _moveSoundKeyFromSan(san, { isOwn }) {
+  if (!san) return isOwn ? "move-self" : "move-opponent";
+  if (/[+#]/.test(san)) return "move-check";
+  if (/^O-O(-O)?/.test(san)) return "castle"; // O-O / O-O-O
+  if (san.includes("=")) return "promote";
+  if (san.includes("x")) return "capture";
+  return isOwn ? "move-self" : "move-opponent";
+}
+function playMoveSoundFor(move, opts) { _playWav(_moveSoundKey(move, opts || {})); }
+function playMoveSoundForSan(san, opts) { _playWav(_moveSoundKeyFromSan(san, opts || {})); }
+function playIllegalSound() { _playWav("illegal"); }
+// Back-compat: the settings toggle calls this to demo "sound is on".
+function playMoveSound() { _playWav("move-self"); }
 
 const SOUND_ON_PATH = "M17.33 17C16.93 17.43 16.5 17.47 16.06 17.07L15.93 16.94C15.5 16.54 15.46 16.04 15.86 15.61C16.69 14.44 16.99 13.21 16.99 11.91C16.99 10.71 16.72 9.53996 15.89 8.40996C15.49 7.97996 15.52 7.47996 15.96 7.03996L16.03 6.96996C16.46 6.53996 16.93 6.56996 17.33 6.99996C18.53 8.56996 19 10.27 19 11.9C19 13.6 18.57 15.37 17.33 17ZM20.67 21C20.27 21.47 19.8 21.47 19.37 21.03L19.3 20.96C18.87 20.53 18.87 20.06 19.27 19.59C21.17 17.29 22 14.62 22 11.92C22 9.28996 21.17 6.68996 19.23 4.38996C18.83 3.91996 18.83 3.45996 19.26 3.05996L19.39 2.92996C19.82 2.52996 20.29 2.52996 20.69 2.99996C22.96 5.66996 23.99 8.82996 23.99 11.93C23.99 15.1 22.99 18.3 20.66 21H20.67ZM14 1.49996V22.5C14 23.43 12.9 23.67 12.23 22.9L8.92999 19.1C8.25999 18.3 7.59999 18 6.55999 18H2.65999C0.65999 18 -0.0100098 17.33 -0.0100098 15.33V8.65996C-0.0100098 6.65996 0.65999 5.98995 2.65999 5.98995H6.55999C7.58999 5.68996 8.25999 5.68996 8.92999 4.88996L12.23 1.08996C12.9 0.319955 14 0.559955 14 1.48996V1.49996Z";
 const SOUND_OFF_PATH = "M14 1.5V22.5C14 23.43 12.9 23.67 12.23 22.9L8.93 19.1C8.26 18.3 7.6 18 6.56 18H2.66C0.66 18 -0.01 17.33 -0.01 15.33V8.66C-0.01 6.66 0.66 5.99 2.66 5.99H6.56C7.59 5.99 8.26 5.69 8.93 4.89L12.23 1.09C12.9 0.32 14 0.56 14 1.49V1.5ZM23.41 13.41L21 15.83L18.59 13.41L17.17 14.83L19.59 17.24L17.17 19.66L18.59 21.07L21 18.66L23.41 21.07L24.83 19.66L22.41 17.24L24.83 14.83L23.41 13.41Z";
@@ -126,7 +186,7 @@ function escapeHtml(s) {
 
 function pieceSvgUrl(piece) {
   const color = piece === piece.toUpperCase() ? "w" : "b";
-  return `/static/pieces/${getPieceSet()}/${color}${piece.toUpperCase()}.svg`;
+  return `/static/pieces/${getPieceSet()}/${color}${piece.toUpperCase()}.${getPieceExt()}`;
 }
 
 function makePieceImg(piece, options = {}) {
@@ -707,6 +767,8 @@ function tryFreeplayMove(from, to) {
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
+    // Note: no illegal sound in freeplay sandbox — the spec says illegal
+    // is only when you try a forbidden move while playing vs Stockfish.
     return;
   }
   snapshotForUndo();
@@ -716,6 +778,8 @@ function tryFreeplayMove(from, to) {
   state.legalTargets = [];
   renderBoard();
   setStatus(`Ход: ${move.san}.`);
+  // Freeplay: the user controls both sides, treat every move as "own".
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
 }
 
 function ensureFreeplayChess() {
@@ -923,19 +987,27 @@ function openSettingsModal() {
   const themesEl = document.getElementById("settings-themes");
   const piecesEl = document.getElementById("settings-pieces");
   if (!modal || !themesEl || !piecesEl) return;
-  themesEl.innerHTML = Object.entries(BOARD_THEMES).map(([key, t]) => `
+  themesEl.innerHTML = Object.entries(BOARD_THEMES).map(([key, t]) => {
+    const previewStyle = t.image
+      ? `background-image:url("${t.image}");background-size:cover;background-position:center;`
+      : `background:linear-gradient(135deg, ${t.light} 0 50%, ${t.dark} 50% 100%);`;
+    return `
     <button type="button" class="theme-swatch ${userSettings.theme === key ? "is-active" : ""}" data-theme="${key}" title="${t.name}">
-      <span class="theme-swatch-preview" style="background:linear-gradient(135deg, ${t.light} 0 50%, ${t.dark} 50% 100%)"></span>
+      <span class="theme-swatch-preview" style="${previewStyle}"></span>
       <span class="theme-swatch-label">${t.name}</span>
     </button>
-  `).join("");
-  piecesEl.innerHTML = Object.entries(PIECE_SETS).map(([key, p]) => `
+  `;
+  }).join("");
+  piecesEl.innerHTML = Object.entries(PIECE_SETS).map(([key, p]) => {
+    const ext = p.ext || "svg";
+    return `
     <button type="button" class="piece-swatch ${userSettings.pieces === key ? "is-active" : ""}" data-pieces="${key}" title="${p.name}">
-      <img src="/static/pieces/${key}/wK.svg" alt="" />
-      <img src="/static/pieces/${key}/bN.svg" alt="" />
+      <img src="/static/pieces/${key}/wK.${ext}" alt="" />
+      <img src="/static/pieces/${key}/bN.${ext}" alt="" />
       <span class="piece-swatch-label">${p.name}</span>
     </button>
-  `).join("");
+  `;
+  }).join("");
   themesEl.querySelectorAll("[data-theme]").forEach((btn) => {
     btn.addEventListener("click", () => {
       userSettings.theme = btn.dataset.theme;
@@ -1353,6 +1425,12 @@ async function engineMove() {
       return;
     }
     applyChessMoveToBoard(move);
+    // Engine-side move: opponent perspective unless the user picked the
+    // engine's colour (rare but possible mid-game flip).
+    playMoveSoundFor(move, {
+      isOwn: move.color === myGame.playerColor,
+      inCheck: myGame.chess.isCheck(),
+    });
     document.getElementById("play-status").textContent =
       `Ход движка: ${move.san} ${formatEval(r)}. ${gameStateText()}`;
     if (checkGameOver()) return;
@@ -1463,11 +1541,16 @@ function tryMakePlayerMove(from, to) {
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
+    // Per spec: illegal sound fires only when the user tries to play an
+    // illegal move while playing vs Stockfish.
+    playIllegalSound();
     return;
   }
   state.selectedSquare = null;
   state.legalTargets = [];
   applyChessMoveToBoard(move);
+  // Player move sound: always "own".
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   if (checkGameOver()) return;
   setTimeout(engineMove, 50);
 }
@@ -2372,6 +2455,7 @@ function tryDrillMove(from, to) {
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
+    // Drills are pure analysis — no Stockfish opponent — so no illegal sound.
     return;
   }
   // UCI of the player's attempt (always with q-promotion when applicable).
@@ -2395,6 +2479,7 @@ function tryDrillMove(from, to) {
     state.drill.feedback = "correct";
     renderBoard();
     renderDrillUi();
+    playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
     setTimeout(nextDrill, 1400);
   } else {
     state.drill.feedback = "wrong";
@@ -2732,8 +2817,18 @@ function jumpToReviewIdx(idx, opts) {
   const game = review.game;
   if (!game) return;
   const playSound = !opts || opts.playSound !== false;
-  if (playSound) playMoveSound();
   const moves = review.analysis ? review.analysis.moves : null;
+  if (playSound && idx >= 0) {
+    // Sound is decided by the move we're landing ON. With analysis we
+    // get SAN directly; without, fall back to a generic move tap.
+    if (moves && moves[idx]) {
+      const m = moves[idx];
+      const isOwn = review.userSide ? (m.side === review.userSide) : true;
+      playMoveSoundForSan(m.move_san, { isOwn });
+    } else {
+      playMoveSound();
+    }
+  }
   // idx == -1 means starting position; idx >= 0 means after that ply.
   review.activeIdx = idx;
   let fen, lastMove = null;

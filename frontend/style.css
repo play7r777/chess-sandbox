@@ -141,7 +141,13 @@ body.mode-legal .mode-toggle { display: none !important; }
   border-radius: 4px;
   user-select: none;
   position: relative;
+  /* Image-backed board themes (e.g. preset "#1") set --board-image to a
+     full 8x8 sprite that we stretch behind the (transparent) squares. */
+  background-image: var(--board-image, none);
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
 }
+body.board-theme-image .board { border-color: rgba(0, 0, 0, 0.45); }
 .square {
   position: relative;
   display: flex; align-items: center; justify-content: center;
