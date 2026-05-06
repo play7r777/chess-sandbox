@@ -437,12 +437,14 @@ function renderBoardArrows() {
   svg.setAttribute("viewBox", "0 0 8 8");
   svg.setAttribute("preserveAspectRatio", "none");
 
-  // Side-of-move palette. White arrows are off-white with a thin dark
-  // outline so they stay visible on light squares; black arrows are
-  // a deep slate with a thin light outline.
+  // Side-of-move palette. White-side arrows are dark slate (so they
+  // contrast against the white pieces / light squares), black-side
+  // arrows are off-white with a thin dark outline. Per user request:
+  // arrow colour visually matches the OPPOSITE side's piece colour
+  // (i.e. "opponent's hint"), reversed from the previous default.
   const PALETTE = {
-    w: { fill: "245, 245, 245", outline: "rgba(15, 18, 25, 0.55)" },
-    b: { fill: "30, 32, 38",    outline: "rgba(255, 255, 255, 0.45)" },
+    w: { fill: "30, 32, 38",    outline: "rgba(255, 255, 255, 0.55)" },
+    b: { fill: "245, 245, 245", outline: "rgba(15, 18, 25, 0.55)" },
   };
 
   // Side-to-move at the position currently displayed. PV[0] is played
@@ -451,11 +453,13 @@ function renderBoardArrows() {
   const count = _clampArrows(userSettings.pvArrowCount);
   const maxPlies = count * 2;
 
-  // Build [ply][side] -> alpha lookup. Arrow alpha fades linearly
-  // within each side from 0.92 down to 0.30 across `count` arrows.
-  function alphaFor(orderInSide) {
-    const t = (orderInSide - 1) / Math.max(1, count - 1);
-    return Math.max(0.22, 0.92 - 0.62 * t);
+  // All arrows are drawn at the same high contrast — the per-side
+  // numbered badge already conveys depth ordering, so fading the
+  // colour just made the deeper plies hard to read.
+  void count; // count still drives how many arrows are emitted, but
+  // no longer modulates alpha.
+  function alphaFor(_orderInSide) {
+    return 0.92;
   }
 
   // We need a marker per arrow because the head colour must match the
@@ -3103,8 +3107,14 @@ function renderBoardHint() {
     && m.move_uci !== m.best_move_uci
   ) {
     const lineLen = _clampBestLine(userSettings.bestLineLength);
+    // PV[0] is played by the side whose move is being analysed (m.side);
+    // PV[i] alternates from there. Colour each SAN by which side plays it
+    // so the user can tell white/black moves apart at a glance.
     const sansHtml = m.best_pv_san.slice(0, lineLen)
-      .map((s) => `<span class="pv-san">${escapeHtml(s)}</span>`).join("");
+      .map((s, i) => {
+        const sideOfPly = (i % 2 === 0) ? m.side : (m.side === "w" ? "b" : "w");
+        return `<span class="pv-san pv-san-${sideOfPly}">${escapeHtml(s)}</span>`;
+      }).join("");
     pvLine = `<div class="pv-line"><span class="pv-label">Лучшая линия:</span>${sansHtml}</div>`;
   }
   host.innerHTML = main + coachLine + pvLine;

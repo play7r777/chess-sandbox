@@ -440,7 +440,27 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .coach-line { color: #9ec5ff; font-size: 12px; font-style: italic; margin-top: 4px; }
 .pv-line { color: #c9d7ea; font-size: 12px; margin-top: 4px; }
 .pv-line .pv-label { color: #8ba0bf; margin-right: 6px; }
-.pv-line .pv-san { color: #d8e3f2; font-weight: 500; margin-right: 4px; }
+.pv-line .pv-san {
+  font-weight: 600;
+  margin-right: 4px;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+/* Light pill for white moves so they read as "white plays this".
+   The light background also keeps the move legible regardless of
+   the surrounding panel colour. */
+.pv-line .pv-san-w {
+  color: #15181d;
+  background: #f1f2f2;
+  border: 1px solid #c9ccd2;
+}
+/* Darker pill for black moves with a light outline so the SAN never
+   blends into the dark page background. */
+.pv-line .pv-san-b {
+  color: #f1f2f2;
+  background: #2c2f36;
+  border: 1px solid #5a6070;
+}
 
 .review-key-moments { margin-top: 10px; }
 .review-key-moments h3 { margin: 0 0 6px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #8ba0bf; font-weight: 600; }
@@ -768,13 +788,20 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 .eval-bar {
   position: relative;
-  border: 2px solid #2a2017;
+  /* Neutral medium-grey frame so the bar reads as a distinct UI element
+     against the page background regardless of how dark the black block
+     becomes. */
+  border: 2px solid #5a6070;
   border-radius: 3px;
   overflow: hidden;
-  background: #232629;
+  /* Use the same colour as the black block so any sub-pixel gap from
+     flex rounding doesn't show as a strip of page background. */
+  background: #0d0e10;
   display: flex;
   flex-direction: column;
   min-height: 100%;
+  /* Subtle outer shadow to lift the bar off the page bg. */
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 .eval-bar[hidden] { display: none; }
 /* When the board is flipped, swap the visual order of the white/black
@@ -784,7 +811,9 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .eval-bar.flipped { flex-direction: column-reverse; }
 .eval-bar-black {
   flex: 0 0 var(--eval-black, 50%);
-  background: #232629;
+  /* Deeper near-black so the block clearly reads as "black side" and
+     doesn't blend into the surrounding page bg (which is ~#1f2024). */
+  background: #0d0e10;
   transition: flex-basis 0.18s ease;
 }
 .eval-bar-white {
