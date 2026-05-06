@@ -472,42 +472,117 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .review-key-moments .km-san { color: #d8e3f2; font-weight: 500; }
 .review-key-moments .km-delta { color: #f0c958; font-size: 11px; font-variant-numeric: tabular-nums; }
 
-/* Drill mode (Lessons-style practice). */
+/* Drill mode (chess.com Lessons-style practice). */
 .drill-panel {
   margin: 10px 0 4px;
-  padding: 10px 12px;
-  border-radius: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
   background: linear-gradient(180deg, #1f2a3a, #19212e);
   border: 1px solid #2c3950;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
   font-size: 13px;
+  position: relative;
 }
 .drill-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: 8px;
   margin-bottom: 6px;
 }
+.drill-head-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .drill-title { font-weight: 700; color: #e7eef9; letter-spacing: 0.2px; }
-.drill-prompt { color: #b8c5dc; margin-bottom: 6px; }
+.drill-stats {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12px; font-variant-numeric: tabular-nums;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+  color: #c0cee0;
+}
+.drill-stats .ds-good { color: #7cd699; }
+.drill-stats .ds-warn { color: #f0c958; }
+.drill-stats .ds-bad  { color: #f49aa3; }
+.drill-streak {
+  display: inline-flex; align-items: center;
+  background: rgba(255, 145, 60, 0.18);
+  color: #ffb371;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 145, 60, 0.35);
+  font-weight: 700;
+  font-size: 11px;
+}
+.drill-streak.drill-streak-empty {
+  background: transparent;
+  color: #5e6776;
+  border-color: transparent;
+  font-weight: 400;
+}
+.drill-progress {
+  height: 6px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 4px 0 8px;
+}
+.drill-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6da7ff, #8de0c4);
+  transition: width 0.3s ease;
+}
+.drill-prompt {
+  color: #b8c5dc;
+  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
 .drill-prompt b { color: #fff; }
+.drill-theme {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  letter-spacing: 0.2px;
+}
+.drill-theme.cls-blunder    { color: #fff; background: rgba(176, 51, 64, 0.30); border-color: rgba(176, 51, 64, 0.55); }
+.drill-theme.cls-mistake    { color: #fff; background: rgba(204, 99, 53, 0.28); border-color: rgba(204, 99, 53, 0.55); }
+.drill-theme.cls-inaccuracy { color: #fff; background: rgba(243, 187, 64, 0.22); border-color: rgba(243, 187, 64, 0.55); }
+.drill-theme.cls-miss       { color: #fff; background: rgba(255,  73,  73, 0.22); border-color: rgba(255,  73,  73, 0.55); }
 .drill-msg {
   margin: 6px 0;
-  padding: 6px 8px;
+  padding: 7px 10px;
   border-radius: 6px;
   font-weight: 600;
 }
-.drill-msg.drill-ok  { background: rgba( 65, 163,  93, 0.18); color: #7cd699; border: 1px solid rgba(65, 163, 93, 0.4); }
-.drill-msg.drill-bad { background: rgba(176,  51,  64, 0.20); color: #f49aa3; border: 1px solid rgba(176, 51, 64, 0.45); }
+.drill-msg b { font-weight: 800; }
+.drill-msg.drill-ok   { background: rgba( 65, 163,  93, 0.18); color: #7cd699; border: 1px solid rgba(65, 163, 93, 0.4); }
+.drill-msg.drill-bad  { background: rgba(176,  51,  64, 0.20); color: #f49aa3; border: 1px solid rgba(176, 51, 64, 0.45); }
+.drill-msg.drill-info { background: rgba( 90, 140, 220, 0.16); color: #cfe1ff; border: 1px solid rgba( 90, 140, 220, 0.4); }
 .drill-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .drill-secondary {
   background: #2a3344;
   border: 1px solid #3a4660;
   color: #d8e3f2;
-  padding: 5px 10px; border-radius: 5px;
+  padding: 6px 12px; border-radius: 6px;
   font-size: 12px;
   cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
-.drill-secondary:hover { background: #324059; }
+.drill-secondary:hover:not(:disabled) { background: #324059; border-color: #4d5a78; }
+.drill-secondary:disabled { opacity: 0.45; cursor: not-allowed; }
+.drill-primary {
+  background: linear-gradient(180deg, #4a8aff, #356ad9);
+  border: 1px solid #2a52ad;
+  color: #fff;
+  padding: 6px 14px; border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.drill-primary:hover { background: linear-gradient(180deg, #5b97ff, #3e75e3); }
 .drill-start-btn {
   background: linear-gradient(180deg, #4ea76b, #357d4d);
   border: 1px solid #2a6038;
@@ -521,10 +596,92 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   letter-spacing: 0;
 }
 .drill-start-btn:hover { background: linear-gradient(180deg, #5cba79, #3f8d57); }
+
+/* End-of-drill summary card. */
+.drill-panel.is-finished {
+  background: linear-gradient(180deg, #1d2c3f, #141a26);
+  border-color: #324863;
+}
+.drill-summary { display: flex; flex-direction: column; gap: 10px; }
+.drill-summary-head {
+  display: flex; align-items: center; gap: 10px;
+}
+.drill-summary-trophy { font-size: 28px; }
+.drill-summary-title {
+  flex: 1;
+  font-weight: 800;
+  font-size: 16px;
+  color: #fff;
+  letter-spacing: 0.3px;
+}
+.drill-summary-pct {
+  font-size: 22px;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(180deg, #4a8aff, #356ad9);
+  padding: 4px 10px;
+  border-radius: 999px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+.drill-summary-great .drill-summary-pct { background: linear-gradient(180deg, #4ea76b, #357d4d); }
+.drill-summary-good  .drill-summary-pct { background: linear-gradient(180deg, #4a8aff, #356ad9); }
+.drill-summary-tough .drill-summary-pct { background: linear-gradient(180deg, #cc6335, #993f1d); }
+.drill-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px;
+}
+.ds-cell {
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  text-align: left;
+}
+.ds-label { font-size: 11px; color: #8aa0c0; text-transform: uppercase; letter-spacing: 0.5px; }
+.ds-val { font-size: 16px; font-weight: 800; color: #e7eef9; margin-top: 1px; font-variant-numeric: tabular-nums; }
+.ds-val.ds-good { color: #7cd699; }
+.ds-val.ds-warn { color: #f0c958; }
+.ds-val.ds-bad  { color: #f49aa3; }
+.drill-summary-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
 .square.drill-flash-bad { animation: drillFlashBad 0.7s ease-out; }
 @keyframes drillFlashBad {
   0%   { box-shadow: inset 0 0 0 4px rgba(237, 94, 110, 0.95); }
   100% { box-shadow: inset 0 0 0 0px rgba(237, 94, 110, 0); }
+}
+
+/* Centred celebration glyph that pops over the board on correct /
+   wrong / finish events. */
+.drill-burst {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%) scale(0.5);
+  font-size: 96px;
+  font-weight: 800;
+  pointer-events: none;
+  z-index: 30;
+  opacity: 0;
+  text-shadow: 0 0 18px rgba(0,0,0,0.55);
+  animation: drillBurstPop 0.85s ease-out forwards;
+}
+.drill-burst.drill-burst-ok  { color: #6dd58c; text-shadow: 0 0 24px rgba(109, 213, 140, 0.6); }
+.drill-burst.drill-burst-bad { color: #ff7676; text-shadow: 0 0 24px rgba(255, 118, 118, 0.6); }
+.drill-burst.drill-burst-finish {
+  font-size: 120px;
+  animation: drillBurstFinish 1.6s ease-out forwards;
+}
+@keyframes drillBurstPop {
+  0%   { opacity: 0;   transform: translate(-50%, -50%) scale(0.4); }
+  35%  { opacity: 1;   transform: translate(-50%, -50%) scale(1.15); }
+  60%  { opacity: 1;   transform: translate(-50%, -50%) scale(1.0); }
+  100% { opacity: 0;   transform: translate(-50%, -50%) scale(1.05); }
+}
+@keyframes drillBurstFinish {
+  0%   { opacity: 0;   transform: translate(-50%, -50%) scale(0.3) rotate(-12deg); }
+  25%  { opacity: 1;   transform: translate(-50%, -50%) scale(1.2) rotate( 4deg); }
+  60%  { opacity: 1;   transform: translate(-50%, -50%) scale(1.05) rotate(-2deg); }
+  100% { opacity: 0;   transform: translate(-50%, -50%) scale(1.0) rotate(0deg); }
 }
 
 .opening-explorer { margin-top: 10px; }

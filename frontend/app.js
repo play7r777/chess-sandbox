@@ -276,6 +276,17 @@ const state = {
     side: null,           // 'w' | 'b' — side to move in the drill position
     plyIdx: null,         // ply index in analysis (for navigation)
     feedback: null,       // 'correct' | 'wrong' | null
+    // Per-attempt + run-level tracking for the chess.com-style summary.
+    attempts: 0,             // wrong tries on the current moment
+    hintUsed: false,         // "Подсказка" used on this moment?
+    answerShown: false,      // "Показать" used on this moment?
+    streak: 0,               // current consecutive solved-on-first-try
+    bestStreak: 0,           // best streak this run
+    outcomes: [],            // per-moment: 'solved' | 'solved-retry' | 'solved-hint' | 'given-up'
+    startTime: 0,            // ms since epoch when run started
+    finishedAt: 0,           // ms since epoch when run ended (for summary)
+    finished: false,         // toggles summary screen in renderDrillUi
+    sourceMoments: [],       // unfiltered list to allow "Заново"
   },
 };
 
@@ -2573,9 +2584,18 @@ function startDrill(moments) {
     setStatus("Нет критических моментов для тренировки.", "info");
     return;
   }
+  // Stash the unfiltered list so "Заново" on the summary screen can
+  // restart with the same set of moments.
+  state.drill.sourceMoments = moments || [];
   state.drill.active = true;
   state.drill.moments = filtered;
   state.drill.idx = 0;
+  state.drill.streak = 0;
+  state.drill.bestStreak = 0;
+  state.drill.outcomes = [];
+  state.drill.startTime = Date.now();
+  state.drill.finishedAt = 0;
+  state.drill.finished = false;
   loadDrillMoment();
 }
 
@@ -2597,6 +2617,9 @@ function loadDrillMoment() {
   state.drill.side = moveData.side;
   state.drill.plyIdx = km.ply - 1;
   state.drill.feedback = null;
+  state.drill.attempts = 0;
+  state.drill.hintUsed = false;
+  state.drill.answerShown = false;
   loadFen(fenBefore);
   state.lastMove = null;
   state.reviewBadge = null;
@@ -2636,6 +2659,22 @@ function tryDrillMove(from, to) {
         && playedUci.slice(0, 4) === expected.slice(0, 4)
         && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
   if (sameMove) {
+    // Score this moment: first-try-no-hint = full point, retry = half
+    // point, hint used = quarter, answer shown = 0.
+    let outcome;
+    if (state.drill.answerShown)        outcome = "given-up";
+    else if (state.drill.hintUsed)      outcome = "solved-hint";
+    else if (state.drill.attempts > 0)  outcome = "solved-retry";
+    else                                outcome = "solved";
+    state.drill.outcomes[state.drill.idx] = outcome;
+    if (outcome === "solved") {
+      state.drill.streak += 1;
+      if (state.drill.streak > state.drill.bestStreak) {
+        state.drill.bestStreak = state.drill.streak;
+      }
+    } else {
+      state.drill.streak = 0;
+    }
     // Show the move on the board with a 'best' badge as positive
     // feedback, then auto-advance after a beat.
     loadFen(c.fen());
@@ -2646,9 +2685,11 @@ function tryDrillMove(from, to) {
     state.drill.feedback = "correct";
     renderBoard();
     renderDrillUi();
+    spawnDrillCelebration("ok");
     playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
-    setTimeout(nextDrill, 1400);
+    setTimeout(nextDrill, 1500);
   } else {
+    state.drill.attempts += 1;
     state.drill.feedback = "wrong";
     // Don't apply the wrong move — let the user try again.
     state.selectedSquare = null;
@@ -2660,26 +2701,64 @@ function tryDrillMove(from, to) {
       cell.classList.add("drill-flash-bad");
       setTimeout(() => cell.classList.remove("drill-flash-bad"), 700);
     }
+    spawnDrillCelebration("bad");
   }
 }
 
 function nextDrill() {
   if (!state.drill.active) return;
+  // If the user never solved this moment (e.g. "Пропустить")
+  // we still record an outcome so the summary is correct.
+  if (state.drill.outcomes[state.drill.idx] == null) {
+    state.drill.outcomes[state.drill.idx] = state.drill.answerShown
+      ? "given-up"
+      : "given-up";
+    state.drill.streak = 0;
+  }
   if (state.drill.idx + 1 >= state.drill.moments.length) {
-    exitDrill(true);
+    finishDrill();
     return;
   }
   state.drill.idx += 1;
   loadDrillMoment();
 }
 
+function finishDrill() {
+  state.drill.finishedAt = Date.now();
+  state.drill.finished = true;
+  state.drill.feedback = null;
+  state.drill.expectedUci = null;
+  state.drill.expectedSan = null;
+  // Clear any board hint artefacts.
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.reviewBadge = null;
+  renderBoard();
+  renderDrillUi();
+  spawnDrillCelebration("finish");
+}
+
+function restartDrill() {
+  if (!state.drill.sourceMoments || state.drill.sourceMoments.length === 0) {
+    exitDrill(false);
+    return;
+  }
+  startDrill(state.drill.sourceMoments);
+}
+
 function exitDrill(finished) {
-  const wasActive = state.drill.active;
+  const wasActive = state.drill.active || state.drill.finished;
   state.drill.active = false;
+  state.drill.finished = false;
   state.drill.moments = [];
+  state.drill.outcomes = [];
   state.drill.expectedUci = null;
   state.drill.expectedSan = null;
   state.drill.feedback = null;
+  state.drill.streak = 0;
+  state.drill.bestStreak = 0;
+  state.drill.startTime = 0;
+  state.drill.finishedAt = 0;
   renderDrillUi();
   if (!wasActive) return;
   if (finished) {
@@ -2689,35 +2768,157 @@ function exitDrill(finished) {
   if (review.activeIdx >= 0) jumpToReviewIdx(review.activeIdx);
 }
 
+// Drill scoring helper: convert per-moment outcomes into chess.com-
+// style aggregate stats for the running header / summary card.
+function computeDrillStats() {
+  const outcomes = state.drill.outcomes || [];
+  const total = state.drill.moments.length;
+  let solved = 0, retry = 0, hint = 0, given = 0;
+  for (const o of outcomes) {
+    if (o === "solved") solved += 1;
+    else if (o === "solved-retry") retry += 1;
+    else if (o === "solved-hint") hint += 1;
+    else if (o === "given-up") given += 1;
+  }
+  const seen = solved + retry + hint + given;
+  // Weighted score (1 / 0.5 / 0.25 / 0). Used for the percentage badge.
+  const score = solved * 1 + retry * 0.5 + hint * 0.25;
+  const pct = seen ? Math.round((score / seen) * 100) : 0;
+  return { total, solved, retry, hint, given, seen, score, pct };
+}
+
+function _formatMs(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${mm}:${ss.toString().padStart(2, "0")}`;
+}
+
+// Visual celebration overlay that pops a glyph centred on the board.
+// 'ok' = green check, 'bad' = red X, 'finish' = trophy + sparkle.
+function spawnDrillCelebration(kind) {
+  if (!boardEl) return;
+  let glyph, cls;
+  if (kind === "ok")          { glyph = "✔"; cls = "drill-burst-ok"; }
+  else if (kind === "bad")    { glyph = "✖"; cls = "drill-burst-bad"; }
+  else if (kind === "finish") { glyph = "🏆"; cls = "drill-burst-finish"; }
+  else                        { return; }
+  const el = document.createElement("div");
+  el.className = `drill-burst ${cls}`;
+  el.textContent = glyph;
+  boardEl.appendChild(el);
+  // Auto-remove after the CSS animation finishes.
+  setTimeout(() => el.remove(), kind === "finish" ? 1800 : 900);
+}
+
 function renderDrillUi() {
   const host = document.getElementById("drill-panel");
   if (!host) return;
-  if (!state.drill.active) {
+  if (!state.drill.active && !state.drill.finished) {
     host.innerHTML = "";
     host.style.display = "none";
     return;
   }
   host.style.display = "block";
+
+  // Summary card after the last moment.
+  if (state.drill.finished) {
+    host.classList.add("is-finished");
+    const s = computeDrillStats();
+    const elapsed = state.drill.finishedAt - state.drill.startTime;
+    const accent = s.pct >= 80 ? "great" : s.pct >= 50 ? "good" : "tough";
+    host.innerHTML = `
+      <div class="drill-summary drill-summary-${accent}">
+        <div class="drill-summary-head">
+          <span class="drill-summary-trophy">🏆</span>
+          <div class="drill-summary-title">Тренировка завершена</div>
+          <div class="drill-summary-pct">${s.pct}%</div>
+        </div>
+        <div class="drill-summary-grid">
+          <div class="ds-cell"><div class="ds-label">Решено</div><div class="ds-val">${s.solved + s.retry + s.hint} / ${s.total}</div></div>
+          <div class="ds-cell"><div class="ds-label">Сразу</div><div class="ds-val ds-good">${s.solved}</div></div>
+          <div class="ds-cell"><div class="ds-label">С повтором</div><div class="ds-val ds-warn">${s.retry}</div></div>
+          <div class="ds-cell"><div class="ds-label">С подсказкой</div><div class="ds-val ds-warn">${s.hint}</div></div>
+          <div class="ds-cell"><div class="ds-label">Пропущено</div><div class="ds-val ds-bad">${s.given}</div></div>
+          <div class="ds-cell"><div class="ds-label">Лучшая серия</div><div class="ds-val">🔥 ${s.solved ? state.drill.bestStreak : 0}</div></div>
+          <div class="ds-cell"><div class="ds-label">Время</div><div class="ds-val">${_formatMs(elapsed)}</div></div>
+        </div>
+        <div class="drill-summary-actions">
+          <button id="drill-restart" type="button" class="drill-primary">🔁 Заново</button>
+          <button id="drill-exit" type="button" class="drill-secondary">✕ Закрыть</button>
+        </div>
+      </div>
+    `;
+    const restartBtn = document.getElementById("drill-restart");
+    if (restartBtn) restartBtn.onclick = restartDrill;
+    const exitBtn = document.getElementById("drill-exit");
+    if (exitBtn) exitBtn.onclick = () => exitDrill(true);
+    return;
+  }
+
+  host.classList.remove("is-finished");
   const total = state.drill.moments.length;
   const cur = state.drill.idx + 1;
+  const km = state.drill.moments[state.drill.idx];
+  const cls = km ? km.classification : "";
+  const themeLabel = REVIEW_LABELS[cls] || "Критический момент";
+  const themeIcon = REVIEW_ICONS[cls] || "⚠";
   const sideLabel = state.drill.side === "w" ? "Белые" : "Чёрные";
+  const stats = computeDrillStats();
+  const progressPct = Math.round(((cur - 1) / Math.max(1, total)) * 100);
+  const streak = state.drill.streak;
+  const streakBadge = streak >= 3
+    ? `<span class="drill-streak">🔥 ${streak}</span>`
+    : `<span class="drill-streak drill-streak-empty">•</span>`;
+
   let feedback = "";
   if (state.drill.feedback === "correct") {
-    feedback = `<div class="drill-msg drill-ok">✓ Верно! Лучший ход — <b>${escapeHtml(state.drill.expectedSan)}</b></div>`;
+    const bonus = streak >= 5 ? " · Огонь! Серия ×" + streak
+                 : streak >= 3 ? " · Серия ×" + streak
+                 : "";
+    feedback = `<div class="drill-msg drill-ok">✓ Верно! Лучший ход — <b>${escapeHtml(state.drill.expectedSan)}</b>${bonus}</div>`;
   } else if (state.drill.feedback === "wrong") {
-    feedback = `<div class="drill-msg drill-bad">✕ Не лучший ход. Попробуй ещё раз или нажми «Подсказка».</div>`;
+    const tip = state.drill.attempts >= 2
+      ? "Нажми <b>Подсказку</b>, чтобы увидеть фигуру."
+      : "Попробуй ещё раз.";
+    feedback = `<div class="drill-msg drill-bad">✕ Не лучший ход. ${tip}</div>`;
+  } else if (state.drill.answerShown) {
+    feedback = `<div class="drill-msg drill-info">Показан ответ — <b>${escapeHtml(state.drill.expectedSan)}</b>. Повтори ход на доске или нажми <b>Дальше</b>.</div>`;
+  } else if (state.drill.hintUsed) {
+    feedback = `<div class="drill-msg drill-info">Подсказка: исходная клетка подсвечена.</div>`;
   }
+
+  // Right-hand action: "Skip" before user solves, "Next" after answer
+  // is shown so user can move on without playing it.
+  const advanceBtn = state.drill.answerShown
+    ? `<button id="drill-next" type="button" class="drill-primary">→ Дальше</button>`
+    : `<button id="drill-skip" type="button" class="drill-secondary">⤳ Пропустить</button>`;
+
   host.innerHTML = `
     <div class="drill-head">
-      <span class="drill-title">🎯 Тренировка ключевых моментов · ${cur} / ${total}</span>
+      <div class="drill-head-left">
+        <span class="drill-title">🎯 Тренировка · ${cur} / ${total}</span>
+        <span class="drill-stats">
+          <span class="ds-good" title="Решено с первого раза">✓ ${stats.solved}</span>
+          <span class="ds-warn" title="С повтором или подсказкой">○ ${stats.retry + stats.hint}</span>
+          <span class="ds-bad" title="Пропущено">✕ ${stats.given}</span>
+          ${streakBadge}
+        </span>
+      </div>
       <button id="drill-exit" type="button" class="drill-secondary">✕ Выйти</button>
     </div>
-    <div class="drill-prompt">Ход за <b>${sideLabel}</b>. Найди лучший ход.</div>
+    <div class="drill-progress">
+      <div class="drill-progress-fill" style="width: ${progressPct}%"></div>
+    </div>
+    <div class="drill-prompt">
+      <span class="drill-theme cls-${cls}" title="Тип исходной ошибки">${themeIcon} ${themeLabel}</span>
+      Ход за <b>${sideLabel}</b>. Найди лучший ход.
+    </div>
     ${feedback}
     <div class="drill-actions">
-      <button id="drill-hint" type="button" class="drill-secondary">💡 Подсказка</button>
-      <button id="drill-show" type="button" class="drill-secondary">👁 Показать ответ</button>
-      <button id="drill-skip" type="button" class="drill-secondary">⤳ Пропустить</button>
+      <button id="drill-hint" type="button" class="drill-secondary" ${state.drill.answerShown ? "disabled" : ""}>💡 Подсказка</button>
+      <button id="drill-show" type="button" class="drill-secondary" ${state.drill.answerShown ? "disabled" : ""}>👁 Показать ответ</button>
+      ${advanceBtn}
     </div>
   `;
   const exitBtn = document.getElementById("drill-exit");
@@ -2726,21 +2927,28 @@ function renderDrillUi() {
   if (hintBtn) hintBtn.onclick = () => {
     const u = state.drill.expectedUci;
     if (u && u.length >= 4) {
+      state.drill.hintUsed = true;
       // Highlight the source square only (small hint, not the full arrow).
       state.bestArrow = { from: u.slice(0, 2), to: u.slice(0, 2) };
       renderBoard();
+      renderDrillUi();
     }
   };
   const showBtn = document.getElementById("drill-show");
   if (showBtn) showBtn.onclick = () => {
     const u = state.drill.expectedUci;
     if (u && u.length >= 4) {
+      state.drill.answerShown = true;
+      state.drill.feedback = null;
       state.bestArrow = { from: u.slice(0, 2), to: u.slice(2, 4) };
       renderBoard();
+      renderDrillUi();
     }
   };
   const skipBtn = document.getElementById("drill-skip");
   if (skipBtn) skipBtn.onclick = nextDrill;
+  const nextBtn = document.getElementById("drill-next");
+  if (nextBtn) nextBtn.onclick = nextDrill;
 }
 
 async function renderOpeningExplorer(fen) {
