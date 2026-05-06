@@ -108,8 +108,32 @@ class InviteActionRequest(BaseModel):
     client_id: str = Field(..., min_length=4, max_length=64)
 
 
+def _print_puzzle_banner() -> None:
+    """Print a one-line summary of the puzzle bank at startup.
+
+    Shows the count and source so the operator can immediately tell
+    whether the full Lichess SQLite is loaded or the tiny built-in
+    fallback.
+    """
+    try:
+        stats = puzzles_db.stats()
+    except Exception as exc:
+        print(f"[chess-sandbox] Пазлы: ошибка чтения базы — {exc}")
+        return
+    count = stats.get("count", 0)
+    source = stats.get("source", "unknown")
+    if source == "sqlite":
+        print(f"[chess-sandbox] Пазлы: {count:,} (источник: sqlite — Lichess база)")
+    else:
+        print(
+            f"[chess-sandbox] Пазлы: {count:,} (источник: {source} — встроенный набор). "
+            f"Запусти `python -m backend.import_puzzles --all` для полной базы Lichess."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _print_puzzle_banner()
     # Try to auto-start the engine if a binary is configured / discoverable.
     path = settings.resolve_stockfish_path()
     if path:
