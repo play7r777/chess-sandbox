@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import csv
 import io
-import os
 import random
 import sqlite3
 import sys
@@ -174,12 +173,24 @@ _INDEX_SQL = [
 
 
 def _insert(db_path: Path, rows: list[tuple[Any, ...]]) -> None:
-    tmp_path = db_path.with_suffix(".sqlite.tmp")
-    if tmp_path.exists():
-        tmp_path.unlink()
-    conn = sqlite3.connect(str(tmp_path))
-    conn.execute("PRAGMA journal_mode=WAL")
+    """Write ``rows`` directly to ``db_path``.
+
+    Earlier versions wrote to a ``.sqlite.tmp`` file and then atomically
+    swapped, but on Windows the tempfile retains an OS-level write
+    handle (via SQLite's WAL/SHM aux files) for several seconds after
+    ``conn.close()`` returns, which causes ``os.replace`` to fail with
+    ``[WinError 32] used by another process`` even when no other
+    process is touching the destination. Avoid the dance entirely:
+    delete any pre-existing destination, then write straight to it.
+    Use ``journal_mode=DELETE`` so no WAL/SHM files linger.
+    """
+    if db_path.exists():
+        _delete_with_retry(db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA locking_mode=EXCLUSIVE")
     conn.execute(_CREATE_SQL)
     for idx_sql in _INDEX_SQL:
         conn.execute(idx_sql)
@@ -215,51 +226,31 @@ def _insert(db_path: Path, rows: list[tuple[Any, ...]]) -> None:
     conn.close()
     elapsed = time.monotonic() - t0
     print(f"\r  Готово: {len(rows):,} строк за {elapsed:.1f} с")
-
-    _atomic_swap(tmp_path, db_path)
     print(f"База: {db_path} ({db_path.stat().st_size / 1e6:.1f} MB)")
 
 
-def _atomic_swap(tmp_path: Path, db_path: Path) -> None:
-    """Replace ``db_path`` with ``tmp_path`` atomically.
+def _delete_with_retry(path: Path) -> None:
+    """Delete ``path`` with Windows-friendly retries.
 
-    Handles the Windows quirk where the destination must be deletable
-    (no other process may hold an open handle on it). On lock conflict
-    we retry a few times with backoff and ultimately surface a
-    human-friendly error pointing the operator at the most likely
-    cause: a still-running server instance.
+    Windows holds the file lock for a few moments after the previous
+    holder closes it (AV scan, search indexer, lingering SQLite
+    handle), so ``unlink`` may race. We retry up to 8 times with
+    backoff and surface a clear instruction if all attempts fail.
     """
     last_exc: OSError | None = None
     for attempt in range(8):
         try:
-            os.replace(tmp_path, db_path)
+            path.unlink()
             return
         except PermissionError as exc:
-            # Windows: destination is locked. Try to unlink it first
-            # and retry; if that fails too, the old file is in use.
             last_exc = exc
-            try:
-                if db_path.exists():
-                    db_path.unlink()
-                # No more dst: replace should now succeed.
-                os.replace(tmp_path, db_path)
-                return
-            except PermissionError as exc2:
-                last_exc = exc2
-                time.sleep(0.5 * (attempt + 1))
-                continue
-    # Out of retries.
+            time.sleep(0.5 * (attempt + 1))
+        except FileNotFoundError:
+            return
     raise RuntimeError(
-        f"Не удалось перезаписать {db_path}: файл занят другим процессом.\n"
-        f"Скорее всего у тебя ещё крутится сервер (uvicorn / start-public.ps1)\n"
-        f"и держит puzzles.sqlite открытым.\n\n"
-        f"Что делать:\n"
-        f"  1) Закрой ВСЕ окна с сервером (Ctrl+C / закрыть консоль).\n"
-        f"  2) На всякий: taskkill /F /IM python.exe /T\n"
-        f"  3) Готовый .tmp файл уже здесь — переименуй вручную:\n"
-        f"       del {db_path}\n"
-        f"       move {tmp_path} {db_path}\n"
-        f"     (или повторно запусти импорт — он переиспользует кэш .csv.zst).\n\n"
+        f"Не удалось удалить старый {path}: файл занят другим процессом.\n"
+        f"Закрой все окна с сервером (uvicorn / start-public.ps1) и попробуй снова.\n"
+        f"taskkill /F /IM python.exe /T  /F /IM ngrok.exe /T\n"
         f"Оригинальная ошибка: {last_exc!r}"
     ) from last_exc
 
