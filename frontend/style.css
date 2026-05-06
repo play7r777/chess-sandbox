@@ -237,6 +237,29 @@ body.mode-legal .mode-toggle { display: none !important; }
   display: flex; flex-direction: column; gap: 16px;
   min-width: 0;
 }
+/* In Analysis view, pin the right-side panel to the viewport height and
+   make EVERYTHING inside it (Game Review summary, rating, phases, key
+   moments, move list…) scroll together as one block, while the board
+   stays fixed in place. */
+body.view-analysis .sidebar {
+  height: calc(100vh - 96px);
+  position: sticky;
+  top: 16px;
+}
+body.view-analysis #panel-review {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+body.view-analysis #panel-review::-webkit-scrollbar { width: 10px; }
+body.view-analysis #panel-review::-webkit-scrollbar-thumb {
+  background: #2a3140; border-radius: 5px;
+}
+body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
+  background: #3a4350;
+}
 .panel, .palette {
   background: var(--bg-elev);
   border: 1px solid #1a1b1f;
@@ -674,7 +697,7 @@ body.mode-legal .mode-toggle { display: none !important; }
   /* Reserved widths for the left-side columns (eval-bar + ranks).
      The total left-offset is used to align player strips and files row
      so their right edge always matches the board's right edge. */
-  --eval-bar-w: 22px;
+  --eval-bar-w: 30px;
   --ranks-w: 20px;
   --board-gap: 6px;
   --left-offset: calc(var(--eval-bar-w) + var(--ranks-w) + var(--board-gap) * 2);

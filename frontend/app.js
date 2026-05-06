@@ -18,17 +18,32 @@ const DEFAULT_BOARD_THEME = "brown";
 // Available board themes — each is just a colour pair (light, dark) +
 // last-move highlight tint. Adding new themes is purely cosmetic.
 const BOARD_THEMES = {
-  brown:      { name: "Brown",      light: "#e9d8b6", dark: "#8a6f48", highlight: "rgba(220, 200, 90, 0.45)" },
+  brown:      { name: "Brown",      light: "#edd6b0", dark: "#b88762", highlight: "rgba(220, 200, 90, 0.45)" },
   green:      { name: "Green",      light: "#eeeed2", dark: "#769656", highlight: "rgba(255, 240, 90, 0.45)" },
   blue:       { name: "Blue",       light: "#dee3e6", dark: "#788a94", highlight: "rgba(110, 180, 255, 0.40)" },
+  icy:        { name: "Icy Sea",    light: "#e0eef5", dark: "#7fa3bd", highlight: "rgba(160, 220, 255, 0.50)" },
   wood:       { name: "Wood",       light: "#d6a478", dark: "#7a4c2a", highlight: "rgba(255, 200, 90, 0.40)" },
+  marble:     { name: "Marble",     light: "#e8e2d4", dark: "#9d958a", highlight: "rgba(220, 200, 110, 0.45)" },
+  ocean:      { name: "Ocean",      light: "#cfe6ee", dark: "#3a6a87", highlight: "rgba(110, 200, 255, 0.45)" },
+  forest:     { name: "Forest",     light: "#d6e3c4", dark: "#3f6a3a", highlight: "rgba(255, 230, 100, 0.45)" },
   tournament: { name: "Tournament", light: "#c9c9c9", dark: "#5d6470", highlight: "rgba(180, 200, 255, 0.40)" },
+  newspaper:  { name: "Newspaper",  light: "#ffffff", dark: "#9b9b9b", highlight: "rgba(255, 230, 90, 0.45)" },
 };
 
-// Available piece sets — only cburnett ships at the moment. The UI is
-// structured so additional sets can drop into /static/pieces/<key>/ later.
+// Available piece sets. Files live under /static/pieces/<key>/ and are
+// open-source pulls from the lichess project (which kindly hosts them
+// under permissive licenses). Names are mapped to the closest chess.com
+// counterpart in the UI for familiarity, but the assets are independent.
 const PIECE_SETS = {
-  cburnett: { name: "Classic", note: "" },
+  cburnett:   { name: "Classic" },
+  merida:     { name: "Merida" },
+  alpha:      { name: "Alpha" },
+  maestro:    { name: "Maestro" },
+  california: { name: "California" },
+  chessnut:   { name: "Glass" },
+  staunty:    { name: "Staunty" },
+  fantasy:    { name: "Fantasy" },
+  pirouetti:  { name: "Wood" },
 };
 
 function loadSettings() {
@@ -1716,7 +1731,7 @@ const REVIEW_LABELS = {
 
 const REVIEW_ORDER = [
   "brilliant","great","best","excellent","good","book","forced",
-  "inaccuracy","mistake","blunder","miss",
+  "inaccuracy","mistake","miss","blunder",
 ];
 
 const REVIEW_COLOR = {
