@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import os
 import random
 import sqlite3
 import sys
@@ -215,10 +216,10 @@ def _insert(db_path: Path, rows: list[tuple[Any, ...]]) -> None:
     elapsed = time.monotonic() - t0
     print(f"\r  Готово: {len(rows):,} строк за {elapsed:.1f} с")
 
-    # Atomic rename.
-    if db_path.exists():
-        db_path.unlink()
-    tmp_path.rename(db_path)
+    # Atomic replace. ``Path.rename`` raises ``PermissionError`` on
+    # Windows when the destination exists; ``os.replace`` works on
+    # both POSIX and Windows.
+    os.replace(tmp_path, db_path)
     print(f"База: {db_path} ({db_path.stat().st_size / 1e6:.1f} MB)")
 
 
