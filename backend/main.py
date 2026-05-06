@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import puzzles as puzzles_db
 from .analysis import analyse_game, import_game_async
 from .recognize import diagnostics as recognize_diagnostics
 from .recognize import recognize as recognize_position
@@ -295,6 +296,93 @@ async def game_analyse(req: GameAnalyseRequest) -> dict[str, Any]:
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return result
+
+
+# ---- Puzzles ----
+
+@app.get("/api/puzzle/stats")
+async def puzzle_stats() -> dict[str, Any]:
+    """Pack-level metadata: counts, difficulty bands, theme labels."""
+    return puzzles_db.stats()
+
+
+@app.get("/api/puzzle/random")
+async def puzzle_random(
+    difficulty: str | None = None,
+    theme: str | None = None,
+    min_rating: int | None = None,
+    max_rating: int | None = None,
+    exclude: str | None = None,
+) -> dict[str, Any]:
+    """Return a single random puzzle matching the optional filters.
+
+    `exclude` is a comma-separated list of recently-served puzzle ids
+    so the frontend can avoid showing the same puzzle twice in a row.
+    """
+    diff = difficulty.lower() if difficulty else None
+    if diff and diff not in ("easy", "medium", "hard"):
+        raise HTTPException(status_code=400, detail="difficulty must be easy/medium/hard")
+    exclude_ids = set(filter(None, (exclude or "").split(","))) or None
+    p = puzzles_db.random_puzzle(
+        difficulty=diff,
+        theme=theme or None,
+        min_rating=min_rating,
+        max_rating=max_rating,
+        exclude_ids=exclude_ids,
+    )
+    if not p:
+        # Fall back to ignoring filters rather than 404-ing.
+        p = puzzles_db.random_puzzle()
+    if not p:
+        raise HTTPException(status_code=404, detail="No puzzles available.")
+    return _serialize_puzzle(p)
+
+
+@app.get("/api/puzzle/{puzzle_id}")
+async def puzzle_by_id(puzzle_id: str) -> dict[str, Any]:
+    p = puzzles_db.get_by_id(puzzle_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Puzzle not found.")
+    return _serialize_puzzle(p)
+
+
+def _serialize_puzzle(p: dict[str, Any]) -> dict[str, Any]:
+    """Project a puzzle into the shape the frontend expects."""
+    moves = list(p.get("moves") or [])
+    fen = str(p.get("fen") or "")
+    # Determine which side will be solving by playing the opponent's
+    # setup move on the FEN — chess library handles SAN/UCI parsing.
+    side_to_solve: str | None = None
+    setup_san: str | None = None
+    try:
+        board = chess.Board(fen)
+        if moves:
+            mv = chess.Move.from_uci(moves[0])
+            if mv in board.legal_moves:
+                setup_san = board.san(mv)
+        # The solver's side is the side that plays moves[1]. Lichess
+        # encodes this so the side-to-move at the *start* of the
+        # puzzle is the opponent.
+        side_to_solve = "b" if board.turn == chess.WHITE else "w"
+    except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError):
+        pass
+    themes = list(p.get("themes") or [])
+    labels = puzzles_db.theme_labels()
+    themes_ru = [labels.get(t, t) for t in themes]
+    return {
+        "id": p.get("id"),
+        "fen": fen,
+        "moves": moves,
+        "rating": int(p.get("rating") or 0),
+        "popularity": int(p.get("popularity") or 0),
+        "plays": int(p.get("plays") or 0),
+        "themes": themes,
+        "themes_ru": themes_ru,
+        "url": p.get("url"),
+        "difficulty": puzzles_db.difficulty_band(p),
+        "side_to_solve": side_to_solve,
+        "setup_san": setup_san,
+    }
 
 
 def _result_to_dict(result: Any) -> dict[str, Any]:

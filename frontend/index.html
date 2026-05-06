@@ -14,6 +14,7 @@
         <div class="view-tabs" role="tablist" aria-label="Режим интерфейса">
           <button id="tab-main"     class="view-tab is-active" type="button" role="tab" aria-selected="true"  data-view="main">Main</button>
           <button id="tab-analysis" class="view-tab"           type="button" role="tab" aria-selected="false" data-view="analysis">Analysis</button>
+          <button id="tab-puzzle"   class="view-tab"           type="button" role="tab" aria-selected="false" data-view="puzzle">Puzzle</button>
         </div>
       </div>
       <div class="topbar-actions">
@@ -172,8 +173,16 @@
           <ol id="move-history" class="move-history"></ol>
         </section>
 
+        <section class="panel" id="panel-puzzle" data-view="puzzle">
+          <h2>Puzzle <span class="puzzle-h-sub">— тактические задачи</span></h2>
+          <div id="puzzle-stats-bar" class="puzzle-stats-bar"></div>
+          <div id="puzzle-card" class="puzzle-card"></div>
+          <div id="puzzle-actions" class="puzzle-actions"></div>
+          <div id="puzzle-history" class="puzzle-history"></div>
+        </section>
+
         <section class="panel" id="panel-review" data-view="analysis">
-          <h2>Анализ партии (как chess.com)</h2>
+          <h2>Анализ партии</h2>
           <div class="row">
             <input id="review-source" type="text" placeholder="https://www.chess.com/game/live/... или https://lichess.org/... или PGN" style="flex:1; min-width:260px;" />
             <button id="btn-review-import" type="button">Загрузить</button>

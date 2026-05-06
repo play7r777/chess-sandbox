@@ -276,6 +276,40 @@ const state = {
     side: null,           // 'w' | 'b' — side to move in the drill position
     plyIdx: null,         // ply index in analysis (for navigation)
     feedback: null,       // 'correct' | 'wrong' | null
+    // Per-attempt + run-level tracking for the chess.com-style summary.
+    attempts: 0,             // wrong tries on the current moment
+    hintUsed: false,         // "Подсказка" used on this moment?
+    answerShown: false,      // "Показать" used on this moment?
+    streak: 0,               // current consecutive solved-on-first-try
+    bestStreak: 0,           // best streak this run
+    outcomes: [],            // per-moment: 'solved' | 'solved-retry' | 'solved-hint' | 'given-up'
+    startTime: 0,            // ms since epoch when run started
+    finishedAt: 0,           // ms since epoch when run ended (for summary)
+    finished: false,         // toggles summary screen in renderDrillUi
+    sourceMoments: [],       // unfiltered list to allow "Заново"
+  },
+  // Puzzle mode (chess.com-style tactics trainer; data from Lichess pack).
+  puzzle: {
+    active: false,            // true while a puzzle is being solved
+    current: null,            // serialized puzzle dict from /api/puzzle/random
+    moves: [],                // full UCI list (setup move + alternating user/opponent)
+    nextIdx: 0,               // index in `moves` of the next ply we're waiting on
+    side: null,               // 'w' | 'b' — solver's side
+    fenStart: null,           // FEN at puzzle start (before setup move)
+    flippedSnapshot: null,    // board.flipped snapshot to restore on exit
+    feedback: null,           // 'correct' | 'wrong' | 'solved' | 'shown' | null
+    attempts: 0,              // wrong attempts on current ply (always 0 or 1 now)
+    hintUsed: false,          // hint used on current puzzle?
+    recentIds: [],            // last N served puzzle ids (anti-dup)
+    history: [],              // [{ id, outcome, rating, themes, solveMs }]
+    sessionRating: 1200,      // rolling personal rating (Glicko-lite)
+    sessionStats: {           // counters for the stats bar
+      solved: 0, wrong: 0, skipped: 0, streak: 0, bestStreak: 0,
+    },
+    startedAt: 0,             // ms when solver-state began (after setup move)
+    solveMs: 0,               // ms to solve last puzzle (for display)
+    pendingNext: null,        // setTimeout handle for auto-next after fail
+    timerHandle: null,        // setInterval handle for live timer display
   },
 };
 
@@ -421,7 +455,9 @@ function makeReviewBadge(cls) {
 // is to move at that ply (white-ish for white, dark for black) and
 // fade with depth so the immediate best move is the most contrasty.
 // Each arrow gets a small numbered badge at its tail showing the
-// per-side order ("white's 1st move", "white's 2nd", etc.).
+// ply number across both sides (white = 1, 3, 5… / black = 2, 4, 6…,
+// reversed when black is to move first), so the parity of the badge
+// number tells the viewer whose move it is.
 function renderBoardArrows() {
   const existing = boardEl.querySelector(".board-arrows");
   if (existing) existing.remove();
@@ -435,12 +471,14 @@ function renderBoardArrows() {
   svg.setAttribute("viewBox", "0 0 8 8");
   svg.setAttribute("preserveAspectRatio", "none");
 
-  // Side-of-move palette. White arrows are off-white with a thin dark
-  // outline so they stay visible on light squares; black arrows are
-  // a deep slate with a thin light outline.
+  // Side-of-move palette. White-side arrows are dark slate (so they
+  // contrast against the white pieces / light squares), black-side
+  // arrows are off-white with a thin dark outline. Per user request:
+  // arrow colour visually matches the OPPOSITE side's piece colour
+  // (i.e. "opponent's hint"), reversed from the previous default.
   const PALETTE = {
-    w: { fill: "245, 245, 245", outline: "rgba(15, 18, 25, 0.55)" },
-    b: { fill: "30, 32, 38",    outline: "rgba(255, 255, 255, 0.45)" },
+    w: { fill: "30, 32, 38",    outline: "rgba(255, 255, 255, 0.55)" },
+    b: { fill: "245, 245, 245", outline: "rgba(15, 18, 25, 0.55)" },
   };
 
   // Side-to-move at the position currently displayed. PV[0] is played
@@ -449,11 +487,13 @@ function renderBoardArrows() {
   const count = _clampArrows(userSettings.pvArrowCount);
   const maxPlies = count * 2;
 
-  // Build [ply][side] -> alpha lookup. Arrow alpha fades linearly
-  // within each side from 0.92 down to 0.30 across `count` arrows.
-  function alphaFor(orderInSide) {
-    const t = (orderInSide - 1) / Math.max(1, count - 1);
-    return Math.max(0.22, 0.92 - 0.62 * t);
+  // All arrows are drawn at the same high contrast — the per-side
+  // numbered badge already conveys depth ordering, so fading the
+  // colour just made the deeper plies hard to read.
+  void count; // count still drives how many arrows are emitted, but
+  // no longer modulates alpha.
+  function alphaFor(_orderInSide) {
+    return 0.92;
   }
 
   // We need a marker per arrow because the head colour must match the
@@ -479,7 +519,7 @@ function renderBoardArrows() {
     return id;
   }
 
-  function drawArrow(fromSq, toSq, side, orderInSide, totalIdx) {
+  function drawArrow(fromSq, toSq, side, orderInSide, totalIdx, plyNum) {
     const a = squareToBoardXY(fromSq);
     const b = squareToBoardXY(toSq);
     if (!a || !b) return;
@@ -543,7 +583,7 @@ function renderBoardArrows() {
     tx.setAttribute("font-weight", "700");
     tx.setAttribute("font-family", "system-ui, -apple-system, Segoe UI, Roboto, sans-serif");
     tx.setAttribute("fill", side === "w" ? "#1a1c20" : "#f7f7f9");
-    tx.textContent = String(orderInSide);
+    tx.textContent = String(plyNum != null ? plyNum : orderInSide);
     svg.appendChild(tx);
     void totalIdx;  // currently unused, kept for future tooltips/keys.
   }
@@ -557,11 +597,14 @@ function renderBoardArrows() {
       const toSq   = m.slice(2, 4);
       const side = ((stm === "w") === (i % 2 === 0)) ? "w" : "b";
       const orderInSide = Math.floor(i / 2) + 1;
-      drawArrow(fromSq, toSq, side, orderInSide, i);
+      // Sequential ply number across both sides: i=0 is the side-to-move's
+      // first ply ("1"), i=1 is the opponent's first ply ("2"), and so on.
+      const plyNum = i + 1;
+      drawArrow(fromSq, toSq, side, orderInSide, i, plyNum);
     }
   } else if (hasBest) {
     // No PV data (e.g. drill-mode hint): single arrow coloured by stm.
-    drawArrow(state.bestArrow.from, state.bestArrow.to, stm, 1, 0);
+    drawArrow(state.bestArrow.from, state.bestArrow.to, stm, 1, 0, 1);
   }
 
   boardEl.appendChild(svg);
@@ -833,10 +876,14 @@ function handleDrop(e, cell) {
 }
 
 function tryFreeplayMove(from, to) {
-  // Drill mode hijacks freeplay drops: instead of mutating the
-  // sandbox we treat the drop as the user's "answer" to the puzzle.
+  // Drill / Puzzle modes hijack freeplay drops: instead of mutating
+  // the sandbox we treat the drop as the user's "answer".
   if (state.drill.active) {
     tryDrillMove(from, to);
+    return;
+  }
+  if (state.puzzle && state.puzzle.active) {
+    tryPuzzleMove(from, to);
     return;
   }
   const c = ensureFreeplayChess();
@@ -1859,15 +1906,27 @@ if (dropzone) {
 // ---------- View tabs (Main / Analysis) ----------
 
 function setView(view) {
-  const v = view === "analysis" ? "analysis" : "main";
+  let v;
+  if (view === "analysis")    v = "analysis";
+  else if (view === "puzzle") v = "puzzle";
+  else                        v = "main";
   document.body.classList.toggle("view-main",     v === "main");
   document.body.classList.toggle("view-analysis", v === "analysis");
+  document.body.classList.toggle("view-puzzle",   v === "puzzle");
   document.querySelectorAll(".view-tab").forEach((btn) => {
     const isActive = btn.dataset.view === v;
     btn.classList.toggle("is-active", isActive);
     btn.setAttribute("aria-selected", isActive ? "true" : "false");
   });
   try { localStorage.setItem("cs.view", v); } catch (_) { /* ignore */ }
+  // Puzzle mode owns the board while it's the active view; entering
+  // and leaving the view is the natural place to load a puzzle / put
+  // the board back the way the user found it.
+  if (v === "puzzle") {
+    enterPuzzleView();
+  } else if (state.puzzle && state.puzzle.active) {
+    leavePuzzleView();
+  }
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
@@ -2321,18 +2380,16 @@ function updateEvalBar(cpWhitePov, _moverSide) {
   const label = document.getElementById("eval-bar-label");
   if (!bar || !label) return;
   const frac = cpToWhiteFrac(cpWhitePov);
-  // White at bottom, black at top: when frac is large (white winning),
-  // white block grows.
+  // The white block always represents white's share of the bar and the
+  // black block always represents black's share. To make the bar match
+  // the board orientation when it is flipped, the eval-bar element itself
+  // uses flex-direction: column-reverse via the .flipped class, swapping
+  // their visual order without inverting the meaning of the values.
   const flipped = state.flipped;
   const whiteBottom = !flipped;
-  // CSS variables drive the flex-basis percentages.
-  if (whiteBottom) {
-    bar.style.setProperty("--eval-white", `${(frac * 100).toFixed(2)}%`);
-    bar.style.setProperty("--eval-black", `${((1 - frac) * 100).toFixed(2)}%`);
-  } else {
-    bar.style.setProperty("--eval-white", `${((1 - frac) * 100).toFixed(2)}%`);
-    bar.style.setProperty("--eval-black", `${(frac * 100).toFixed(2)}%`);
-  }
+  bar.classList.toggle("flipped", flipped);
+  bar.style.setProperty("--eval-white", `${(frac * 100).toFixed(2)}%`);
+  bar.style.setProperty("--eval-black", `${((1 - frac) * 100).toFixed(2)}%`);
   // Pretty number.
   let text;
   if (cpWhitePov >= 99000)      text = `M${100000 - cpWhitePov}`;
@@ -2566,9 +2623,18 @@ function startDrill(moments) {
     setStatus("Нет критических моментов для тренировки.", "info");
     return;
   }
+  // Stash the unfiltered list so "Заново" on the summary screen can
+  // restart with the same set of moments.
+  state.drill.sourceMoments = moments || [];
   state.drill.active = true;
   state.drill.moments = filtered;
   state.drill.idx = 0;
+  state.drill.streak = 0;
+  state.drill.bestStreak = 0;
+  state.drill.outcomes = [];
+  state.drill.startTime = Date.now();
+  state.drill.finishedAt = 0;
+  state.drill.finished = false;
   loadDrillMoment();
 }
 
@@ -2590,6 +2656,9 @@ function loadDrillMoment() {
   state.drill.side = moveData.side;
   state.drill.plyIdx = km.ply - 1;
   state.drill.feedback = null;
+  state.drill.attempts = 0;
+  state.drill.hintUsed = false;
+  state.drill.answerShown = false;
   loadFen(fenBefore);
   state.lastMove = null;
   state.reviewBadge = null;
@@ -2629,6 +2698,22 @@ function tryDrillMove(from, to) {
         && playedUci.slice(0, 4) === expected.slice(0, 4)
         && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
   if (sameMove) {
+    // Score this moment: first-try-no-hint = full point, retry = half
+    // point, hint used = quarter, answer shown = 0.
+    let outcome;
+    if (state.drill.answerShown)        outcome = "given-up";
+    else if (state.drill.hintUsed)      outcome = "solved-hint";
+    else if (state.drill.attempts > 0)  outcome = "solved-retry";
+    else                                outcome = "solved";
+    state.drill.outcomes[state.drill.idx] = outcome;
+    if (outcome === "solved") {
+      state.drill.streak += 1;
+      if (state.drill.streak > state.drill.bestStreak) {
+        state.drill.bestStreak = state.drill.streak;
+      }
+    } else {
+      state.drill.streak = 0;
+    }
     // Show the move on the board with a 'best' badge as positive
     // feedback, then auto-advance after a beat.
     loadFen(c.fen());
@@ -2639,9 +2724,11 @@ function tryDrillMove(from, to) {
     state.drill.feedback = "correct";
     renderBoard();
     renderDrillUi();
+    spawnDrillCelebration("ok");
     playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
-    setTimeout(nextDrill, 1400);
+    setTimeout(nextDrill, 1500);
   } else {
+    state.drill.attempts += 1;
     state.drill.feedback = "wrong";
     // Don't apply the wrong move — let the user try again.
     state.selectedSquare = null;
@@ -2653,26 +2740,64 @@ function tryDrillMove(from, to) {
       cell.classList.add("drill-flash-bad");
       setTimeout(() => cell.classList.remove("drill-flash-bad"), 700);
     }
+    spawnDrillCelebration("bad");
   }
 }
 
 function nextDrill() {
   if (!state.drill.active) return;
+  // If the user never solved this moment (e.g. "Пропустить")
+  // we still record an outcome so the summary is correct.
+  if (state.drill.outcomes[state.drill.idx] == null) {
+    state.drill.outcomes[state.drill.idx] = state.drill.answerShown
+      ? "given-up"
+      : "given-up";
+    state.drill.streak = 0;
+  }
   if (state.drill.idx + 1 >= state.drill.moments.length) {
-    exitDrill(true);
+    finishDrill();
     return;
   }
   state.drill.idx += 1;
   loadDrillMoment();
 }
 
+function finishDrill() {
+  state.drill.finishedAt = Date.now();
+  state.drill.finished = true;
+  state.drill.feedback = null;
+  state.drill.expectedUci = null;
+  state.drill.expectedSan = null;
+  // Clear any board hint artefacts.
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.reviewBadge = null;
+  renderBoard();
+  renderDrillUi();
+  spawnDrillCelebration("finish");
+}
+
+function restartDrill() {
+  if (!state.drill.sourceMoments || state.drill.sourceMoments.length === 0) {
+    exitDrill(false);
+    return;
+  }
+  startDrill(state.drill.sourceMoments);
+}
+
 function exitDrill(finished) {
-  const wasActive = state.drill.active;
+  const wasActive = state.drill.active || state.drill.finished;
   state.drill.active = false;
+  state.drill.finished = false;
   state.drill.moments = [];
+  state.drill.outcomes = [];
   state.drill.expectedUci = null;
   state.drill.expectedSan = null;
   state.drill.feedback = null;
+  state.drill.streak = 0;
+  state.drill.bestStreak = 0;
+  state.drill.startTime = 0;
+  state.drill.finishedAt = 0;
   renderDrillUi();
   if (!wasActive) return;
   if (finished) {
@@ -2682,35 +2807,156 @@ function exitDrill(finished) {
   if (review.activeIdx >= 0) jumpToReviewIdx(review.activeIdx);
 }
 
+// Drill scoring helper: convert per-moment outcomes into chess.com-
+// style aggregate stats for the running header / summary card.
+function computeDrillStats() {
+  const outcomes = state.drill.outcomes || [];
+  const total = state.drill.moments.length;
+  let solved = 0, retry = 0, hint = 0, given = 0;
+  for (const o of outcomes) {
+    if (o === "solved") solved += 1;
+    else if (o === "solved-retry") retry += 1;
+    else if (o === "solved-hint") hint += 1;
+    else if (o === "given-up") given += 1;
+  }
+  const seen = solved + retry + hint + given;
+  // Weighted score (1 / 0.5 / 0.25 / 0). Used for the percentage badge.
+  const score = solved * 1 + retry * 0.5 + hint * 0.25;
+  const pct = seen ? Math.round((score / seen) * 100) : 0;
+  return { total, solved, retry, hint, given, seen, score, pct };
+}
+
+function _formatMs(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${mm}:${ss.toString().padStart(2, "0")}`;
+}
+
+// Visual celebration overlay that pops a glyph centred on the board.
+// 'ok' = green check, 'bad' = red X, 'finish' = trophy + sparkle.
+function spawnDrillCelebration(kind) {
+  if (!boardEl) return;
+  let glyph, cls;
+  if (kind === "ok")          { glyph = "✔"; cls = "drill-burst-ok"; }
+  else if (kind === "bad")    { glyph = "✖"; cls = "drill-burst-bad"; }
+  else if (kind === "finish") { glyph = "🏆"; cls = "drill-burst-finish"; }
+  else                        { return; }
+  const el = document.createElement("div");
+  el.className = `drill-burst ${cls}`;
+  el.textContent = glyph;
+  boardEl.appendChild(el);
+  // Auto-remove after the CSS animation finishes.
+  setTimeout(() => el.remove(), kind === "finish" ? 1800 : 900);
+}
+
 function renderDrillUi() {
   const host = document.getElementById("drill-panel");
   if (!host) return;
-  if (!state.drill.active) {
+  if (!state.drill.active && !state.drill.finished) {
     host.innerHTML = "";
     host.style.display = "none";
     return;
   }
   host.style.display = "block";
+
+  // Summary card after the last moment.
+  if (state.drill.finished) {
+    host.classList.add("is-finished");
+    const s = computeDrillStats();
+    const elapsed = state.drill.finishedAt - state.drill.startTime;
+    const accent = s.pct >= 80 ? "great" : s.pct >= 50 ? "good" : "tough";
+    host.innerHTML = `
+      <div class="drill-summary drill-summary-${accent}">
+        <div class="drill-summary-head">
+          <span class="drill-summary-trophy">🏆</span>
+          <div class="drill-summary-title">Тренировка завершена</div>
+          <div class="drill-summary-pct">${s.pct}%</div>
+        </div>
+        <div class="drill-summary-grid">
+          <div class="ds-cell"><div class="ds-label">Решено</div><div class="ds-val">${s.solved + s.retry + s.hint} / ${s.total}</div></div>
+          <div class="ds-cell"><div class="ds-label">Сразу</div><div class="ds-val ds-good">${s.solved}</div></div>
+          <div class="ds-cell"><div class="ds-label">С повтором</div><div class="ds-val ds-warn">${s.retry}</div></div>
+          <div class="ds-cell"><div class="ds-label">С подсказкой</div><div class="ds-val ds-warn">${s.hint}</div></div>
+          <div class="ds-cell"><div class="ds-label">Пропущено</div><div class="ds-val ds-bad">${s.given}</div></div>
+          <div class="ds-cell"><div class="ds-label">Лучшая серия</div><div class="ds-val">🔥 ${s.solved ? state.drill.bestStreak : 0}</div></div>
+          <div class="ds-cell"><div class="ds-label">Время</div><div class="ds-val">${_formatMs(elapsed)}</div></div>
+        </div>
+        <div class="drill-summary-actions">
+          <button id="drill-restart" type="button" class="drill-primary">🔁 Заново</button>
+          <button id="drill-exit" type="button" class="drill-secondary">✕ Закрыть</button>
+        </div>
+      </div>
+    `;
+    const restartBtn = document.getElementById("drill-restart");
+    if (restartBtn) restartBtn.onclick = restartDrill;
+    const exitBtn = document.getElementById("drill-exit");
+    if (exitBtn) exitBtn.onclick = () => exitDrill(true);
+    return;
+  }
+
+  host.classList.remove("is-finished");
   const total = state.drill.moments.length;
   const cur = state.drill.idx + 1;
+  const km = state.drill.moments[state.drill.idx];
+  const cls = km ? km.classification : "";
+  const themeLabel = REVIEW_LABELS[cls] || "Критический момент";
+  const themeIcon = REVIEW_ICONS[cls] || "⚠";
   const sideLabel = state.drill.side === "w" ? "Белые" : "Чёрные";
+  const stats = computeDrillStats();
+  const progressPct = Math.round(((cur - 1) / Math.max(1, total)) * 100);
+  const streak = state.drill.streak;
+  const streakBadge = streak >= 3
+    ? `<span class="drill-streak">🔥 ${streak}</span>`
+    : `<span class="drill-streak drill-streak-empty">•</span>`;
+
   let feedback = "";
   if (state.drill.feedback === "correct") {
-    feedback = `<div class="drill-msg drill-ok">✓ Верно! Лучший ход — <b>${escapeHtml(state.drill.expectedSan)}</b></div>`;
+    const bonus = streak >= 5 ? " · Огонь! Серия ×" + streak
+                 : streak >= 3 ? " · Серия ×" + streak
+                 : "";
+    feedback = `<div class="drill-msg drill-ok">✓ Верно! Лучший ход — <b>${escapeHtml(state.drill.expectedSan)}</b>${bonus}</div>`;
   } else if (state.drill.feedback === "wrong") {
-    feedback = `<div class="drill-msg drill-bad">✕ Не лучший ход. Попробуй ещё раз или нажми «Подсказка».</div>`;
+    const tip = state.drill.attempts >= 2
+      ? "Нажми <b>Подсказку</b>, чтобы увидеть фигуру."
+      : "Попробуй ещё раз.";
+    feedback = `<div class="drill-msg drill-bad">✕ Не лучший ход. ${tip}</div>`;
+  } else if (state.drill.answerShown) {
+    feedback = `<div class="drill-msg drill-info">Показан ответ — <b>${escapeHtml(state.drill.expectedSan)}</b>. Повтори ход на доске или нажми <b>Дальше</b>.</div>`;
+  } else if (state.drill.hintUsed) {
+    feedback = `<div class="drill-msg drill-info">Подсказка: исходная клетка подсвечена.</div>`;
   }
+
+  // Right-hand action: "Skip" before user solves, "Next" after answer
+  // is shown so user can move on without playing it.
+  const advanceBtn = state.drill.answerShown
+    ? `<button id="drill-next" type="button" class="drill-primary">→ Дальше</button>`
+    : `<button id="drill-skip" type="button" class="drill-secondary">⤳ Пропустить</button>`;
+
   host.innerHTML = `
     <div class="drill-head">
-      <span class="drill-title">🎯 Тренировка ключевых моментов · ${cur} / ${total}</span>
+      <div class="drill-head-left">
+        <span class="drill-title">🎯 Тренировка · ${cur} / ${total}</span>
+        <span class="drill-stats">
+          <span class="ds-good" title="Решено с первого раза">✓ ${stats.solved}</span>
+          <span class="ds-warn" title="С повтором или подсказкой">○ ${stats.retry + stats.hint}</span>
+          <span class="ds-bad" title="Пропущено">✕ ${stats.given}</span>
+          ${streakBadge}
+        </span>
+      </div>
       <button id="drill-exit" type="button" class="drill-secondary">✕ Выйти</button>
     </div>
-    <div class="drill-prompt">Ход за <b>${sideLabel}</b>. Найди лучший ход.</div>
+    <div class="drill-progress">
+      <div class="drill-progress-fill" style="width: ${progressPct}%"></div>
+    </div>
+    <div class="drill-prompt">
+      Ход за <b>${sideLabel}</b>. Найди лучший ход.
+    </div>
     ${feedback}
     <div class="drill-actions">
-      <button id="drill-hint" type="button" class="drill-secondary">💡 Подсказка</button>
-      <button id="drill-show" type="button" class="drill-secondary">👁 Показать ответ</button>
-      <button id="drill-skip" type="button" class="drill-secondary">⤳ Пропустить</button>
+      <button id="drill-hint" type="button" class="drill-secondary" ${state.drill.answerShown ? "disabled" : ""}>💡 Подсказка</button>
+      <button id="drill-show" type="button" class="drill-secondary" ${state.drill.answerShown ? "disabled" : ""}>👁 Показать ответ</button>
+      ${advanceBtn}
     </div>
   `;
   const exitBtn = document.getElementById("drill-exit");
@@ -2719,21 +2965,624 @@ function renderDrillUi() {
   if (hintBtn) hintBtn.onclick = () => {
     const u = state.drill.expectedUci;
     if (u && u.length >= 4) {
+      state.drill.hintUsed = true;
       // Highlight the source square only (small hint, not the full arrow).
       state.bestArrow = { from: u.slice(0, 2), to: u.slice(0, 2) };
       renderBoard();
+      renderDrillUi();
     }
   };
   const showBtn = document.getElementById("drill-show");
   if (showBtn) showBtn.onclick = () => {
     const u = state.drill.expectedUci;
     if (u && u.length >= 4) {
+      state.drill.answerShown = true;
+      state.drill.feedback = null;
       state.bestArrow = { from: u.slice(0, 2), to: u.slice(2, 4) };
       renderBoard();
+      renderDrillUi();
     }
   };
   const skipBtn = document.getElementById("drill-skip");
   if (skipBtn) skipBtn.onclick = nextDrill;
+  const nextBtn = document.getElementById("drill-next");
+  if (nextBtn) nextBtn.onclick = nextDrill;
+}
+
+// ---------- Puzzle mode (chess.com-style tactics trainer) ----------
+
+// Number of recently-served puzzle ids to remember when asking the
+// backend for the next random puzzle (so the same puzzle doesn't
+// come up twice in a row).
+const PUZZLE_RECENT_HISTORY = 25;
+
+// Persistent counters survive a full reload — the user keeps their
+// rating + streak across sessions.
+function _loadPuzzleSession() {
+  try {
+    const raw = localStorage.getItem("cs.puzzle.session");
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data && typeof data === "object") {
+      if (typeof data.sessionRating === "number") {
+        state.puzzle.sessionRating = data.sessionRating;
+      }
+      if (data.sessionStats && typeof data.sessionStats === "object") {
+        state.puzzle.sessionStats = {
+          ...state.puzzle.sessionStats,
+          ...data.sessionStats,
+        };
+      }
+      if (Array.isArray(data.history)) {
+        state.puzzle.history = data.history.slice(-30);
+      }
+    }
+  } catch (_) { /* ignore */ }
+}
+function _savePuzzleSession() {
+  try {
+    localStorage.setItem("cs.puzzle.session", JSON.stringify({
+      sessionRating: state.puzzle.sessionRating,
+      sessionStats: state.puzzle.sessionStats,
+      history: state.puzzle.history.slice(-30),
+    }));
+  } catch (_) { /* ignore */ }
+}
+
+function enterPuzzleView() {
+  // Snapshot board orientation so we can restore it on the way out.
+  if (state.puzzle.flippedSnapshot === null) {
+    state.puzzle.flippedSnapshot = state.flipped;
+  }
+  // Puzzle mode requires legal-move dispatch — force legal mode on so
+  // drag/click attempts are routed through `tryFreeplayMove`.
+  if (!state.legalMode) setBoardMode(true);
+  _loadPuzzleSession();
+  // Auto-load a puzzle when entering an empty view.
+  if (!state.puzzle.current) {
+    loadNextPuzzle();
+  } else {
+    // Replay the current puzzle's start position (in case the user
+    // bounced between tabs).
+    _restorePuzzleBoard();
+    renderPuzzleUi();
+    if (state.puzzle.active) _startPuzzleTimer();
+  }
+}
+
+function leavePuzzleView() {
+  // Stop accepting board input as a puzzle attempt.
+  state.puzzle.active = false;
+  _stopPuzzleTimer();
+  if (state.puzzle.pendingNext) {
+    clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = null;
+  }
+  // Restore orientation only if we were the one that flipped it.
+  if (state.puzzle.flippedSnapshot !== null
+      && state.flipped !== state.puzzle.flippedSnapshot) {
+    state.flipped = state.puzzle.flippedSnapshot;
+  }
+  state.puzzle.flippedSnapshot = null;
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.reviewBadge = null;
+  state.lastMove = null;
+  // Reset board to a neutral starting position so Main / Analysis
+  // views aren't littered with a half-finished puzzle.
+  try { loadFen(STARTPOS_FEN); } catch (_) { /* ignore */ }
+  renderBoard();
+}
+
+// Build a rating window around the user's current rating so the next
+// puzzle's difficulty scales with skill — chess.com-style. Window
+// starts tight (±100) and expands if the bank has nothing close by.
+function _puzzleRatingWindow() {
+  const r = state.puzzle.sessionRating;
+  // Wider lower bound for very high ratings (small puzzle pool above 2200).
+  if (r >= 2000) return [r - 250, r + 350];
+  if (r >= 1500) return [r - 150, r + 250];
+  if (r >= 900)  return [r - 200, r + 200];
+  return [Math.max(400, r - 200), r + 250];
+}
+
+async function loadNextPuzzle() {
+  const card = document.getElementById("puzzle-card");
+  const actions = document.getElementById("puzzle-actions");
+  if (card)    card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
+  if (actions) actions.innerHTML = "";
+  renderPuzzleStatsBar();
+  renderPuzzleHistory();
+  // Auto-scale difficulty by user rating (chess.com-style — no manual filter).
+  const [minR, maxR] = _puzzleRatingWindow();
+  const params = new URLSearchParams();
+  params.set("min_rating", String(minR));
+  params.set("max_rating", String(maxR));
+  if (state.puzzle.recentIds.length) {
+    params.set("exclude", state.puzzle.recentIds.join(","));
+  }
+  let p;
+  try {
+    p = await api(`/api/puzzle/random?${params.toString()}`);
+  } catch (err) {
+    if (card) card.innerHTML =
+      `<div class="puzzle-empty">Не удалось загрузить задачу: ${escapeHtml(String(err && err.message || err))}</div>`;
+    return;
+  }
+  startPuzzle(p);
+}
+
+function startPuzzle(puzzle) {
+  if (!puzzle || !puzzle.fen || !Array.isArray(puzzle.moves) || puzzle.moves.length < 2) {
+    const card = document.getElementById("puzzle-card");
+    if (card) card.innerHTML = `<div class="puzzle-empty">Задача повреждена.</div>`;
+    return;
+  }
+  // Cancel any pending auto-next from the previous puzzle.
+  if (state.puzzle.pendingNext) {
+    clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = null;
+  }
+  _stopPuzzleTimer();
+  state.puzzle.current = puzzle;
+  state.puzzle.moves = puzzle.moves.slice();
+  state.puzzle.fenStart = puzzle.fen;
+  state.puzzle.side = puzzle.side_to_solve || "w";
+  state.puzzle.feedback = null;
+  state.puzzle.attempts = 0;
+  state.puzzle.hintUsed = false;
+  state.puzzle.active = true;
+  state.puzzle.startedAt = 0;
+  state.puzzle.solveMs = 0;
+  // Anti-dup history.
+  state.puzzle.recentIds.unshift(puzzle.id);
+  if (state.puzzle.recentIds.length > PUZZLE_RECENT_HISTORY) {
+    state.puzzle.recentIds.length = PUZZLE_RECENT_HISTORY;
+  }
+  // Restore the board to FEN-before-setup, then animate the setup move
+  // so the user sees the threat that triggered the puzzle.
+  try { loadFen(puzzle.fen); } catch (e) {
+    const card = document.getElementById("puzzle-card");
+    if (card) card.innerHTML = `<div class="puzzle-empty">Bad FEN: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  // Auto-flip board so the solver always faces their own pieces from
+  // the bottom (chess.com convention).
+  const wantFlipped = state.puzzle.side === "b";
+  if (state.flipped !== wantFlipped) {
+    state.flipped = wantFlipped;
+  }
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.reviewBadge = null;
+  state.lastMove = null;
+  renderBoard();
+  renderPuzzleUi();
+  // After a brief beat, animate the opponent's setup move (shorter
+  // delay = snappier feel, fewer perceived "lag" complaints).
+  state.puzzle.nextIdx = 0;
+  setTimeout(() => _playPuzzleSetupMove(), 220);
+}
+
+function _restorePuzzleBoard() {
+  // Idempotent re-render of the current puzzle's *initial* position
+  // (after the setup move has been applied). Used when the user
+  // navigates away and back to the puzzle tab.
+  if (!state.puzzle.current) return;
+  try { loadFen(state.puzzle.fenStart); } catch (_) { return; }
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  // Apply the setup move (and any solver moves already made before
+  // bouncing tabs). For simplicity we just re-apply moves[0..nextIdx-1].
+  for (let i = 0; i < state.puzzle.nextIdx; i++) {
+    const u = state.puzzle.moves[i];
+    if (!u || u.length < 4) break;
+    try {
+      c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" });
+    } catch { break; }
+  }
+  loadFen(c.fen());
+  renderBoard();
+}
+
+function _playPuzzleSetupMove() {
+  if (!state.puzzle.active || !state.puzzle.current) return;
+  const u = state.puzzle.moves[0];
+  if (!u || u.length < 4) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  let move;
+  try {
+    move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" });
+  } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.puzzle.nextIdx = 1;
+  // Solver clock starts now (after setup move is on the board).
+  state.puzzle.startedAt = Date.now();
+  _startPuzzleTimer();
+  renderPuzzleUi();
+}
+
+// Live timer pulse — repaints just the timer chip every 500ms so the
+// user sees their solve speed without re-rendering the full UI.
+function _startPuzzleTimer() {
+  _stopPuzzleTimer();
+  state.puzzle.timerHandle = setInterval(_paintPuzzleTimer, 500);
+  _paintPuzzleTimer();
+}
+function _stopPuzzleTimer() {
+  if (state.puzzle.timerHandle) {
+    clearInterval(state.puzzle.timerHandle);
+    state.puzzle.timerHandle = null;
+  }
+}
+function _paintPuzzleTimer() {
+  const el = document.getElementById("puzzle-timer-val");
+  if (!el) return;
+  const ms = state.puzzle.startedAt
+    ? (state.puzzle.solveMs || (Date.now() - state.puzzle.startedAt))
+    : 0;
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  el.textContent = `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function tryPuzzleMove(from, to) {
+  if (!state.puzzle.active) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  const moveTo = freeplayCastlingTarget(c, from, to) || to;
+  let move;
+  try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
+  if (!move) {
+    setStatus("Нелегальный ход.", "error");
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  const playedUci =
+    move.from + move.to + (move.promotion ? move.promotion : "");
+  const expected = state.puzzle.moves[state.puzzle.nextIdx] || "";
+  const sameMove =
+    playedUci === expected
+    || (expected.length >= 4
+        && playedUci.slice(0, 4) === expected.slice(0, 4)
+        && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
+  if (!sameMove) {
+    // chess.com one-strike rule: first wrong move = puzzle is done,
+    // user loses Δ rating, auto-advance to next puzzle. No retries.
+    try { c.undo(); } catch (_) { /* ignore */ }
+    state.puzzle.attempts = 1;
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    const cell = boardEl && boardEl.querySelector(`.square[data-square="${move.to}"]`);
+    if (cell) {
+      cell.classList.add("puzzle-flash-bad");
+      setTimeout(() => cell.classList.remove("puzzle-flash-bad"), 700);
+    }
+    finalizePuzzle("failed");
+    // Auto-advance after a short beat so the user sees the red flash
+    // and the rating delta before the next puzzle loads.
+    if (state.puzzle.pendingNext) clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = setTimeout(() => {
+      state.puzzle.pendingNext = null;
+      loadNextPuzzle();
+    }, 1300);
+    return;
+  }
+  // Correct! Apply the user's move visually.
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  state.reviewBadge = { square: move.to, classification: "best" };
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.puzzle.feedback = "correct";
+  state.puzzle.nextIdx += 1;
+  renderBoard();
+  renderPuzzleUi();
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
+  const okCell = boardEl && boardEl.querySelector(`.square[data-square="${move.to}"]`);
+  if (okCell) {
+    okCell.classList.add("puzzle-flash-ok");
+    setTimeout(() => okCell.classList.remove("puzzle-flash-ok"), 500);
+  }
+  // Check if puzzle is fully solved.
+  if (state.puzzle.nextIdx >= state.puzzle.moves.length) {
+    finalizePuzzle("solved");
+    return;
+  }
+  // Otherwise play the forced opponent reply quickly so the next
+  // solver move is unblocked without a perceptible wait.
+  setTimeout(() => _playPuzzleOpponentReply(), 220);
+}
+
+function _playPuzzleOpponentReply() {
+  if (!state.puzzle.active) return;
+  const u = state.puzzle.moves[state.puzzle.nextIdx];
+  if (!u || u.length < 4) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  let move;
+  try {
+    move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" });
+  } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  state.reviewBadge = null;
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.puzzle.nextIdx += 1;
+  // Clear the per-move "correct" feedback once the opponent has moved.
+  state.puzzle.feedback = null;
+  renderPuzzleUi();
+  if (state.puzzle.nextIdx >= state.puzzle.moves.length) {
+    finalizePuzzle("solved");
+  }
+}
+
+// chess.com-style rating delta — pure skill, with a speed bonus
+// applied only to clean (no-hint) solves so faster solves of the same
+// puzzle yield more rating than slow ones.
+//
+//   • didSolve === true  → Δ = +K * (1 - expected) * speedFactor
+//   • didSolve === false → Δ = -K * expected
+//   • outcome === "hint" → Δ = 0  (handled by caller passing didSolve=null)
+//
+// expected = standard Elo expectation that a player at userRating beats
+// a puzzle of puzzleRating. K-factor scales with rating bracket.
+function _ratingDelta(userRating, puzzleRating, didSolve, solveMs) {
+  if (didSolve === null) return 0; // hint-assisted solve = no Δ
+  const expected = 1 / (1 + Math.pow(10, (puzzleRating - userRating) / 400));
+  // K shrinks as the user climbs (chess.com-style: harder to gain 1 pt at 2000+).
+  let k;
+  if      (userRating >= 2200) k = 14;
+  else if (userRating >= 1700) k = 18;
+  else if (userRating >= 1200) k = 22;
+  else                         k = 26;
+  if (didSolve) {
+    // Speed factor: 1.0 baseline, up to +50% if solved in under 8s,
+    // down to 0.6 if it took the user 90s+. Curve is monotone.
+    const sec = Math.max(0, (solveMs || 0) / 1000);
+    let speed;
+    if      (sec <= 8)  speed = 1.5;
+    else if (sec <= 15) speed = 1.3;
+    else if (sec <= 30) speed = 1.1;
+    else if (sec <= 60) speed = 1.0;
+    else if (sec <= 90) speed = 0.85;
+    else                speed = 0.7;
+    const raw = k * (1 - expected) * speed;
+    // Floor at +1 so a clean solve always nudges rating upward.
+    return Math.max(1, Math.round(raw));
+  }
+  // Loss: cap at -1 so a single error always costs at least 1 pt.
+  const raw = -k * expected;
+  return Math.min(-1, Math.round(raw));
+}
+
+function finalizePuzzle(result) {
+  if (!state.puzzle.active && result !== "skipped") return;
+  state.puzzle.active = false;
+  _stopPuzzleTimer();
+  // Snapshot solve time before zeroing startedAt.
+  state.puzzle.solveMs = state.puzzle.startedAt
+    ? (Date.now() - state.puzzle.startedAt) : 0;
+  let outcome;          // 'solved' | 'solved-hint' | 'failed' | 'skipped'
+  let didSolve = false; // for rating math (true=win, false=loss, null=neutral)
+  if (result === "solved") {
+    if (state.puzzle.hintUsed)         outcome = "solved-hint";
+    else                               outcome = "solved";
+    didSolve = (outcome === "solved-hint") ? null : true;
+  } else if (result === "skipped") {
+    outcome = "skipped";
+    didSolve = false;
+  } else {
+    outcome = "failed";
+    didSolve = false;
+  }
+  state.puzzle.feedback =
+    (outcome === "solved" || outcome === "solved-hint") ? "solved" : "shown";
+  // Update session counters.
+  const ss = state.puzzle.sessionStats;
+  if (outcome === "solved" || outcome === "solved-hint") {
+    ss.solved += 1;
+    ss.streak += 1;
+    if (ss.streak > ss.bestStreak) ss.bestStreak = ss.streak;
+  } else if (outcome === "failed") {
+    ss.wrong += 1;
+    ss.streak = 0;
+  } else {
+    ss.skipped += 1;
+    ss.streak = 0;
+  }
+  // Rating change.
+  const pr = state.puzzle.current ? state.puzzle.current.rating : 1500;
+  const delta = _ratingDelta(
+    state.puzzle.sessionRating, pr, didSolve, state.puzzle.solveMs,
+  );
+  state.puzzle.sessionRating = Math.max(
+    400, Math.min(3000, state.puzzle.sessionRating + delta)
+  );
+  state.puzzle.history.unshift({
+    id: state.puzzle.current ? state.puzzle.current.id : "?",
+    outcome,
+    rating: pr,
+    delta,
+    solveMs: state.puzzle.solveMs,
+  });
+  if (state.puzzle.history.length > 30) state.puzzle.history.length = 30;
+  _savePuzzleSession();
+  spawnPuzzleCelebration(outcome === "failed" || outcome === "skipped" ? "bad" : "ok");
+  renderPuzzleUi();
+  renderPuzzleStatsBar();
+  renderPuzzleHistory();
+}
+
+function spawnPuzzleCelebration(kind) {
+  if (!boardEl) return;
+  let glyph, cls;
+  if (kind === "ok")  { glyph = "✔"; cls = "drill-burst-ok"; }
+  else                { glyph = "✖"; cls = "drill-burst-bad"; }
+  const el = document.createElement("div");
+  el.className = `drill-burst ${cls}`;
+  el.textContent = glyph;
+  boardEl.appendChild(el);
+  setTimeout(() => el.remove(), 900);
+}
+
+function renderPuzzleStatsBar() {
+  const host = document.getElementById("puzzle-stats-bar");
+  if (!host) return;
+  const ss = state.puzzle.sessionStats;
+  const last = state.puzzle.history[0];
+  let pillCls = "";
+  let pillDelta = "";
+  if (last && typeof last.delta === "number" && last.delta !== 0) {
+    pillCls = last.delta > 0 ? "is-up" : "is-down";
+    pillDelta = (last.delta > 0 ? "▲ +" : "▼ ") + last.delta;
+  }
+  // Live timer for active puzzle, frozen solveMs for finished.
+  const ms = state.puzzle.startedAt
+    ? (state.puzzle.solveMs || (Date.now() - state.puzzle.startedAt))
+    : 0;
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const tm = Math.floor(sec / 60);
+  const ts = sec % 60;
+  const timer = `${tm}:${String(ts).padStart(2, "0")}`;
+  host.innerHTML = `
+    <div class="ps-block"><span class="ps-label">Решено</span><span class="ps-val ok">${ss.solved}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block"><span class="ps-label">Ошиб.</span><span class="ps-val bad">${ss.wrong}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block"><span class="ps-label">Пропуск</span><span class="ps-val">${ss.skipped}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block"><span class="ps-label">Серия</span><span class="ps-val ${ss.streak >= 3 ? "ok" : ""}">🔥 ${ss.streak}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block ps-timer"><span class="ps-label">⏱</span><span class="ps-val" id="puzzle-timer-val">${timer}</span></div>
+    <div class="ps-rating-pill ${pillCls}">
+      <span class="ps-rating-label">Рейтинг</span>
+      <span>${state.puzzle.sessionRating}</span>
+      ${pillDelta ? `<span class="ps-rating-delta">${pillDelta}</span>` : ""}
+    </div>
+  `;
+}
+
+function renderPuzzleHistory() {
+  const host = document.getElementById("puzzle-history");
+  if (!host) return;
+  const items = state.puzzle.history.slice(0, 12);
+  if (!items.length) { host.innerHTML = ""; return; }
+  host.innerHTML = items.map((h) => {
+    let cls = "h-skip", glyph = "—";
+    if (h.outcome === "solved")          { cls = "h-ok";  glyph = "✓"; }
+    else if (h.outcome === "solved-hint"){ cls = "h-ok";  glyph = "✓?"; }
+    else if (h.outcome === "failed")     { cls = "h-bad"; glyph = "✕"; }
+    return `<span class="puzzle-history-pill ${cls}" title="#${escapeHtml(h.id)} · ${h.rating}">${glyph} ${h.rating}</span>`;
+  }).join("");
+}
+
+function renderPuzzleUi() {
+  const card = document.getElementById("puzzle-card");
+  const actions = document.getElementById("puzzle-actions");
+  renderPuzzleStatsBar();
+  renderPuzzleHistory();
+  if (!card || !actions) return;
+  const p = state.puzzle.current;
+  if (!p) {
+    card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
+    actions.innerHTML = "";
+    return;
+  }
+  const sideCls = state.puzzle.side === "w" ? "side-w" : "side-b";
+  const sideLetter = state.puzzle.side === "w" ? "♔" : "♚";
+  const sideLabel = state.puzzle.side === "w" ? "белые" : "чёрные";
+  // Feedback box. We deliberately stay minimal — chess.com doesn't
+  // expose theme/progress/move-count hints, neither do we. After
+  // finalization the card shows the puzzle's rating and Δ once.
+  let feedback = "";
+  if (state.puzzle.feedback === "solved") {
+    const last = state.puzzle.history[0];
+    const dt = last && last.solveMs
+      ? `${(last.solveMs / 1000).toFixed(1)}s` : "";
+    if (state.puzzle.hintUsed) {
+      feedback = `<div class="puzzle-feedback fb-info">✓ Решено с подсказкой${dt ? ` · ${dt}` : ""}. Δ 0.</div>`;
+    } else {
+      feedback = `<div class="puzzle-feedback fb-solved">🏆 Решено${dt ? ` за ${dt}` : ""}. ${_lastDeltaText()}</div>`;
+    }
+  } else if (state.puzzle.feedback === "shown") {
+    feedback = `<div class="puzzle-feedback fb-bad">✕ Задача не решена. ${_lastDeltaText()}</div>`;
+  } else if (state.puzzle.hintUsed) {
+    feedback = `<div class="puzzle-feedback fb-info">Подсказка: исходная клетка подсвечена.</div>`;
+  } else {
+    feedback = `<div class="puzzle-feedback fb-info">${sideLetter} Ход за <b>${sideLabel}</b>. Найди лучший ход.</div>`;
+  }
+  card.innerHTML = `
+    <div class="puzzle-side-banner">
+      <span class="puzzle-side-icon ${sideCls}">${sideLetter}</span>
+      <span>Ход за <b>${sideLabel}</b>.</span>
+    </div>
+    ${feedback}
+  `;
+  // Action buttons depend on whether we're solving or finished.
+  const finished = !state.puzzle.active;
+  if (finished) {
+    actions.innerHTML = `
+      <button id="btn-puzzle-next" type="button" class="puzzle-primary">→ Следующая</button>
+    `;
+  } else {
+    actions.innerHTML = `
+      <button id="btn-puzzle-hint" type="button" class="puzzle-secondary" ${state.puzzle.hintUsed ? "disabled" : ""}>💡 Подсказка</button>
+      <button id="btn-puzzle-skip" type="button" class="puzzle-secondary">⤳ Пропустить</button>
+    `;
+  }
+  // Wire up actions.
+  const hintBtn  = document.getElementById("btn-puzzle-hint");
+  const skipBtn  = document.getElementById("btn-puzzle-skip");
+  const nextBtn  = document.getElementById("btn-puzzle-next");
+  if (hintBtn) hintBtn.onclick = () => {
+    const u = state.puzzle.moves[state.puzzle.nextIdx];
+    if (u && u.length >= 4) {
+      state.puzzle.hintUsed = true;
+      state.bestArrow = { from: u.slice(0, 2), to: u.slice(0, 2) };
+      renderBoard();
+      renderPuzzleUi();
+    }
+  };
+  if (skipBtn) skipBtn.onclick = () => {
+    finalizePuzzle("skipped");
+    if (state.puzzle.pendingNext) clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = setTimeout(() => {
+      state.puzzle.pendingNext = null;
+      loadNextPuzzle();
+    }, 1100);
+  };
+  if (nextBtn) nextBtn.onclick = () => {
+    if (state.puzzle.pendingNext) {
+      clearTimeout(state.puzzle.pendingNext);
+      state.puzzle.pendingNext = null;
+    }
+    loadNextPuzzle();
+  };
+}
+
+function _lastDelta() {
+  const h = state.puzzle.history[0];
+  return h && typeof h.delta === "number"
+    ? (h.delta > 0 ? "+" + h.delta : String(h.delta))
+    : "0";
+}
+function _lastDeltaText() {
+  const h = state.puzzle.history[0];
+  if (!h || typeof h.delta !== "number") return "";
+  if (h.delta > 0) return `Рейтинг +${h.delta}.`;
+  if (h.delta < 0) return `Рейтинг ${h.delta}.`;
+  return "";
 }
 
 async function renderOpeningExplorer(fen) {
@@ -3100,8 +3949,14 @@ function renderBoardHint() {
     && m.move_uci !== m.best_move_uci
   ) {
     const lineLen = _clampBestLine(userSettings.bestLineLength);
+    // PV[0] is played by the side whose move is being analysed (m.side);
+    // PV[i] alternates from there. Colour each SAN by which side plays it
+    // so the user can tell white/black moves apart at a glance.
     const sansHtml = m.best_pv_san.slice(0, lineLen)
-      .map((s) => `<span class="pv-san">${escapeHtml(s)}</span>`).join("");
+      .map((s, i) => {
+        const sideOfPly = (i % 2 === 0) ? m.side : (m.side === "w" ? "b" : "w");
+        return `<span class="pv-san pv-san-${sideOfPly}">${escapeHtml(s)}</span>`;
+      }).join("");
     pvLine = `<div class="pv-line"><span class="pv-label">Лучшая линия:</span>${sansHtml}</div>`;
   }
   host.innerHTML = main + coachLine + pvLine;
