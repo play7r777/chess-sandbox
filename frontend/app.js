@@ -298,17 +298,18 @@ const state = {
     fenStart: null,           // FEN at puzzle start (before setup move)
     flippedSnapshot: null,    // board.flipped snapshot to restore on exit
     feedback: null,           // 'correct' | 'wrong' | 'solved' | 'shown' | null
-    attempts: 0,              // wrong attempts on current ply
+    attempts: 0,              // wrong attempts on current ply (always 0 or 1 now)
     hintUsed: false,          // hint used on current puzzle?
-    answerShown: false,       // user pressed "Show solution"?
-    difficulty: "any",        // active filter
     recentIds: [],            // last N served puzzle ids (anti-dup)
-    history: [],              // [{ id, outcome, rating, themes }]
+    history: [],              // [{ id, outcome, rating, themes, solveMs }]
     sessionRating: 1200,      // rolling personal rating (Glicko-lite)
     sessionStats: {           // counters for the stats bar
-      solved: 0, withHint: 0, wrong: 0, skipped: 0,
-      streak: 0, bestStreak: 0,
+      solved: 0, wrong: 0, skipped: 0, streak: 0, bestStreak: 0,
     },
+    startedAt: 0,             // ms when solver-state began (after setup move)
+    solveMs: 0,               // ms to solve last puzzle (for display)
+    pendingNext: null,        // setTimeout handle for auto-next after fail
+    timerHandle: null,        // setInterval handle for live timer display
   },
 };
 
@@ -2949,7 +2950,6 @@ function renderDrillUi() {
       <div class="drill-progress-fill" style="width: ${progressPct}%"></div>
     </div>
     <div class="drill-prompt">
-      <span class="drill-theme cls-${cls}" title="Тип исходной ошибки">${themeIcon} ${themeLabel}</span>
       Ход за <b>${sideLabel}</b>. Найди лучший ход.
     </div>
     ${feedback}
@@ -3016,9 +3016,6 @@ function _loadPuzzleSession() {
       if (Array.isArray(data.history)) {
         state.puzzle.history = data.history.slice(-30);
       }
-      if (typeof data.difficulty === "string") {
-        state.puzzle.difficulty = data.difficulty;
-      }
     }
   } catch (_) { /* ignore */ }
 }
@@ -3028,7 +3025,6 @@ function _savePuzzleSession() {
       sessionRating: state.puzzle.sessionRating,
       sessionStats: state.puzzle.sessionStats,
       history: state.puzzle.history.slice(-30),
-      difficulty: state.puzzle.difficulty,
     }));
   } catch (_) { /* ignore */ }
 }
@@ -3042,25 +3038,6 @@ function enterPuzzleView() {
   // drag/click attempts are routed through `tryFreeplayMove`.
   if (!state.legalMode) setBoardMode(true);
   _loadPuzzleSession();
-  // Wire up the static controls (idempotent — safe to call repeatedly).
-  document.querySelectorAll(".puzzle-diff-btn").forEach((btn) => {
-    btn.onclick = () => {
-      const d = btn.dataset.difficulty || "any";
-      state.puzzle.difficulty = d;
-      document.querySelectorAll(".puzzle-diff-btn").forEach((b) => {
-        b.classList.toggle("is-active", b.dataset.difficulty === d);
-      });
-      _savePuzzleSession();
-      // Re-roll a puzzle that matches the new difficulty.
-      loadNextPuzzle();
-    };
-    btn.classList.toggle(
-      "is-active",
-      btn.dataset.difficulty === state.puzzle.difficulty
-    );
-  });
-  const newBtn = document.getElementById("btn-puzzle-new");
-  if (newBtn) newBtn.onclick = () => loadNextPuzzle();
   // Auto-load a puzzle when entering an empty view.
   if (!state.puzzle.current) {
     loadNextPuzzle();
@@ -3069,12 +3046,18 @@ function enterPuzzleView() {
     // bounced between tabs).
     _restorePuzzleBoard();
     renderPuzzleUi();
+    if (state.puzzle.active) _startPuzzleTimer();
   }
 }
 
 function leavePuzzleView() {
   // Stop accepting board input as a puzzle attempt.
   state.puzzle.active = false;
+  _stopPuzzleTimer();
+  if (state.puzzle.pendingNext) {
+    clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = null;
+  }
   // Restore orientation only if we were the one that flipped it.
   if (state.puzzle.flippedSnapshot !== null
       && state.flipped !== state.puzzle.flippedSnapshot) {
@@ -3091,6 +3074,18 @@ function leavePuzzleView() {
   renderBoard();
 }
 
+// Build a rating window around the user's current rating so the next
+// puzzle's difficulty scales with skill — chess.com-style. Window
+// starts tight (±100) and expands if the bank has nothing close by.
+function _puzzleRatingWindow() {
+  const r = state.puzzle.sessionRating;
+  // Wider lower bound for very high ratings (small puzzle pool above 2200).
+  if (r >= 2000) return [r - 250, r + 350];
+  if (r >= 1500) return [r - 150, r + 250];
+  if (r >= 900)  return [r - 200, r + 200];
+  return [Math.max(400, r - 200), r + 250];
+}
+
 async function loadNextPuzzle() {
   const card = document.getElementById("puzzle-card");
   const actions = document.getElementById("puzzle-actions");
@@ -3098,10 +3093,11 @@ async function loadNextPuzzle() {
   if (actions) actions.innerHTML = "";
   renderPuzzleStatsBar();
   renderPuzzleHistory();
+  // Auto-scale difficulty by user rating (chess.com-style — no manual filter).
+  const [minR, maxR] = _puzzleRatingWindow();
   const params = new URLSearchParams();
-  if (state.puzzle.difficulty && state.puzzle.difficulty !== "any") {
-    params.set("difficulty", state.puzzle.difficulty);
-  }
+  params.set("min_rating", String(minR));
+  params.set("max_rating", String(maxR));
   if (state.puzzle.recentIds.length) {
     params.set("exclude", state.puzzle.recentIds.join(","));
   }
@@ -3122,6 +3118,12 @@ function startPuzzle(puzzle) {
     if (card) card.innerHTML = `<div class="puzzle-empty">Задача повреждена.</div>`;
     return;
   }
+  // Cancel any pending auto-next from the previous puzzle.
+  if (state.puzzle.pendingNext) {
+    clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = null;
+  }
+  _stopPuzzleTimer();
   state.puzzle.current = puzzle;
   state.puzzle.moves = puzzle.moves.slice();
   state.puzzle.fenStart = puzzle.fen;
@@ -3129,8 +3131,9 @@ function startPuzzle(puzzle) {
   state.puzzle.feedback = null;
   state.puzzle.attempts = 0;
   state.puzzle.hintUsed = false;
-  state.puzzle.answerShown = false;
   state.puzzle.active = true;
+  state.puzzle.startedAt = 0;
+  state.puzzle.solveMs = 0;
   // Anti-dup history.
   state.puzzle.recentIds.unshift(puzzle.id);
   if (state.puzzle.recentIds.length > PUZZLE_RECENT_HISTORY) {
@@ -3155,9 +3158,10 @@ function startPuzzle(puzzle) {
   state.lastMove = null;
   renderBoard();
   renderPuzzleUi();
-  // After a brief beat, animate the opponent's setup move.
+  // After a brief beat, animate the opponent's setup move (shorter
+  // delay = snappier feel, fewer perceived "lag" complaints).
   state.puzzle.nextIdx = 0;
-  setTimeout(() => _playPuzzleSetupMove(), 450);
+  setTimeout(() => _playPuzzleSetupMove(), 220);
 }
 
 function _restorePuzzleBoard() {
@@ -3197,7 +3201,35 @@ function _playPuzzleSetupMove() {
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.puzzle.nextIdx = 1;
+  // Solver clock starts now (after setup move is on the board).
+  state.puzzle.startedAt = Date.now();
+  _startPuzzleTimer();
   renderPuzzleUi();
+}
+
+// Live timer pulse — repaints just the timer chip every 500ms so the
+// user sees their solve speed without re-rendering the full UI.
+function _startPuzzleTimer() {
+  _stopPuzzleTimer();
+  state.puzzle.timerHandle = setInterval(_paintPuzzleTimer, 500);
+  _paintPuzzleTimer();
+}
+function _stopPuzzleTimer() {
+  if (state.puzzle.timerHandle) {
+    clearInterval(state.puzzle.timerHandle);
+    state.puzzle.timerHandle = null;
+  }
+}
+function _paintPuzzleTimer() {
+  const el = document.getElementById("puzzle-timer-val");
+  if (!el) return;
+  const ms = state.puzzle.startedAt
+    ? (state.puzzle.solveMs || (Date.now() - state.puzzle.startedAt))
+    : 0;
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  el.textContent = `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function tryPuzzleMove(from, to) {
@@ -3223,18 +3255,25 @@ function tryPuzzleMove(from, to) {
         && playedUci.slice(0, 4) === expected.slice(0, 4)
         && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
   if (!sameMove) {
-    // Don't apply the wrong move — undo it on the chess.js board too.
+    // chess.com one-strike rule: first wrong move = puzzle is done,
+    // user loses Δ rating, auto-advance to next puzzle. No retries.
     try { c.undo(); } catch (_) { /* ignore */ }
-    state.puzzle.attempts += 1;
-    state.puzzle.feedback = "wrong";
+    state.puzzle.attempts = 1;
     state.selectedSquare = null;
     state.legalTargets = [];
-    renderPuzzleUi();
     const cell = boardEl && boardEl.querySelector(`.square[data-square="${move.to}"]`);
     if (cell) {
       cell.classList.add("puzzle-flash-bad");
       setTimeout(() => cell.classList.remove("puzzle-flash-bad"), 700);
     }
+    finalizePuzzle("failed");
+    // Auto-advance after a short beat so the user sees the red flash
+    // and the rating delta before the next puzzle loads.
+    if (state.puzzle.pendingNext) clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = setTimeout(() => {
+      state.puzzle.pendingNext = null;
+      loadNextPuzzle();
+    }, 1300);
     return;
   }
   // Correct! Apply the user's move visually.
@@ -3251,15 +3290,16 @@ function tryPuzzleMove(from, to) {
   const okCell = boardEl && boardEl.querySelector(`.square[data-square="${move.to}"]`);
   if (okCell) {
     okCell.classList.add("puzzle-flash-ok");
-    setTimeout(() => okCell.classList.remove("puzzle-flash-ok"), 600);
+    setTimeout(() => okCell.classList.remove("puzzle-flash-ok"), 500);
   }
   // Check if puzzle is fully solved.
   if (state.puzzle.nextIdx >= state.puzzle.moves.length) {
     finalizePuzzle("solved");
     return;
   }
-  // Otherwise play the forced opponent reply after a short delay.
-  setTimeout(() => _playPuzzleOpponentReply(), 600);
+  // Otherwise play the forced opponent reply quickly so the next
+  // solver move is unblocked without a perceptible wait.
+  setTimeout(() => _playPuzzleOpponentReply(), 220);
 }
 
 function _playPuzzleOpponentReply() {
@@ -3287,46 +3327,73 @@ function _playPuzzleOpponentReply() {
   }
 }
 
-// Glicko-lite rating delta — symmetrical, capped, and biased so easy
-// puzzles only nudge a couple of points either way while big upsets
-// move the user noticeably.
-function _ratingDelta(userRating, puzzleRating, didSolve) {
+// chess.com-style rating delta — pure skill, with a speed bonus
+// applied only to clean (no-hint) solves so faster solves of the same
+// puzzle yield more rating than slow ones.
+//
+//   • didSolve === true  → Δ = +K * (1 - expected) * speedFactor
+//   • didSolve === false → Δ = -K * expected
+//   • outcome === "hint" → Δ = 0  (handled by caller passing didSolve=null)
+//
+// expected = standard Elo expectation that a player at userRating beats
+// a puzzle of puzzleRating. K-factor scales with rating bracket.
+function _ratingDelta(userRating, puzzleRating, didSolve, solveMs) {
+  if (didSolve === null) return 0; // hint-assisted solve = no Δ
   const expected = 1 / (1 + Math.pow(10, (puzzleRating - userRating) / 400));
-  const score = didSolve ? 1 : 0;
-  // K-factor scales with how much the puzzle rating differs from the
-  // user's rating — small moves on routine puzzles, larger swings on
-  // out-of-band attempts.
-  const k = 18;
-  return Math.round(k * (score - expected));
+  // K shrinks as the user climbs (chess.com-style: harder to gain 1 pt at 2000+).
+  let k;
+  if      (userRating >= 2200) k = 14;
+  else if (userRating >= 1700) k = 18;
+  else if (userRating >= 1200) k = 22;
+  else                         k = 26;
+  if (didSolve) {
+    // Speed factor: 1.0 baseline, up to +50% if solved in under 8s,
+    // down to 0.6 if it took the user 90s+. Curve is monotone.
+    const sec = Math.max(0, (solveMs || 0) / 1000);
+    let speed;
+    if      (sec <= 8)  speed = 1.5;
+    else if (sec <= 15) speed = 1.3;
+    else if (sec <= 30) speed = 1.1;
+    else if (sec <= 60) speed = 1.0;
+    else if (sec <= 90) speed = 0.85;
+    else                speed = 0.7;
+    const raw = k * (1 - expected) * speed;
+    // Floor at +1 so a clean solve always nudges rating upward.
+    return Math.max(1, Math.round(raw));
+  }
+  // Loss: cap at -1 so a single error always costs at least 1 pt.
+  const raw = -k * expected;
+  return Math.min(-1, Math.round(raw));
 }
 
 function finalizePuzzle(result) {
   if (!state.puzzle.active && result !== "skipped") return;
   state.puzzle.active = false;
+  _stopPuzzleTimer();
+  // Snapshot solve time before zeroing startedAt.
+  state.puzzle.solveMs = state.puzzle.startedAt
+    ? (Date.now() - state.puzzle.startedAt) : 0;
   let outcome;          // 'solved' | 'solved-hint' | 'failed' | 'skipped'
-  let didSolve = false; // for rating math
+  let didSolve = false; // for rating math (true=win, false=loss, null=neutral)
   if (result === "solved") {
-    if (state.puzzle.answerShown)      outcome = "failed";
-    else if (state.puzzle.attempts > 0
-          || state.puzzle.hintUsed)    outcome = "solved-hint";
+    if (state.puzzle.hintUsed)         outcome = "solved-hint";
     else                               outcome = "solved";
-    didSolve = (outcome !== "failed");
+    didSolve = (outcome === "solved-hint") ? null : true;
   } else if (result === "skipped") {
     outcome = "skipped";
+    didSolve = false;
   } else {
     outcome = "failed";
+    didSolve = false;
   }
-  state.puzzle.feedback = (outcome === "solved" || outcome === "solved-hint")
-    ? "solved" : "shown";
+  state.puzzle.feedback =
+    (outcome === "solved" || outcome === "solved-hint") ? "solved" : "shown";
   // Update session counters.
   const ss = state.puzzle.sessionStats;
-  if (outcome === "solved") {
+  if (outcome === "solved" || outcome === "solved-hint") {
     ss.solved += 1;
     ss.streak += 1;
     if (ss.streak > ss.bestStreak) ss.bestStreak = ss.streak;
-  } else if (outcome === "solved-hint") {
-    ss.withHint += 1;
-    ss.streak = 0;
   } else if (outcome === "failed") {
     ss.wrong += 1;
     ss.streak = 0;
@@ -3336,7 +3403,9 @@ function finalizePuzzle(result) {
   }
   // Rating change.
   const pr = state.puzzle.current ? state.puzzle.current.rating : 1500;
-  const delta = _ratingDelta(state.puzzle.sessionRating, pr, didSolve);
+  const delta = _ratingDelta(
+    state.puzzle.sessionRating, pr, didSolve, state.puzzle.solveMs,
+  );
   state.puzzle.sessionRating = Math.max(
     400, Math.min(3000, state.puzzle.sessionRating + delta)
   );
@@ -3345,10 +3414,11 @@ function finalizePuzzle(result) {
     outcome,
     rating: pr,
     delta,
+    solveMs: state.puzzle.solveMs,
   });
   if (state.puzzle.history.length > 30) state.puzzle.history.length = 30;
   _savePuzzleSession();
-  spawnPuzzleCelebration(didSolve ? "ok" : "bad");
+  spawnPuzzleCelebration(outcome === "failed" || outcome === "skipped" ? "bad" : "ok");
   renderPuzzleUi();
   renderPuzzleStatsBar();
   renderPuzzleHistory();
@@ -3377,16 +3447,24 @@ function renderPuzzleStatsBar() {
     pillCls = last.delta > 0 ? "is-up" : "is-down";
     pillDelta = (last.delta > 0 ? "▲ +" : "▼ ") + last.delta;
   }
+  // Live timer for active puzzle, frozen solveMs for finished.
+  const ms = state.puzzle.startedAt
+    ? (state.puzzle.solveMs || (Date.now() - state.puzzle.startedAt))
+    : 0;
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const tm = Math.floor(sec / 60);
+  const ts = sec % 60;
+  const timer = `${tm}:${String(ts).padStart(2, "0")}`;
   host.innerHTML = `
     <div class="ps-block"><span class="ps-label">Решено</span><span class="ps-val ok">${ss.solved}</span></div>
-    <div class="ps-divider"></div>
-    <div class="ps-block"><span class="ps-label">С подск.</span><span class="ps-val warn">${ss.withHint}</span></div>
     <div class="ps-divider"></div>
     <div class="ps-block"><span class="ps-label">Ошиб.</span><span class="ps-val bad">${ss.wrong}</span></div>
     <div class="ps-divider"></div>
     <div class="ps-block"><span class="ps-label">Пропуск</span><span class="ps-val">${ss.skipped}</span></div>
     <div class="ps-divider"></div>
     <div class="ps-block"><span class="ps-label">Серия</span><span class="ps-val ${ss.streak >= 3 ? "ok" : ""}">🔥 ${ss.streak}</span></div>
+    <div class="ps-divider"></div>
+    <div class="ps-block ps-timer"><span class="ps-label">⏱</span><span class="ps-val" id="puzzle-timer-val">${timer}</span></div>
     <div class="ps-rating-pill ${pillCls}">
       <span class="ps-rating-label">Рейтинг</span>
       <span>${state.puzzle.sessionRating}</span>
@@ -3417,68 +3495,37 @@ function renderPuzzleUi() {
   if (!card || !actions) return;
   const p = state.puzzle.current;
   if (!p) {
-    card.innerHTML = `<div class="puzzle-empty">Жми <b>🎲 Новая задача</b>, чтобы начать.</div>`;
+    card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
     actions.innerHTML = "";
     return;
   }
   const sideCls = state.puzzle.side === "w" ? "side-w" : "side-b";
   const sideLetter = state.puzzle.side === "w" ? "♔" : "♚";
   const sideLabel = state.puzzle.side === "w" ? "белые" : "чёрные";
-  const diffMap = { easy: "Лёгкая", medium: "Средняя", hard: "Сложная" };
-  // Per-ply progress dots: one dot per solver ply.
-  const totalPlies = state.puzzle.moves.length;
-  const solverPlies = [];
-  for (let i = 1; i < totalPlies; i += 2) solverPlies.push(i);
-  const dotsHtml = solverPlies.map((plyIdx) => {
-    let cls = "";
-    if (plyIdx < state.puzzle.nextIdx) cls = "is-done";
-    else if (plyIdx === state.puzzle.nextIdx) cls = "is-current";
-    return `<span class="puzzle-ply-dot ${cls}"></span>`;
-  }).join("");
-  const themesHtml = (p.themes_ru || p.themes || [])
-    .slice(0, 4)
-    .map((t) => `<span class="puzzle-theme-tag">${escapeHtml(t)}</span>`)
-    .join("");
-  // Feedback box.
+  // Feedback box. We deliberately stay minimal — chess.com doesn't
+  // expose theme/progress/move-count hints, neither do we. After
+  // finalization the card shows the puzzle's rating and Δ once.
   let feedback = "";
   if (state.puzzle.feedback === "solved") {
-    if (state.puzzle.answerShown) {
-      feedback = `<div class="puzzle-feedback fb-bad">😕 Решение показано. Попробуй следующую задачу.</div>`;
-    } else if (state.puzzle.hintUsed || state.puzzle.attempts > 0) {
-      feedback = `<div class="puzzle-feedback fb-solved">✓ Решено с подсказкой/повтором — рейтинг подрос на ${_lastDelta()}.</div>`;
+    const last = state.puzzle.history[0];
+    const dt = last && last.solveMs
+      ? `${(last.solveMs / 1000).toFixed(1)}s` : "";
+    if (state.puzzle.hintUsed) {
+      feedback = `<div class="puzzle-feedback fb-info">✓ Решено с подсказкой${dt ? ` · ${dt}` : ""}. Δ 0.</div>`;
     } else {
-      feedback = `<div class="puzzle-feedback fb-solved">🏆 Идеально! Решено с первой попытки. ${_lastDeltaText()}</div>`;
+      feedback = `<div class="puzzle-feedback fb-solved">🏆 Решено${dt ? ` за ${dt}` : ""}. ${_lastDeltaText()}</div>`;
     }
   } else if (state.puzzle.feedback === "shown") {
-    feedback = `<div class="puzzle-feedback fb-bad">Решение показано — задача не засчитана. ${_lastDeltaText()}</div>`;
-  } else if (state.puzzle.feedback === "correct") {
-    feedback = `<div class="puzzle-feedback fb-ok">Верно! Жди ответ соперника…</div>`;
-  } else if (state.puzzle.feedback === "wrong") {
-    const tip = state.puzzle.attempts >= 2
-      ? "Попробуй <b>подсказку</b> — она подсветит исходную клетку."
-      : "Не тот ход. Подумай ещё.";
-    feedback = `<div class="puzzle-feedback fb-bad">✕ ${tip}</div>`;
-  } else if (state.puzzle.answerShown) {
-    feedback = `<div class="puzzle-feedback fb-info">Решение показано. Сыграй ход или нажми «Дальше».</div>`;
+    feedback = `<div class="puzzle-feedback fb-bad">✕ Задача не решена. ${_lastDeltaText()}</div>`;
   } else if (state.puzzle.hintUsed) {
     feedback = `<div class="puzzle-feedback fb-info">Подсказка: исходная клетка подсвечена.</div>`;
   } else {
     feedback = `<div class="puzzle-feedback fb-info">${sideLetter} Ход за <b>${sideLabel}</b>. Найди лучший ход.</div>`;
   }
   card.innerHTML = `
-    <div class="puzzle-card-header">
-      <span class="puzzle-card-id">#${escapeHtml(p.id || "?")}</span>
-      <span class="puzzle-card-rating">⚡ ${p.rating || "?"}</span>
-      <span class="puzzle-card-difficulty diff-${escapeHtml(p.difficulty || "medium")}">${escapeHtml(diffMap[p.difficulty] || "—")}</span>
-      <div class="puzzle-card-themes">${themesHtml}</div>
-    </div>
     <div class="puzzle-side-banner">
       <span class="puzzle-side-icon ${sideCls}">${sideLetter}</span>
-      <span>Ход за <b>${sideLabel}</b>. Найди лучшие ходы за всю комбинацию.</span>
-    </div>
-    <div class="puzzle-progress-row">
-      <span class="muted" style="font-size:11px;">Прогресс:</span>
-      <span class="puzzle-ply-dots">${dotsHtml}</span>
+      <span>Ход за <b>${sideLabel}</b>.</span>
     </div>
     ${feedback}
   `;
@@ -3487,21 +3534,17 @@ function renderPuzzleUi() {
   if (finished) {
     actions.innerHTML = `
       <button id="btn-puzzle-next" type="button" class="puzzle-primary">→ Следующая</button>
-      <button id="btn-puzzle-replay" type="button" class="puzzle-secondary">↻ Сыграть ещё раз</button>
     `;
   } else {
     actions.innerHTML = `
-      <button id="btn-puzzle-hint" type="button" class="puzzle-secondary" ${state.puzzle.answerShown ? "disabled" : ""}>💡 Подсказка</button>
-      <button id="btn-puzzle-show" type="button" class="puzzle-secondary" ${state.puzzle.answerShown ? "disabled" : ""}>👁 Показать ход</button>
+      <button id="btn-puzzle-hint" type="button" class="puzzle-secondary" ${state.puzzle.hintUsed ? "disabled" : ""}>💡 Подсказка</button>
       <button id="btn-puzzle-skip" type="button" class="puzzle-secondary">⤳ Пропустить</button>
     `;
   }
   // Wire up actions.
   const hintBtn  = document.getElementById("btn-puzzle-hint");
-  const showBtn  = document.getElementById("btn-puzzle-show");
   const skipBtn  = document.getElementById("btn-puzzle-skip");
   const nextBtn  = document.getElementById("btn-puzzle-next");
-  const replayBtn= document.getElementById("btn-puzzle-replay");
   if (hintBtn) hintBtn.onclick = () => {
     const u = state.puzzle.moves[state.puzzle.nextIdx];
     if (u && u.length >= 4) {
@@ -3511,22 +3554,20 @@ function renderPuzzleUi() {
       renderPuzzleUi();
     }
   };
-  if (showBtn) showBtn.onclick = () => {
-    const u = state.puzzle.moves[state.puzzle.nextIdx];
-    if (u && u.length >= 4) {
-      state.puzzle.answerShown = true;
-      state.puzzle.feedback = null;
-      state.bestArrow = { from: u.slice(0, 2), to: u.slice(2, 4) };
-      renderBoard();
-      renderPuzzleUi();
-    }
-  };
   if (skipBtn) skipBtn.onclick = () => {
     finalizePuzzle("skipped");
+    if (state.puzzle.pendingNext) clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = setTimeout(() => {
+      state.puzzle.pendingNext = null;
+      loadNextPuzzle();
+    }, 1100);
   };
-  if (nextBtn) nextBtn.onclick = () => loadNextPuzzle();
-  if (replayBtn) replayBtn.onclick = () => {
-    if (state.puzzle.current) startPuzzle(state.puzzle.current);
+  if (nextBtn) nextBtn.onclick = () => {
+    if (state.puzzle.pendingNext) {
+      clearTimeout(state.puzzle.pendingNext);
+      state.puzzle.pendingNext = null;
+    }
+    loadNextPuzzle();
   };
 }
 

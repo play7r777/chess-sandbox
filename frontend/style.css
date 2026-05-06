@@ -1315,6 +1315,9 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 .puzzle-stats-bar .ps-rating-pill.is-up   { color: #8de0a4; border-color: #2c5a39; }
 .puzzle-stats-bar .ps-rating-pill.is-down { color: #f5a8b0; border-color: #5a2c33; }
+/* Timer chip — taller value, monospaced so digits don't jitter. */
+.puzzle-stats-bar .ps-timer .ps-val { color: #cbd6e6; font-size: 16px; }
+.puzzle-stats-bar .ps-timer .ps-label { font-size: 12px; }
 
 /* Active puzzle card with theme/rating header + side-to-move banner. */
 .puzzle-card {
