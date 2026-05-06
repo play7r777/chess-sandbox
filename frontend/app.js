@@ -32,15 +32,17 @@ const PIECE_SETS = {
 };
 
 function loadSettings() {
+  const fallback = { theme: DEFAULT_BOARD_THEME, pieces: DEFAULT_PIECE_SET, soundOn: true };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return { theme: DEFAULT_BOARD_THEME, pieces: DEFAULT_PIECE_SET };
+    if (!raw) return fallback;
     const parsed = JSON.parse(raw) || {};
     return {
       theme: BOARD_THEMES[parsed.theme] ? parsed.theme : DEFAULT_BOARD_THEME,
       pieces: PIECE_SETS[parsed.pieces] ? parsed.pieces : DEFAULT_PIECE_SET,
+      soundOn: parsed.soundOn !== false,
     };
-  } catch { return { theme: DEFAULT_BOARD_THEME, pieces: DEFAULT_PIECE_SET }; }
+  } catch { return fallback; }
 }
 
 function saveSettings(s) {
@@ -57,6 +59,49 @@ function applyBoardTheme() {
   root.style.setProperty("--highlight", t.highlight);
 }
 applyBoardTheme();
+
+// ----- Move sound (synthesized via WebAudio so we don't ship a binary) -----
+let _audioCtx = null;
+function _getAudioCtx() {
+  if (_audioCtx) return _audioCtx;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  try { _audioCtx = new Ctx(); } catch { _audioCtx = null; }
+  return _audioCtx;
+}
+// Short tonal "click" approximating a chess.com piece-drop sound: a quick
+// burst of low-mid frequencies with fast exponential decay. ~70ms total.
+function playMoveSound() {
+  if (!userSettings.soundOn) return;
+  const ctx = _getAudioCtx();
+  if (!ctx) return;
+  if (ctx.state === "suspended") { try { ctx.resume(); } catch { /* ignore */ } }
+  const t0 = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = "triangle";
+  // Slight pitch envelope from 320 → 220 Hz gives the wooden "tonk" feel.
+  osc.frequency.setValueAtTime(320, t0);
+  osc.frequency.exponentialRampToValueAtTime(220, t0 + 0.05);
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(0.35, t0 + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.10);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.12);
+}
+
+const SOUND_ON_PATH = "M17.33 17C16.93 17.43 16.5 17.47 16.06 17.07L15.93 16.94C15.5 16.54 15.46 16.04 15.86 15.61C16.69 14.44 16.99 13.21 16.99 11.91C16.99 10.71 16.72 9.53996 15.89 8.40996C15.49 7.97996 15.52 7.47996 15.96 7.03996L16.03 6.96996C16.46 6.53996 16.93 6.56996 17.33 6.99996C18.53 8.56996 19 10.27 19 11.9C19 13.6 18.57 15.37 17.33 17ZM20.67 21C20.27 21.47 19.8 21.47 19.37 21.03L19.3 20.96C18.87 20.53 18.87 20.06 19.27 19.59C21.17 17.29 22 14.62 22 11.92C22 9.28996 21.17 6.68996 19.23 4.38996C18.83 3.91996 18.83 3.45996 19.26 3.05996L19.39 2.92996C19.82 2.52996 20.29 2.52996 20.69 2.99996C22.96 5.66996 23.99 8.82996 23.99 11.93C23.99 15.1 22.99 18.3 20.66 21H20.67ZM14 1.49996V22.5C14 23.43 12.9 23.67 12.23 22.9L8.92999 19.1C8.25999 18.3 7.59999 18 6.55999 18H2.65999C0.65999 18 -0.0100098 17.33 -0.0100098 15.33V8.65996C-0.0100098 6.65996 0.65999 5.98995 2.65999 5.98995H6.55999C7.58999 5.68996 8.25999 5.68996 8.92999 4.88996L12.23 1.08996C12.9 0.319955 14 0.559955 14 1.48996V1.49996Z";
+const SOUND_OFF_PATH = "M14 1.5V22.5C14 23.43 12.9 23.67 12.23 22.9L8.93 19.1C8.26 18.3 7.6 18 6.56 18H2.66C0.66 18 -0.01 17.33 -0.01 15.33V8.66C-0.01 6.66 0.66 5.99 2.66 5.99H6.56C7.59 5.99 8.26 5.69 8.93 4.89L12.23 1.09C12.9 0.32 14 0.56 14 1.49V1.5ZM23.41 13.41L21 15.83L18.59 13.41L17.17 14.83L19.59 17.24L17.17 19.66L18.59 21.07L21 18.66L23.41 21.07L24.83 19.66L22.41 17.24L24.83 14.83L23.41 13.41Z";
+function refreshSoundButton() {
+  const btn = document.getElementById("btn-sound");
+  if (!btn) return;
+  btn.setAttribute("aria-pressed", userSettings.soundOn ? "true" : "false");
+  btn.title = userSettings.soundOn ? "Звук ходов: вкл" : "Звук ходов: выкл";
+  btn.dataset.on = userSettings.soundOn ? "true" : "false";
+  const path = btn.querySelector("svg path");
+  if (path) path.setAttribute("d", userSettings.soundOn ? SOUND_ON_PATH : SOUND_OFF_PATH);
+}
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({
@@ -906,6 +951,14 @@ document.getElementById("btn-settings-close")?.addEventListener("click", closeSe
 document.getElementById("settings-modal")?.addEventListener("click", (e) => {
   if (e.target.id === "settings-modal") closeSettingsModal();
 });
+document.getElementById("btn-sound")?.addEventListener("click", () => {
+  userSettings.soundOn = !userSettings.soundOn;
+  saveSettings(userSettings);
+  refreshSoundButton();
+  // Demo a tap when turning on so the user immediately hears the volume.
+  if (userSettings.soundOn) playMoveSound();
+});
+refreshSoundButton();
 
 document.getElementById("btn-flip").addEventListener("click", () => {
   state.flipped = !state.flipped;
@@ -1687,6 +1740,8 @@ const review = {
   filter: new Set(),  // active classification filters; empty == show all
   userSide: null,     // "w" | "b" | null — which side the user played
   sideAsked: false,   // have we already shown the side-pick modal this session
+  clocks: [],         // per-ply remaining-time in seconds, parallel to moves_uci
+  autoplayId: null,   // setInterval id when auto-stepping next moves
 };
 
 function fmtCp(cp) {
@@ -1715,6 +1770,7 @@ document.getElementById("btn-review-import").addEventListener("click", async () 
     });
     review.game = r;
     review.analysis = null;
+    review.clocks = parsePgnClocks(r.pgn || "");
     document.getElementById("review-progress").textContent =
       `${r.headers.White || "?"} vs ${r.headers.Black || "?"} — ${r.moves_uci.length} полуходов. Жми «Анализировать».`;
     document.getElementById("btn-review-analyse").disabled = false;
@@ -2451,6 +2507,58 @@ async function renderOpeningExplorer(fen) {
   } catch { host.innerHTML = ""; }
 }
 
+// Parse per-ply clock annotations from chess.com / lichess PGN comments
+// of the form `{[%clk H:MM:SS(.ms)?]}`. Returns a list aligned to
+// moves_uci where index i is the clock REMAINING for the side that just
+// played ply i+1 (0-indexed: 0 = white's first move). Missing entries
+// are stored as null. Returns [] if PGN has no clock annotations.
+function parsePgnClocks(pgnText) {
+  if (typeof pgnText !== "string" || pgnText.length === 0) return [];
+  // We don't need to strip headers; %clk only appears in move text.
+  const re = /\{[^}]*?\[%clk\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\]/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(pgnText)) !== null) {
+    const a = parseInt(m[1], 10);
+    const b = parseInt(m[2], 10);
+    const c = m[3] != null ? parseInt(m[3], 10) : null;
+    // PGN [%clk] is H:MM:SS or M:SS — detect by presence of seconds group.
+    const totalSec = c != null
+      ? a * 3600 + b * 60 + c
+      : a * 60 + b;
+    out.push(totalSec);
+  }
+  return out;
+}
+
+// Format remaining seconds as the chess.com-style "M:SS" (no hours unless
+// >= 1h). Ex: 90 → "1:30", 3600 → "1:00:00".
+function fmtClock(sec) {
+  if (sec == null || !Number.isFinite(sec)) return "";
+  const s = Math.max(0, Math.floor(sec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${m}:${pad(r)}`;
+}
+
+// Look up the most recent clock value for `side` ("w" / "b") at the given
+// activeIdx (0-based ply index, or -1 for "no moves played yet"). White's
+// plies are even (0, 2, 4...), black's are odd. Returns null if no clock
+// entry exists for that side up to that point.
+function clockForSideAt(clocks, side, activeIdx) {
+  if (!clocks || clocks.length === 0) return null;
+  const sideParity = side === "w" ? 0 : 1;
+  // Walk backwards from activeIdx to find the most recent ply that this
+  // side played (matching parity) and that has a clock entry.
+  for (let i = activeIdx; i >= 0; i -= 1) {
+    if (i % 2 !== sideParity) continue;
+    if (clocks[i] != null) return clocks[i];
+  }
+  return null;
+}
+
 // Material values for captured-piece score tally.
 const PIECE_POINTS = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 // Standard starting count of each piece per side.
@@ -2532,17 +2640,24 @@ function renderPlayerStrips() {
   const cap = _computeCaptured();
   const advWhite = cap.score > 0 ? cap.score : 0;
   const advBlack = cap.score < 0 ? -cap.score : 0;
+  const clocks = review.clocks || [];
   const renderSide = (color, name, elo, avatar) => {
     const meta = elo ? `<span class="player-meta">${elo}</span>` : "";
     const avatarHtml = avatar
       ? `<img class="player-avatar" src="${escapeHtml(avatar)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'player-disc ${color}'}))">`
       : `<span class="player-disc ${color}"></span>`;
     const adv = color === "white" ? advWhite : advBlack;
+    const sideKey = color === "white" ? "w" : "b";
+    const cSec = clockForSideAt(clocks, sideKey, review.activeIdx);
+    const clockHtml = cSec != null
+      ? `<span class="player-clock">${fmtClock(cSec)}</span>`
+      : "";
     return `
       ${avatarHtml}
       <span class="player-name">${escapeHtml(name)}</span>
       ${meta}
       ${_renderCapturedRow(color, cap.counts, adv)}
+      ${clockHtml}
     `;
   };
   // Visual top of board = side opposite to the bottom-of-screen player.
@@ -2598,9 +2713,11 @@ function renderReviewMoves() {
   refreshNavButtons();
 }
 
-function jumpToReviewIdx(idx) {
+function jumpToReviewIdx(idx, opts) {
   const game = review.game;
   if (!game) return;
+  const playSound = !opts || opts.playSound !== false;
+  if (playSound) playMoveSound();
   const moves = review.analysis ? review.analysis.moves : null;
   // idx == -1 means starting position; idx >= 0 means after that ply.
   review.activeIdx = idx;
@@ -2731,18 +2848,66 @@ function refreshNavButtons() {
   setDisabled("nav-prev", !game || idx < 0);
   setDisabled("nav-next", !game || idx >= total - 1);
   setDisabled("nav-last", !game || idx >= total - 1);
+  setDisabled("nav-play", !game || total === 0);
+  // Stop autoplay if it ran past the end.
+  if (review.autoplayId && (!game || idx >= total - 1)) stopAutoplay();
 }
 
-document.getElementById("nav-first").addEventListener("click", () => jumpToReviewIdx(-1));
+// Auto-step: every 500ms call nav-next while there are remaining moves.
+const PLAY_ICON_PATH = "M20.5 12.8L7.77 21.53C6.5 22.43 6 22.16 6 20.6V3.32999C6 1.79999 6.5 1.52999 7.77 2.42999L20.5 11.2C21.33 11.77 21.33 12.23 20.5 12.8Z";
+const PAUSE_ICON_PATH = "M17.33 22H16.66C14.66 22 13.99 21.33 13.99 19.33V4.65999C13.99 2.65999 14.66 1.98999 16.66 1.98999H17.33C19.33 1.98999 20 2.65999 20 4.65999V19.33C20 21.33 19.33 22 17.33 22ZM7.32999 22H6.65999C4.65999 22 3.98999 21.33 3.98999 19.33V4.65999C3.98999 2.65999 4.65999 1.98999 6.65999 1.98999H7.32999C9.32999 1.98999 9.99999 2.65999 9.99999 4.65999V19.33C9.99999 21.33 9.32999 22 7.32999 22Z";
+
+function setPlayButtonIcon(playing) {
+  const btn = document.getElementById("nav-play");
+  if (!btn) return;
+  btn.dataset.playing = playing ? "true" : "false";
+  btn.title = playing ? "Пауза" : "Авто-проигрывание";
+  const path = btn.querySelector("svg path");
+  if (path) path.setAttribute("d", playing ? PAUSE_ICON_PATH : PLAY_ICON_PATH);
+}
+
+function stopAutoplay() {
+  if (review.autoplayId) {
+    clearInterval(review.autoplayId);
+    review.autoplayId = null;
+  }
+  setPlayButtonIcon(false);
+}
+
+function startAutoplay() {
+  if (review.autoplayId) return;
+  setPlayButtonIcon(true);
+  review.autoplayId = setInterval(() => {
+    const total = review.game ? review.game.moves_uci.length : 0;
+    if (!review.game || review.activeIdx >= total - 1) {
+      stopAutoplay();
+      return;
+    }
+    jumpToReviewIdx(review.activeIdx + 1);
+  }, 500);
+}
+
+document.getElementById("nav-first").addEventListener("click", () => {
+  stopAutoplay();
+  // No move sound when jumping to the very start, per UX spec.
+  jumpToReviewIdx(-1, { playSound: false });
+});
 document.getElementById("nav-prev").addEventListener("click", () => {
+  stopAutoplay();
   if (review.activeIdx > -1) jumpToReviewIdx(review.activeIdx - 1);
 });
 document.getElementById("nav-next").addEventListener("click", () => {
+  stopAutoplay();
   const total = review.game ? review.game.moves_uci.length : 0;
   if (review.activeIdx < total - 1) jumpToReviewIdx(review.activeIdx + 1);
 });
 document.getElementById("nav-last").addEventListener("click", () => {
+  stopAutoplay();
   if (review.game) jumpToReviewIdx(review.game.moves_uci.length - 1);
+});
+document.getElementById("nav-play").addEventListener("click", () => {
+  if (review.autoplayId) stopAutoplay();
+  else startAutoplay();
 });
 
 // ---------- Boot ----------

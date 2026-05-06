@@ -583,6 +583,19 @@ body.mode-legal .mode-toggle { display: none !important; }
 }
 .player-strip .player-name { font-weight: 600; letter-spacing: 0.01em; }
 .player-strip .player-meta { color: #8ba0bf; font-variant-numeric: tabular-nums; font-size: 12px; }
+.player-strip .player-clock {
+  margin-left: auto;
+  background: #f4f5f7;
+  color: #111;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  letter-spacing: 0.01em;
+  min-width: 56px;
+  text-align: center;
+}
 /* Captured-piece strip (chess.com-style) */
 .player-strip .cap-row {
   display: inline-flex; align-items: center;
@@ -608,9 +621,21 @@ body.mode-legal .mode-toggle { display: none !important; }
   margin: 8px 0 4px;
 }
 .board-nav button {
-  font-size: 18px;
   min-width: 44px;
-  padding: 4px 10px;
+  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.board-nav button svg {
+  fill: currentColor;
+  display: block;
+}
+.board-nav button:disabled svg { opacity: 0.5; }
+.board-nav #nav-play[data-playing="true"] {
+  background: #5b8b39;
+  border-color: #5b8b39;
+  color: #fff;
 }
 .board-hint {
   text-align: center;
@@ -888,6 +913,14 @@ body.mode-legal .mode-toggle { display: none !important; }
   font-size: 16px;
 }
 .settings-btn:hover { filter: brightness(1.15); }
+.settings-btn.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+}
+.settings-btn.icon-btn svg { fill: currentColor; display: block; }
+#btn-sound[data-on="false"] { color: #ff8080; }
 .settings-modal {
   position: fixed; inset: 0;
   background: rgba(13, 18, 29, 0.7);
