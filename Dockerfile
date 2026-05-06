@@ -1,33 +1,19 @@
 # syntax=docker/dockerfile:1.7
 
-# ---------- Stockfish builder ----------
-# We compile Stockfish from source so the engine binary is available on
-# Linux (no apt-get stockfish package needed) and matches the AVX2 build
-# the local app expects. The compiled binary lands at /stockfish.
-FROM debian:12-slim AS stockfish-build
-ARG STOCKFISH_REF=sf_18
-ENV DEBIAN_FRONTEND=noninteractive
-# Stockfish 18 fetches NNUE weight files during `make build`, so curl
-# is a required build dep on top of the usual toolchain.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates git curl \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /tmp
-RUN git clone --depth 1 --branch ${STOCKFISH_REF} https://github.com/official-stockfish/Stockfish.git \
-    && cd Stockfish/src \
-    && make -j"$(nproc)" build ARCH=x86-64-avx2 \
-    && strip stockfish \
-    && cp stockfish /stockfish
-
 # ---------- Python runtime ----------
+# Single-stage build: Debian's stockfish package is plenty for casual
+# play / analysis (Stockfish 15.1 on Debian 12) and avoids dragging a
+# 100MB toolchain image just to compile the engine. If we ever need a
+# newer Stockfish we can swap this out for an official prebuilt binary
+# from github.com/official-stockfish/Stockfish/releases.
 FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgomp1 ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+        stockfish ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/games/stockfish /usr/local/bin/stockfish \
+    && /usr/local/bin/stockfish quit < /dev/null > /dev/null 2>&1 || true
 WORKDIR /app
-COPY --from=stockfish-build /stockfish /usr/local/bin/stockfish
-RUN chmod +x /usr/local/bin/stockfish
 COPY pyproject.toml /app/pyproject.toml
 COPY backend /app/backend
 COPY frontend /app/frontend

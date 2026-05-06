@@ -1,7 +1,8 @@
 """In-memory party / co-op puzzle rooms.
 
-A party is a short-lived multiplayer session where every member solves
-their own stream of puzzles for ten minutes. Score per puzzle is
+A party is a short-lived multiplayer session where every member walks
+through the *same* shuffled puzzle queue for ten minutes — whoever
+gets through more (and harder) puzzles wins. Score per puzzle is
 ``puzzle_rating + max(0, 30 - solve_seconds) * 2`` for a successful
 solve (failures and skips score zero). The final ranking is written
 into every participant's profile via :func:`users.record_party_result`.
@@ -14,6 +15,7 @@ seconds so they can reconnect.
 from __future__ import annotations
 
 import asyncio
+import random
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -77,7 +79,11 @@ class Member:
     solved: int = 0
     failed: int = 0
     skipped: int = 0
-    seen: set[str] = field(default_factory=set)
+    # Index into the party's shared puzzle queue. Each player advances
+    # their own pointer when they finish a puzzle (solve / fail / skip),
+    # so members work through the *same* shuffled list — whoever is
+    # faster lands more attempts.
+    puzzle_index: int = 0
     current_puzzle: dict[str, Any] | None = None
     current_started_at: float = 0.0
     last_solve_ms: int = 0
@@ -97,6 +103,9 @@ class Party:
     members: dict[str, Member] = field(default_factory=dict)
     finish_task: asyncio.Task[None] | None = None
     finished_results: list[dict[str, Any]] = field(default_factory=list)
+    # Shared, shuffled puzzle order for the whole match. Built in
+    # `start()` from the entire pool, then re-used across every member.
+    puzzle_queue: list[dict[str, Any]] = field(default_factory=list)
 
     def public_member(self, m: Member) -> dict[str, Any]:
         return {
@@ -157,14 +166,14 @@ class Party:
         m.disconnected_at = time.time()
 
     def _next_puzzle_for(self, m: Member) -> dict[str, Any] | None:
-        p = puzzle_pack.random_puzzle(exclude_ids=m.seen)
-        if p is None and m.seen:
-            # Pool exhausted — start over so the player keeps scoring.
-            m.seen.clear()
-            p = puzzle_pack.random_puzzle()
-        if p is None:
+        # Cycle the shared queue so a fast solver who exhausts it before
+        # the timer ends keeps getting puzzles (in the same order — the
+        # comparison stays fair because every member sees the same
+        # rotation).
+        if not self.puzzle_queue:
             return None
-        m.seen.add(str(p.get("id") or ""))
+        p = self.puzzle_queue[m.puzzle_index % len(self.puzzle_queue)]
+        m.puzzle_index += 1
         m.current_puzzle = p
         m.current_started_at = time.time()
         return p
@@ -239,7 +248,17 @@ class Party:
         self.status = "playing"
         self.started_at = now
         self.ends_at = now + PARTY_DURATION_SEC
+        # Shuffle the entire puzzle pool once per match. Every member
+        # then walks through that same ordered list, so the comparison
+        # is fair (same puzzles, same order); a different shuffle each
+        # match keeps players from seeing the exact same opening every
+        # time. With only ~90 puzzles in the bundled pack, repeats
+        # *across* matches are unavoidable, but never *within* a match.
+        pool = list(puzzle_pack.all_puzzles())
+        random.shuffle(pool)
+        self.puzzle_queue = pool
         for m in self.members.values():
+            m.puzzle_index = 0
             p = self._next_puzzle_for(m)
             if p is not None:
                 payload = _puzzle_payload(p)
