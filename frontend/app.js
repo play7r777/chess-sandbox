@@ -2078,18 +2078,16 @@ function updateEvalBar(cpWhitePov, _moverSide) {
   const label = document.getElementById("eval-bar-label");
   if (!bar || !label) return;
   const frac = cpToWhiteFrac(cpWhitePov);
-  // White at bottom, black at top: when frac is large (white winning),
-  // white block grows.
+  // The white block always represents white's share of the bar and the
+  // black block always represents black's share. To make the bar match
+  // the board orientation when it is flipped, the eval-bar element itself
+  // uses flex-direction: column-reverse via the .flipped class, swapping
+  // their visual order without inverting the meaning of the values.
   const flipped = state.flipped;
   const whiteBottom = !flipped;
-  // CSS variables drive the flex-basis percentages.
-  if (whiteBottom) {
-    bar.style.setProperty("--eval-white", `${(frac * 100).toFixed(2)}%`);
-    bar.style.setProperty("--eval-black", `${((1 - frac) * 100).toFixed(2)}%`);
-  } else {
-    bar.style.setProperty("--eval-white", `${((1 - frac) * 100).toFixed(2)}%`);
-    bar.style.setProperty("--eval-black", `${(frac * 100).toFixed(2)}%`);
-  }
+  bar.classList.toggle("flipped", flipped);
+  bar.style.setProperty("--eval-white", `${(frac * 100).toFixed(2)}%`);
+  bar.style.setProperty("--eval-black", `${((1 - frac) * 100).toFixed(2)}%`);
   // Pretty number.
   let text;
   if (cpWhitePov >= 99000)      text = `M${100000 - cpWhitePov}`;
@@ -2253,9 +2251,7 @@ function renderEvalGraph(moves) {
       const v = (cp / 100).toFixed(2);
       return cp > 0 ? `+${v}` : v;
     })();
-    const moveNum = Math.ceil(m.ply / 2);
-    const dot = m.side === "b" ? "..." : ".";
-    tip.textContent = `${moveNum}${dot} ${m.move_san} ${evalText}`;
+    tip.textContent = `${m.ply}. ${m.move_san} ${evalText}`;
     tip.hidden = false;
     // Position tip in the wrap, in pixel coords.
     const wrapRect = wrap.getBoundingClientRect();
@@ -2286,9 +2282,8 @@ function renderKeyMoments(moments) {
   if (!moments || moments.length === 0) { host.innerHTML = ""; return; }
   const rows = moments.map((k) => {
     const side = k.side === "w" ? "Белые" : "Чёрные";
-    const moveNum = Math.ceil(k.ply / 2);
     return `<li data-ply="${k.ply}" title="${escapeHtml(k.note || "")}">
-      <span class="km-ply">${moveNum}${k.side === "b" ? "..." : "."}</span>
+      <span class="km-ply">${k.ply}.</span>
       <span class="km-icon cls-${k.classification}" style="color:inherit">${REVIEW_ICONS[k.classification] || ""}</span>
       <span class="km-san">${side} ${escapeHtml(k.move_san)}</span>
       <span class="km-delta">ΔWP ${k.wp_delta}%</span>
@@ -2709,12 +2704,14 @@ function renderReviewMoves() {
     if (review.filter.size > 0 && !review.filter.has(m.classification)) {
       li.classList.add("is-hidden");
     }
-    const moveNum = Math.ceil(m.ply / 2) + ".";
-    const dots = m.side === "b" ? "…" : "";
+    // Sequential ply numbering: white = 1,3,5… and black = 2,4,6…
+    // (or the reverse when the analysed game starts on black's move),
+    // so the side to move is unambiguous from the number's parity.
+    const moveNum = `${m.ply}.`;
     const coachHtml = (m.coach && m.coach.length)
       ? `<span class="coach">${m.coach.map(escapeHtml).join(" · ")}</span>` : "";
     li.innerHTML = `
-      <span class="ply">${moveNum}${dots}</span>
+      <span class="ply">${moveNum}</span>
       <span class="icon">${REVIEW_ICONS[m.classification] || ""}</span>
       <span class="san">${m.move_san}</span>
       <span class="note">${m.note || ""}${coachHtml}</span>
