@@ -7,13 +7,15 @@
 FROM debian:12-slim AS stockfish-build
 ARG STOCKFISH_REF=sf_18
 ENV DEBIAN_FRONTEND=noninteractive
+# Stockfish 18 fetches NNUE weight files during `make build`, so curl
+# is a required build dep on top of the usual toolchain.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates git \
+        build-essential ca-certificates git curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /tmp
 RUN git clone --depth 1 --branch ${STOCKFISH_REF} https://github.com/official-stockfish/Stockfish.git \
     && cd Stockfish/src \
-    && make -j"$(nproc)" build ARCH=x86-64-modern \
+    && make -j"$(nproc)" build ARCH=x86-64-avx2 \
     && strip stockfish \
     && cp stockfish /stockfish
 
