@@ -777,6 +777,11 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   min-height: 100%;
 }
 .eval-bar[hidden] { display: none; }
+/* When the board is flipped, swap the visual order of the white/black
+   blocks so the white block sits on the same side as the white pieces
+   on the board. The percentage values themselves stay tied to each
+   colour, so a 90% white advantage always shows 90% white-coloured. */
+.eval-bar.flipped { flex-direction: column-reverse; }
 .eval-bar-black {
   flex: 0 0 var(--eval-black, 50%);
   background: #232629;
