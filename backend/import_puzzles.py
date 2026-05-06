@@ -216,11 +216,52 @@ def _insert(db_path: Path, rows: list[tuple[Any, ...]]) -> None:
     elapsed = time.monotonic() - t0
     print(f"\r  Готово: {len(rows):,} строк за {elapsed:.1f} с")
 
-    # Atomic replace. ``Path.rename`` raises ``PermissionError`` on
-    # Windows when the destination exists; ``os.replace`` works on
-    # both POSIX and Windows.
-    os.replace(tmp_path, db_path)
+    _atomic_swap(tmp_path, db_path)
     print(f"База: {db_path} ({db_path.stat().st_size / 1e6:.1f} MB)")
+
+
+def _atomic_swap(tmp_path: Path, db_path: Path) -> None:
+    """Replace ``db_path`` with ``tmp_path`` atomically.
+
+    Handles the Windows quirk where the destination must be deletable
+    (no other process may hold an open handle on it). On lock conflict
+    we retry a few times with backoff and ultimately surface a
+    human-friendly error pointing the operator at the most likely
+    cause: a still-running server instance.
+    """
+    last_exc: OSError | None = None
+    for attempt in range(8):
+        try:
+            os.replace(tmp_path, db_path)
+            return
+        except PermissionError as exc:
+            # Windows: destination is locked. Try to unlink it first
+            # and retry; if that fails too, the old file is in use.
+            last_exc = exc
+            try:
+                if db_path.exists():
+                    db_path.unlink()
+                # No more dst: replace should now succeed.
+                os.replace(tmp_path, db_path)
+                return
+            except PermissionError as exc2:
+                last_exc = exc2
+                time.sleep(0.5 * (attempt + 1))
+                continue
+    # Out of retries.
+    raise RuntimeError(
+        f"Не удалось перезаписать {db_path}: файл занят другим процессом.\n"
+        f"Скорее всего у тебя ещё крутится сервер (uvicorn / start-public.ps1)\n"
+        f"и держит puzzles.sqlite открытым.\n\n"
+        f"Что делать:\n"
+        f"  1) Закрой ВСЕ окна с сервером (Ctrl+C / закрыть консоль).\n"
+        f"  2) На всякий: taskkill /F /IM python.exe /T\n"
+        f"  3) Готовый .tmp файл уже здесь — переименуй вручную:\n"
+        f"       del {db_path}\n"
+        f"       move {tmp_path} {db_path}\n"
+        f"     (или повторно запусти импорт — он переиспользует кэш .csv.zst).\n\n"
+        f"Оригинальная ошибка: {last_exc!r}"
+    ) from last_exc
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
