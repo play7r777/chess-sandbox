@@ -151,21 +151,9 @@ body.mode-legal .mode-toggle { display: none !important; }
 }
 .square.light { background: var(--light-sq); }
 .square.dark  { background: var(--dark-sq); }
-.square .coord {
-  position: absolute;
-  font-size: 10px;
-  font-weight: 700;
-  pointer-events: none;
-  user-select: none;
-  font-family: var(--ui-font, system-ui, sans-serif);
-  letter-spacing: 0;
-  line-height: 1;
-}
-.square .coord.file { right: 3px; bottom: 2px; }
-.square .coord.rank { left: 3px; top: 2px; }
-/* chess.com convention: coord text is the opposite shade of the square. */
-.square.light .coord { color: var(--dark-sq); }
-.square.dark  .coord { color: var(--light-sq); }
+/* In-cell coords removed: coords now live in .board-ranks and .board-files
+   strips outside the board (chess.com Game Review style). */
+.square .coord { display: none; }
 
 .square.drop-target { box-shadow: inset 0 0 0 3px var(--accent-strong); }
 .square.selected { box-shadow: inset 0 0 0 3px var(--selected); }
@@ -345,6 +333,8 @@ body.mode-legal .mode-toggle { display: none !important; }
   height: 1px; background: #232a3a;
   margin: 6px 0 4px;
 }
+.gr-graph-slot { margin: 0 0 8px; }
+.gr-graph-slot .review-graph-wrap { margin: 0; }
 .gr-row {
   display: contents;
 }
@@ -654,24 +644,83 @@ body.mode-legal .mode-toggle { display: none !important; }
 
 .review-moves li.is-hidden { display: none; }
 
-/* ---------- Eval bar (left of board) ---------- */
-.board-with-evalbar {
+/* ---------- Board frame: eval-bar | ranks | board, with files-row below ---------- */
+.board-frame {
+  /* Reserved widths for the left-side columns (eval-bar + ranks).
+     The total left-offset is used to align player strips and files row
+     so their right edge always matches the board's right edge. */
+  --eval-bar-w: 22px;
+  --ranks-w: 20px;
+  --board-gap: 6px;
+  --left-offset: calc(var(--eval-bar-w) + var(--ranks-w) + var(--board-gap) * 2);
+  width: min(80vh, 100%);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.board-with-coords {
   display: flex;
   align-items: stretch;
-  gap: 8px;
-  width: min(80vh, 100%);
+  gap: var(--board-gap);
+  width: 100%;
 }
-.board-with-evalbar > .board { width: 100%; flex: 1 1 auto; }
+.board-with-coords > .board { flex: 1 1 auto; min-width: 0; width: auto; }
+.board-with-coords > .eval-bar { flex: 0 0 var(--eval-bar-w); }
+.board-ranks {
+  flex: 0 0 var(--ranks-w);
+  display: grid;
+  grid-template-rows: repeat(8, 1fr);
+  align-items: center;
+  justify-items: end;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  padding-right: 2px;
+}
+.board-files-row {
+  display: flex;
+  gap: var(--board-gap);
+}
+/* Spacer to push files row to align with the board column. */
+.board-files-row::before {
+  content: "";
+  flex: 0 0 calc(var(--eval-bar-w) + var(--ranks-w) + var(--board-gap));
+}
+/* When eval-bar is hidden (Main view), shrink the files-row spacer so
+   files still align with the board column. */
+.board-with-coords:has(> .eval-bar[hidden]) ~ .board-files-row::before {
+  flex: 0 0 var(--ranks-w);
+}
+.board-files {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg-muted);
+  text-align: center;
+  user-select: none;
+  padding-top: 2px;
+}
+/* Player strips: align right edge with board's right edge by indenting
+   left by the eval-bar + ranks width so they only span the board column. */
+.board-frame > .player-strip {
+  margin-left: var(--left-offset);
+  margin-right: 0;
+}
+/* Fallback: if eval-bar is hidden, shrink the offset accordingly. */
+.board-frame:has(.eval-bar[hidden]) > .player-strip {
+  margin-left: calc(var(--ranks-w) + var(--board-gap));
+}
 .eval-bar {
   position: relative;
-  width: 22px;
-  flex: 0 0 22px;
   border: 2px solid #2a2017;
   border-radius: 3px;
   overflow: hidden;
   background: #232629;
   display: flex;
   flex-direction: column;
+  min-height: 100%;
 }
 .eval-bar[hidden] { display: none; }
 .eval-bar-black {
@@ -827,3 +876,74 @@ body.mode-legal .mode-toggle { display: none !important; }
 .side-btn-black { background: #232629; color: #f1f2f2; border-color: #4a5060; }
 .side-btn-none  { background: #2a3140; color: #cbd5e1; }
 .side-btn:hover { filter: brightness(1.1); }
+
+/* Settings modal */
+.settings-btn {
+  background: #2a3140;
+  border: 1px solid #2a3140;
+  color: #cbd5e1;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 16px;
+}
+.settings-btn:hover { filter: brightness(1.15); }
+.settings-modal {
+  position: fixed; inset: 0;
+  background: rgba(13, 18, 29, 0.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.settings-modal[hidden] { display: none; }
+.settings-modal-card {
+  background: #1b2230;
+  border: 1px solid #2a3140;
+  border-radius: 12px;
+  padding: 22px;
+  width: min(560px, 92vw);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.settings-modal-card h3 { margin: 0 0 14px; font-size: 18px; color: #eaeef5; }
+.settings-row { margin-bottom: 16px; }
+.settings-row > label {
+  display: block;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8ba0bf;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.settings-options {
+  display: flex; flex-wrap: wrap; gap: 10px;
+}
+.theme-swatch, .piece-swatch {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  background: #11151f;
+  border: 2px solid #2a3140;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: #cbd5e1;
+  font-size: 12px;
+  min-width: 84px;
+}
+.theme-swatch:hover, .piece-swatch:hover { border-color: #4a5060; }
+.theme-swatch.is-active, .piece-swatch.is-active {
+  border-color: #81b64c;
+  background: rgba(129, 182, 76, 0.08);
+}
+.theme-swatch-preview {
+  display: block;
+  width: 56px; height: 36px;
+  border-radius: 4px;
+  border: 1px solid #2a3140;
+}
+.piece-swatch img { width: 28px; height: 28px; }
+.piece-swatch img + img { margin-left: -6px; }
+.settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.settings-actions button {
+  padding: 8px 18px; border-radius: 6px; border: 1px solid #2a3140;
+  background: #2a3140; color: #eaeef5; cursor: pointer; font-weight: 600;
+}
+.settings-actions button:hover { filter: brightness(1.15); }

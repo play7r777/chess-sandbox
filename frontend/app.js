@@ -10,7 +10,53 @@
 
 import { Chess } from "/static/lib/chess.js";
 
-const PIECE_SET = "cburnett";
+// Persistent UI settings (localStorage). Falls back to defaults if unset.
+const SETTINGS_KEY = "chess-sandbox/settings/v1";
+const DEFAULT_PIECE_SET = "cburnett";
+const DEFAULT_BOARD_THEME = "brown";
+
+// Available board themes — each is just a colour pair (light, dark) +
+// last-move highlight tint. Adding new themes is purely cosmetic.
+const BOARD_THEMES = {
+  brown:      { name: "Brown",      light: "#e9d8b6", dark: "#8a6f48", highlight: "rgba(220, 200, 90, 0.45)" },
+  green:      { name: "Green",      light: "#eeeed2", dark: "#769656", highlight: "rgba(255, 240, 90, 0.45)" },
+  blue:       { name: "Blue",       light: "#dee3e6", dark: "#788a94", highlight: "rgba(110, 180, 255, 0.40)" },
+  wood:       { name: "Wood",       light: "#d6a478", dark: "#7a4c2a", highlight: "rgba(255, 200, 90, 0.40)" },
+  tournament: { name: "Tournament", light: "#c9c9c9", dark: "#5d6470", highlight: "rgba(180, 200, 255, 0.40)" },
+};
+
+// Available piece sets — only cburnett ships at the moment. The UI is
+// structured so additional sets can drop into /static/pieces/<key>/ later.
+const PIECE_SETS = {
+  cburnett: { name: "Classic", note: "" },
+};
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return { theme: DEFAULT_BOARD_THEME, pieces: DEFAULT_PIECE_SET };
+    const parsed = JSON.parse(raw) || {};
+    return {
+      theme: BOARD_THEMES[parsed.theme] ? parsed.theme : DEFAULT_BOARD_THEME,
+      pieces: PIECE_SETS[parsed.pieces] ? parsed.pieces : DEFAULT_PIECE_SET,
+    };
+  } catch { return { theme: DEFAULT_BOARD_THEME, pieces: DEFAULT_PIECE_SET }; }
+}
+
+function saveSettings(s) {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+}
+
+const userSettings = loadSettings();
+function getPieceSet() { return userSettings.pieces; }
+function applyBoardTheme() {
+  const t = BOARD_THEMES[userSettings.theme] || BOARD_THEMES[DEFAULT_BOARD_THEME];
+  const root = document.documentElement;
+  root.style.setProperty("--light-sq", t.light);
+  root.style.setProperty("--dark-sq", t.dark);
+  root.style.setProperty("--highlight", t.highlight);
+}
+applyBoardTheme();
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({
@@ -20,7 +66,7 @@ function escapeHtml(s) {
 
 function pieceSvgUrl(piece) {
   const color = piece === piece.toUpperCase() ? "w" : "b";
-  return `/static/pieces/${PIECE_SET}/${color}${piece.toUpperCase()}.svg`;
+  return `/static/pieces/${getPieceSet()}/${color}${piece.toUpperCase()}.svg`;
 }
 
 function makePieceImg(piece, options = {}) {
@@ -405,19 +451,8 @@ function renderBoard() {
       cell.dataset.square = sqName;
       cell.dataset.idx = String(idx);
 
-      // Coordinates on edges only.
-      if (visualCol === 0) {
-        const rk = document.createElement("span");
-        rk.className = "coord rank";
-        rk.textContent = sqName[1];
-        cell.appendChild(rk);
-      }
-      if (visualRow === 7) {
-        const fl = document.createElement("span");
-        fl.className = "coord file";
-        fl.textContent = sqName[0];
-        cell.appendChild(fl);
-      }
+      // Coordinates are rendered outside the board in dedicated strips
+      // (.board-ranks left, .board-files bottom) — see renderBoardCoords().
 
       const piece = state.board[idx];
       if (piece) {
@@ -463,8 +498,26 @@ function renderBoard() {
     }
   }
   renderBoardArrows();
+  renderBoardCoords();
   syncMetaInputs();
   document.getElementById("fen-input").value = buildFen();
+}
+
+// Render rank numbers (left strip) and file letters (bottom strip)
+// outside the board, respecting flip state. The strips are sized via
+// CSS grid so cells/letters always align with the board cells.
+function renderBoardCoords() {
+  const ranks = document.getElementById("board-ranks");
+  const files = document.getElementById("board-files");
+  if (!ranks || !files) return;
+  const rankOrder = state.flipped
+    ? ["1", "2", "3", "4", "5", "6", "7", "8"]
+    : ["8", "7", "6", "5", "4", "3", "2", "1"];
+  const fileOrder = state.flipped
+    ? ["h", "g", "f", "e", "d", "c", "b", "a"]
+    : ["a", "b", "c", "d", "e", "f", "g", "h"];
+  ranks.innerHTML = rankOrder.map((r) => `<span>${r}</span>`).join("");
+  files.innerHTML = fileOrder.map((f) => `<span>${f}</span>`).join("");
 }
 
 function syncMetaInputs() {
@@ -803,6 +856,56 @@ function makePaletteCell(piece) {
 }
 
 // ---------- Toolbar ----------
+
+// Settings modal: board theme + piece set with localStorage persistence.
+function openSettingsModal() {
+  const modal = document.getElementById("settings-modal");
+  const themesEl = document.getElementById("settings-themes");
+  const piecesEl = document.getElementById("settings-pieces");
+  if (!modal || !themesEl || !piecesEl) return;
+  themesEl.innerHTML = Object.entries(BOARD_THEMES).map(([key, t]) => `
+    <button type="button" class="theme-swatch ${userSettings.theme === key ? "is-active" : ""}" data-theme="${key}" title="${t.name}">
+      <span class="theme-swatch-preview" style="background:linear-gradient(135deg, ${t.light} 0 50%, ${t.dark} 50% 100%)"></span>
+      <span class="theme-swatch-label">${t.name}</span>
+    </button>
+  `).join("");
+  piecesEl.innerHTML = Object.entries(PIECE_SETS).map(([key, p]) => `
+    <button type="button" class="piece-swatch ${userSettings.pieces === key ? "is-active" : ""}" data-pieces="${key}" title="${p.name}">
+      <img src="/static/pieces/${key}/wK.svg" alt="" />
+      <img src="/static/pieces/${key}/bN.svg" alt="" />
+      <span class="piece-swatch-label">${p.name}</span>
+    </button>
+  `).join("");
+  themesEl.querySelectorAll("[data-theme]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      userSettings.theme = btn.dataset.theme;
+      saveSettings(userSettings);
+      applyBoardTheme();
+      themesEl.querySelectorAll(".is-active").forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+    });
+  });
+  piecesEl.querySelectorAll("[data-pieces]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      userSettings.pieces = btn.dataset.pieces;
+      saveSettings(userSettings);
+      renderBoard();        // re-render to swap piece SVGs
+      renderPalette();      // palette uses piece images too
+      piecesEl.querySelectorAll(".is-active").forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+    });
+  });
+  modal.hidden = false;
+}
+function closeSettingsModal() {
+  const modal = document.getElementById("settings-modal");
+  if (modal) modal.hidden = true;
+}
+document.getElementById("btn-settings")?.addEventListener("click", openSettingsModal);
+document.getElementById("btn-settings-close")?.addEventListener("click", closeSettingsModal);
+document.getElementById("settings-modal")?.addEventListener("click", (e) => {
+  if (e.target.id === "settings-modal") closeSettingsModal();
+});
 
 document.getElementById("btn-flip").addEventListener("click", () => {
   state.flipped = !state.flipped;
@@ -1774,6 +1877,7 @@ function renderReviewSummary(s) {
       <span class="gr-title">Game Review</span>
       <span class="gr-filter-hint muted" id="review-filter-hint"></span>
     </div>
+    <div id="gr-graph-slot" class="gr-graph-slot"></div>
     <div class="gr-grid">
       <div class="gr-row gr-row-names">
         <div class="gr-cell gr-label">&nbsp;</div>
@@ -1825,6 +1929,14 @@ function renderReviewSummary(s) {
     hint.textContent = review.filter.size > 0
       ? `(фильтр: ${review.filter.size})`
       : "";
+  }
+
+  // Move the eval-graph DOM node into the Game Review slot so it lives
+  // above the player names row (chess.com Game Review layout).
+  const slot = document.getElementById("gr-graph-slot");
+  const graph = document.getElementById("review-graph-wrap");
+  if (slot && graph && graph.parentElement !== slot) {
+    slot.appendChild(graph);
   }
 }
 

@@ -31,21 +31,28 @@
           <button id="btn-mode-legal" type="button" class="mode-btn is-active" title="Только легальные ходы по правилам">⚖ Легальный</button>
           <button id="btn-mode-sandbox" type="button" class="mode-btn" title="Свободная расстановка, любые ходы">🧪 Песочница</button>
         </div>
+        <button id="btn-settings" type="button" class="settings-btn" title="Настройки доски">⚙</button>
       </div>
     </header>
 
     <main class="layout">
       <section class="board-area">
-        <div id="player-top" class="player-strip" data-view="analysis" hidden></div>
-        <div class="board-with-evalbar">
-          <div id="eval-bar" class="eval-bar" data-view="analysis" hidden>
-            <div class="eval-bar-black"></div>
-            <div class="eval-bar-white"></div>
-            <div class="eval-bar-label" id="eval-bar-label">0.0</div>
+        <div class="board-frame">
+          <div id="player-top" class="player-strip" data-view="analysis" hidden></div>
+          <div class="board-with-coords">
+            <div id="eval-bar" class="eval-bar" data-view="analysis" hidden>
+              <div class="eval-bar-black"></div>
+              <div class="eval-bar-white"></div>
+              <div class="eval-bar-label" id="eval-bar-label">0.0</div>
+            </div>
+            <div id="board-ranks" class="board-ranks" aria-hidden="true"></div>
+            <div id="board" class="board" aria-label="Chess board"></div>
           </div>
-          <div id="board" class="board" aria-label="Chess board"></div>
+          <div class="board-files-row">
+            <div id="board-files" class="board-files" aria-hidden="true"></div>
+          </div>
+          <div id="player-bottom" class="player-strip" data-view="analysis" hidden></div>
         </div>
-        <div id="player-bottom" class="player-strip" data-view="analysis" hidden></div>
         <div class="board-nav" id="board-nav">
           <button id="nav-first" type="button" title="В начало партии" disabled>⏮</button>
           <button id="nav-prev" type="button" title="Ход назад" disabled>◀</button>
@@ -205,6 +212,23 @@
         </section>
       </aside>
     </main>
+
+    <div id="settings-modal" class="settings-modal" hidden>
+      <div class="settings-modal-card">
+        <h3>Настройки доски</h3>
+        <div class="settings-row">
+          <label>Цвет доски</label>
+          <div class="settings-options" id="settings-themes"></div>
+        </div>
+        <div class="settings-row">
+          <label>Набор фигур</label>
+          <div class="settings-options" id="settings-pieces"></div>
+        </div>
+        <div class="settings-actions">
+          <button type="button" id="btn-settings-close">Готово</button>
+        </div>
+      </div>
+    </div>
 
     <div id="side-modal" class="side-modal" hidden>
       <div class="side-modal-card">
