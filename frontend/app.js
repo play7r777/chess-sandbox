@@ -365,9 +365,26 @@ const state = {
     status: "lobby",
     endsAt: 0,
     players: {},        // client_id -> { fen, score, solved, ... }
+    cursors: {},        // client_id -> { x, y, flipped, selected, dragging, ... }
     scoreboard: [],
     selectedId: null,
     mode: "single",     // single | grid
+    // When true, this spectator session is following a *solo* player
+    // (presence WS), not a party. The renderer treats both kinds the
+    // same once the data is in `players[cid]` / `cursors[cid]`, but
+    // we need to know which WS to route lifecycle messages through.
+    kind: "party",      // "party" | "presence"
+  },
+  // Solo-broadcast session — open whenever the user is solving puzzles
+  // outside a party. Lets other users watch them via the "Оффлайн"
+  // tab. Single connection; closed when the user enters a party or
+  // leaves the puzzle view.
+  presence: {
+    active: false,
+    ws: null,
+    // Last known dedupe key for selection broadcasts so we don't spam
+    // the wire on every renderBoard().
+    lastSelectionKey: undefined,
   },
   // Inbound notifications (party invites etc.) from SSE.
   notifications: {
@@ -1205,7 +1222,7 @@ function paintDragLegalTargets(squareName) {
   // Drag bypasses renderBoard() (rebuilding the DOM mid-drag would
   // cancel the drag), so we still need to push the same hint info to
   // spectators directly here.
-  if (state.party.active && state.party.status === "playing") {
+  if (typeof _liveIsActive === "function" && _liveIsActive()) {
     let pieceTag = null;
     try {
       const p = r.chess.get(squareName);
@@ -1234,7 +1251,7 @@ function clearDragLegalTargets() {
     cell.classList.remove("legal-move", "legal-capture", "selected");
   }
   _dragHighlightedSquares.clear();
-  if (state.party.active && state.party.status === "playing"
+  if (typeof _liveIsActive === "function" && _liveIsActive()
       && window.__partyLastSelectionSent !== null) {
     window.__partyLastSelectionSent = null;
     _partyReportSelection({ from: null, piece: null, legalMoves: [], legalCaptures: [] });
@@ -3293,6 +3310,10 @@ function enterPuzzleView() {
   if (state.puzzle.flippedSnapshot === null) {
     state.puzzle.flippedSnapshot = state.flipped;
   }
+  // Open the solo-broadcast WS so anyone in the "Оффлайн" tab can
+  // watch this player's puzzle session in real time. No-op while a
+  // party is active.
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   // Puzzle mode requires legal-move dispatch — force legal mode on so
   // drag/click attempts are routed through `tryFreeplayMove`.
   if (!state.legalMode) setBoardMode(true);
@@ -3328,6 +3349,10 @@ function leavePuzzleView() {
   // bouncing tabs and hitting "Следующая" without penalty. Board input
   // is gated on `state.view === "puzzle"` instead of the active flag.
   _stopPuzzleTimer();
+  // Drop the solo-broadcast connection — outside puzzle view there's
+  // nothing meaningful to broadcast and we don't want to clutter the
+  // "Оффлайн" list with idle entries.
+  try { presenceDisconnect(); } catch (_) { /* ignore */ }
   // If an auto-next was pending (after a fail), defer it until the
   // user actually returns to the puzzle tab — otherwise loadNextPuzzle
   // would slap a puzzle FEN onto the Main / Analysis board.
@@ -4808,6 +4833,79 @@ function _partyEnsureModal() {
   return document.getElementById("party-body");
 }
 
+// ---------- Presence (solo broadcast for the "Оффлайн" tab) ----------
+//
+// While the user is solving puzzles outside a party we keep an open
+// WebSocket so the server can fan-out their cursor / FEN / selection
+// to anyone watching. The connection is opened on enterPuzzleView()
+// and torn down on leavePuzzleView() or when joining a party (party
+// takes precedence — same socket would race both broadcasts).
+
+function _presenceWsUrl() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const u = new URL(`${proto}//${location.host}/api/presence/ws`);
+  u.searchParams.set("client_id", state.user.client_id || "");
+  u.searchParams.set("nickname", state.user.nickname || "");
+  u.searchParams.set("avatar", state.user.avatar || "");
+  u.searchParams.set("role", "player");
+  u.searchParams.set("theme", userSettings.theme || "");
+  u.searchParams.set("pieces", userSettings.pieces || "");
+  if (_isHexColor(userSettings.legalDotColor)) {
+    u.searchParams.set("legal_color", userSettings.legalDotColor);
+  }
+  const r = (state.user && state.user.elo_history && state.user.elo_history.rating)
+    ? state.user.elo_history.rating
+    : (state.sessionRating || 0);
+  if (r) u.searchParams.set("rating", String(r));
+  return u.toString();
+}
+
+function presenceConnect() {
+  if (!state.user.client_id) return;
+  if (state.party.active) return; // party owns the live channel
+  if (state.presence.ws) {
+    try {
+      if (state.presence.ws.readyState === WebSocket.OPEN
+          || state.presence.ws.readyState === WebSocket.CONNECTING) {
+        return;
+      }
+    } catch (_) { /* ignore */ }
+  }
+  let ws;
+  try { ws = new WebSocket(_presenceWsUrl()); }
+  catch (_) { return; }
+  state.presence.ws = ws;
+  state.presence.active = true;
+  ws.onopen = () => {
+    // Push current position immediately so spectators who attach
+    // right at this moment don't see an empty board.
+    try {
+      const c = (state.freeplay && state.freeplay.chess)
+        || (state.game && state.game.chess) || null;
+      const fen = c ? c.fen() : "";
+      if (fen) _partyReportPosition(fen);
+      _partySyncSelectionFromState();
+    } catch (_) { /* ignore */ }
+  };
+  ws.onmessage = () => { /* server-only signals; ignore */ };
+  ws.onerror = () => { /* surface as close */ };
+  ws.onclose = () => {
+    if (state.presence.ws === ws) {
+      state.presence.ws = null;
+      state.presence.active = false;
+    }
+  };
+}
+
+function presenceDisconnect() {
+  const ws = state.presence.ws;
+  state.presence.ws = null;
+  state.presence.active = false;
+  if (ws) {
+    try { ws.close(); } catch (_) { /* ignore */ }
+  }
+}
+
 function _formatPartyTimeLeft(endsAt) {
   const ms = Math.max(0, endsAt * 1000 - Date.now());
   const sec = Math.floor(ms / 1000);
@@ -4830,27 +4928,47 @@ function openPartyModal() {
       <p class="muted">Каждому участнику даётся 10 минут на свой поток пазлов; в конце — общий лидерборд.</p>
     </header>
 
-    <div class="party-section-title">Открытые пати</div>
-    <div id="party-open-list" class="party-open-list">
-      <div class="party-open-empty">Загружаю…</div>
+    <div class="party-tabs" role="tablist">
+      <button type="button" class="party-tab is-active" data-tab="online" role="tab" aria-selected="true">Онлайн</button>
+      <button type="button" class="party-tab" data-tab="offline" role="tab" aria-selected="false">Оффлайн</button>
     </div>
 
-    <div class="party-section-title">Пригласить друзей</div>
-    <div id="party-friend-picker" class="party-friends">
-      <div class="party-friend-empty">Загружаю список игроков…</div>
-    </div>
-    <div class="party-actions">
-      <button id="btn-party-create" type="button" class="puzzle-primary">Создать комнату и пригласить</button>
-      <button id="btn-party-create-empty" type="button" class="puzzle-secondary">Создать пустую (без приглашений)</button>
-    </div>
-
-    <details class="party-fallback" style="margin-top: 14px;">
-      <summary class="muted" style="cursor: pointer;">Войти по коду (старый способ)</summary>
-      <div class="party-actions" style="margin-top: 8px;">
-        <input id="party-join-code" type="text" maxlength="8" placeholder="КОД" class="party-code-input" />
-        <button id="btn-party-join" type="button" class="puzzle-secondary">Войти</button>
+    <section class="party-tab-panel" data-panel="online">
+      <div class="party-section-title">Открытые пати</div>
+      <div id="party-open-list" class="party-open-list">
+        <div class="party-open-empty">Загружаю…</div>
       </div>
-    </details>
+
+      <div class="party-section-title">Пригласить друзей</div>
+      <div id="party-friend-picker" class="party-friends">
+        <div class="party-friend-empty">Загружаю список игроков…</div>
+      </div>
+      <div class="party-actions">
+        <button id="btn-party-create" type="button" class="puzzle-primary">Создать комнату и пригласить</button>
+        <button id="btn-party-create-empty" type="button" class="puzzle-secondary">Создать пустую (без приглашений)</button>
+      </div>
+
+      <details class="party-fallback" style="margin-top: 14px;">
+        <summary class="muted" style="cursor: pointer;">Войти по коду (старый способ)</summary>
+        <div class="party-actions" style="margin-top: 8px;">
+          <input id="party-join-code" type="text" maxlength="8" placeholder="КОД" class="party-code-input" />
+          <button id="btn-party-join" type="button" class="puzzle-secondary">Войти</button>
+        </div>
+      </details>
+    </section>
+
+    <section class="party-tab-panel" data-panel="offline" hidden>
+      <div class="party-section-title">
+        Игроки соло-пазлов
+        <button id="btn-presence-refresh" type="button" class="puzzle-ghost party-refresh-btn" title="Обновить">⟳</button>
+      </div>
+      <p class="muted" style="font-size: 12px; margin: 4px 0 8px;">
+        Игроки решают пазлы на настоящие эло. Кликни по карточке, чтобы наблюдать за их доской в реальном времени.
+      </p>
+      <div id="presence-open-list" class="party-open-list">
+        <div class="party-open-empty">Загружаю…</div>
+      </div>
+    </section>
 
     <div id="party-error" class="party-error" hidden></div>
   `;
@@ -4867,6 +4985,24 @@ function openPartyModal() {
   });
   body.querySelector("#party-join-code").addEventListener("keydown", (e) => {
     if (e.key === "Enter") body.querySelector("#btn-party-join").click();
+  });
+  // Tab switcher.
+  body.querySelectorAll(".party-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.tab;
+      body.querySelectorAll(".party-tab").forEach((b) => {
+        const active = b.dataset.tab === tab;
+        b.classList.toggle("is-active", active);
+        b.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      body.querySelectorAll(".party-tab-panel").forEach((p) => {
+        p.hidden = p.dataset.panel !== tab;
+      });
+      if (tab === "offline") _renderPresenceList().catch(() => {});
+    });
+  });
+  body.querySelector("#btn-presence-refresh")?.addEventListener("click", () => {
+    _renderPresenceList().catch(() => {});
   });
   // Async fills.
   _renderFriendPicker().catch(() => {});
@@ -4911,6 +5047,9 @@ function partyConnect(code) {
   if (state.party.ws) {
     try { state.party.ws.close(); } catch (_) {}
   }
+  // Party owns the live broadcast channel — drop the solo presence
+  // socket so spectator messages don't get duplicated across both.
+  try { presenceDisconnect(); } catch (_) { /* ignore */ }
   state.party.code = code;
   state.party.active = true;
   state.party.status = "lobby";
@@ -5012,23 +5151,52 @@ function sendPartyAttempt(payload) {
   } catch (_) { /* already closed */ }
 }
 
-// Broadcast the player's current FEN to spectators (no-op outside a
-// live party). Throttling is handled server-side. We piggy-back the
-// current board orientation and the last applied move so watchers can
-// mirror the player's view exactly (same flip + same yellow last-move
-// highlight).
+// Returns whichever live broadcast WebSocket is currently active
+// (party first, presence second), or null if neither. Both endpoints
+// accept the same {position, select, cursor} message vocabulary so
+// the helpers below use a single payload regardless of channel.
+function _liveBroadcastWs() {
+  if (state.party.active && state.party.status === "playing"
+      && state.party.ws && state.party.ws.readyState === WebSocket.OPEN) {
+    return state.party.ws;
+  }
+  if (state.presence && state.presence.active
+      && state.presence.ws && state.presence.ws.readyState === WebSocket.OPEN) {
+    return state.presence.ws;
+  }
+  return null;
+}
+
+function _liveIsActive() {
+  return _liveBroadcastWs() !== null;
+}
+
+// Broadcast the player's current FEN to spectators. Routed to the
+// active party or solo-presence WebSocket — no-op if neither is live.
+// Throttling is handled server-side. We piggy-back the current board
+// orientation and the last applied move so watchers can mirror the
+// player's view exactly (same flip + same yellow last-move highlight).
 function _partyReportPosition(fen, opts) {
-  if (!state.party.active || state.party.status !== "playing") return;
-  const ws = state.party.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const ws = _liveBroadcastWs();
+  if (!ws) return;
   const lm = (opts && opts.lastMove) || state.lastMove;
   const lastMoveStr = (lm && lm.from && lm.to) ? `${lm.from}${lm.to}` : "";
+  // Solo-presence consumers also need the puzzle id / rating /
+  // streak to render the watcher's overlay; party stores those
+  // separately so the extra fields are ignored there.
+  const cur = state.puzzle && state.puzzle.current;
   try {
     ws.send(JSON.stringify({
       type: "position",
       fen: String(fen || ""),
       flipped: !!state.flipped,
       last_move: lastMoveStr,
+      puzzle_id: cur ? String(cur.id || "") : "",
+      puzzle_rating: cur ? Number(cur.rating || 0) : 0,
+      streak: Number(state.puzzle ? state.puzzle.streak || 0 : 0),
+      best_streak: Number(state.puzzle ? state.puzzle.bestStreak || 0 : 0),
+      rating: Number(state.user && state.user.elo_history && state.user.elo_history.rating
+        ? state.user.elo_history.rating : (state.sessionRating || 0)),
     }));
   } catch (_) { /* already closed */ }
 }
@@ -5040,7 +5208,7 @@ function _partyReportPosition(fen, opts) {
 // so spectators can paint capture rings vs movement dots, mirroring
 // the player's CSS.
 function _partySyncSelectionFromState() {
-  if (!state.party.active || state.party.status !== "playing") return;
+  if (!_liveIsActive()) return;
   const sel = state.selectedSquare;
   if (!sel) {
     if (window.__partyLastSelectionSent === null) return;
@@ -5080,9 +5248,8 @@ function _partySyncSelectionFromState() {
 // dots match what the player is looking at without a separate config
 // roundtrip.
 function _partyReportSelection({ from, piece, legalMoves, legalCaptures }) {
-  if (!state.party.active || state.party.status !== "playing") return;
-  const ws = state.party.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const ws = _liveBroadcastWs();
+  if (!ws) return;
   try {
     ws.send(JSON.stringify({
       type: "select",
@@ -5109,9 +5276,8 @@ let _cursorLastPayload = "";
 // frames bypass the throttle so state changes are never lost.
 const _CURSOR_THROTTLE_MS = 4;
 function _partyReportCursor(payload) {
-  if (!state.party.active || state.party.status !== "playing") return;
-  const ws = state.party.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const ws = _liveBroadcastWs();
+  if (!ws) return;
   const now = Date.now();
   // Always send drag start/stop and explicit "leave" frames so we
   // don't get stuck with a stale dragging-flag on the spectator side.
@@ -5129,9 +5295,7 @@ function _partyReportCursor(payload) {
 function _installPartyCursorTracking() {
   if (window.__partyCursorInstalled) return;
   window.__partyCursorInstalled = true;
-  const isPartyActive = () => (
-    state.party && state.party.active && state.party.status === "playing"
-  );
+  const isPartyActive = () => _liveIsActive();
   const sample = (el, ev) => {
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
@@ -5351,10 +5515,12 @@ function leaveParty() {
   state.puzzle.nextIdx = 0;
   state.puzzle.needsNextOnReturn = true;
   // If the user is still on the puzzle tab when they leave, fetch a
-  // fresh puzzle now so they don't sit on an empty board.
+  // fresh puzzle now so they don't sit on an empty board. Also restore
+  // the solo-broadcast WS so they show up in the "Оффлайн" tab again.
   if (state.view === "puzzle") {
     state.puzzle.needsNextOnReturn = false;
     loadNextPuzzle();
+    try { presenceConnect(); } catch (_) { /* ignore */ }
   }
 }
 
@@ -5665,6 +5831,57 @@ async function _renderOpenPartiesList() {
   });
 }
 
+// Renders the "Оффлайн" tab — solo puzzle players currently broadcasting.
+// Each card is clickable; click attaches a presence-spectator socket
+// and surfaces the standard mini-board overlay.
+async function _renderPresenceList() {
+  const host = document.getElementById("presence-open-list");
+  if (!host) return;
+  host.innerHTML = `<div class="party-open-empty">Загружаю…</div>`;
+  let players = [];
+  try {
+    const res = await fetch("/api/presence/list");
+    const data = await res.json();
+    players = (data.players || []).filter(
+      (p) => p.client_id !== state.user.client_id,
+    );
+  } catch (_) {
+    host.innerHTML = `<div class="party-open-empty">Не удалось загрузить</div>`;
+    return;
+  }
+  if (!players.length) {
+    host.innerHTML = `<div class="party-open-empty">Сейчас никто не решает соло-пазлы</div>`;
+    return;
+  }
+  host.innerHTML = players.map((p) => {
+    const rating = p.rating ? `${p.rating}` : "—";
+    const puzzleRating = p.puzzle_rating ? `пазл ${p.puzzle_rating}` : "";
+    const streak = p.streak ? `🔥 ${p.streak}` : "";
+    const meta = [puzzleRating, streak].filter(Boolean).join(" · ");
+    return `
+      <div class="party-open-row" data-cid="${escapeHtml(p.client_id)}">
+        <span class="toast-avatar">${escapeHtml(p.avatar || "♟")}</span>
+        <div class="party-open-info">
+          <div>${escapeHtml(p.nickname || "Гость")} · <span class="muted">${escapeHtml(rating)}</span></div>
+          <div class="muted" style="font-size:11px;">${escapeHtml(meta || "решает пазлы")}${p.spectator_count ? ` · ${p.spectator_count} наблюдателей` : ""}</div>
+        </div>
+        <span class="party-open-status is-playing">соло</span>
+        <div class="party-open-actions">
+          <button type="button" class="puzzle-ghost btn-presence-spectate">🔭 Наблюдать</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+  host.querySelectorAll(".party-open-row").forEach((row) => {
+    const cid = row.dataset.cid;
+    if (!cid) return;
+    row.querySelector(".btn-presence-spectate")?.addEventListener("click", () => {
+      presenceSpectatorConnect(cid);
+      closePartyModal();
+    });
+  });
+}
+
 async function partyCreateAndInvite() {
   // Gather selected friend IDs first; we'll fire one invite per checkbox.
   const checked = Array.from(
@@ -5830,8 +6047,128 @@ function spectatorLeave() {
   }
   state.spectator.active = false;
   state.spectator.ws = null;
+  state.spectator.kind = "party";
   const panel = document.getElementById("spectator-panel");
   if (panel) panel.remove();
+}
+
+// Solo-presence spectator. Subscribes to a single live solo player
+// and translates `presence_state` / `presence_cursor` / `presence_gone`
+// into the same {players[cid], cursors[cid]} shape the party
+// spectator renderer already consumes — that way one panel handles
+// both modes with no extra UI work.
+function presenceSpectatorConnect(targetCid) {
+  if (!targetCid) return;
+  if (state.spectator.ws) {
+    try { state.spectator.ws.close(); } catch (_) {}
+  }
+  state.spectator = {
+    active: true,
+    ws: null,
+    code: targetCid,
+    party_id: null,
+    status: "playing",
+    endsAt: 0,
+    players: {},
+    cursors: {},
+    scoreboard: [],
+    selectedId: targetCid,
+    mode: "single",
+    kind: "presence",
+  };
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const u = new URL(`${proto}//${location.host}/api/presence/ws`);
+  u.searchParams.set("client_id", state.user.client_id || `s-${Math.random().toString(36).slice(2, 10)}`);
+  u.searchParams.set("nickname", state.user.nickname || "");
+  u.searchParams.set("avatar", state.user.avatar || "");
+  u.searchParams.set("role", "spectator");
+  u.searchParams.set("watch", targetCid);
+  let ws;
+  try { ws = new WebSocket(u.toString()); }
+  catch (_) {
+    state.spectator.active = false;
+    return;
+  }
+  state.spectator.ws = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handlePresenceSpectatorMessage(msg);
+  };
+  ws.onerror = () => { /* surface as close */ };
+  ws.onclose = () => {
+    if (state.spectator.kind === "presence") {
+      state.spectator.active = false;
+      state.spectator.ws = null;
+    }
+  };
+  _spectatorRender();
+}
+
+// Translates the presence WS payloads into the shape the existing
+// spectator renderer expects. ``presence_state`` carries everything
+// (FEN, theme, pieces, selection, last_move, flipped) so we just
+// merge it into players[cid]; ``presence_cursor`` mirrors the
+// `player_cursor` shape one-to-one.
+function handlePresenceSpectatorMessage(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "presence_state": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      const sp = state.spectator;
+      const prev = sp.players[cid] || {};
+      sp.players[cid] = {
+        ...prev,
+        client_id: cid,
+        nickname: msg.nickname || prev.nickname || "",
+        avatar: msg.avatar || prev.avatar || "♟",
+        theme: typeof msg.theme === "string" ? msg.theme : (prev.theme || ""),
+        pieces: typeof msg.pieces === "string" ? msg.pieces : (prev.pieces || ""),
+        legal_color: typeof msg.legal_color === "string" ? msg.legal_color : (prev.legal_color || ""),
+        rating: Number(msg.rating || prev.rating || 0),
+        flipped: !!msg.flipped,
+        last_move: typeof msg.last_move === "string" ? msg.last_move : "",
+        selection: msg.selection || null,
+        fen: typeof msg.fen === "string" ? msg.fen : (prev.fen || ""),
+        puzzle_id: msg.puzzle_id || prev.puzzle_id || "",
+        puzzle_rating: Number(msg.puzzle_rating || prev.puzzle_rating || 0),
+        streak: Number(msg.streak || 0),
+        best_streak: Number(msg.best_streak || 0),
+        score: Number(msg.streak || 0),
+        solved: Number(msg.best_streak || 0),
+      };
+      sp.selectedId = cid;
+      _spectatorRender();
+      break;
+    }
+    case "presence_cursor": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      state.spectator.cursors[cid] = {
+        x: Number(msg.x) || 0,
+        y: Number(msg.y) || 0,
+        flipped: !!msg.flipped,
+        selected: typeof msg.selected === "string" ? msg.selected : "",
+        dragging: !!msg.dragging,
+        drag_piece: typeof msg.drag_piece === "string" ? msg.drag_piece : "",
+        drag_from: typeof msg.drag_from === "string" ? msg.drag_from : "",
+        ts: Date.now(),
+      };
+      _spectatorRender();
+      break;
+    }
+    case "presence_gone": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      const sp = state.spectator;
+      delete sp.players[cid];
+      delete sp.cursors[cid];
+      sp.status = "finished";
+      _spectatorRender();
+      break;
+    }
+  }
 }
 
 function _spectatorRender() {
@@ -5869,13 +6206,24 @@ function _spectatorRender() {
     ? _formatPartyTimeLeft(sp.endsAt)
     : (sp.status === "finished" ? "Финиш" : "Лобби");
 
+  const isPresence = sp.kind === "presence";
+  // Presence-mode follows exactly one player, so the grid toggle and
+  // timer make no sense — collapse the header to "watching X".
+  const headerMeta = isPresence
+    ? `<span class="spectator-meta">соло · настоящий эло</span>`
+    : `<span class="spectator-meta">${escapeHtml(sp.code || "")} · ${escapeHtml(timer)}</span>`;
+  const headerToggles = isPresence
+    ? ""
+    : `
+      <button type="button" class="spectator-toggle ${sp.mode === "single" ? "is-active" : ""}" data-mode="single">Одна доска</button>
+      <button type="button" class="spectator-toggle ${sp.mode === "grid" ? "is-active" : ""}" data-mode="grid">Все доски</button>
+    `;
   panel.innerHTML = `
     <div class="spectator-header">
       <span class="spectator-title">🔭 Наблюдатель</span>
-      <span class="spectator-meta">${escapeHtml(sp.code || "")} · ${escapeHtml(timer)}</span>
+      ${headerMeta}
       <span class="spectator-spacer"></span>
-      <button type="button" class="spectator-toggle ${sp.mode === "single" ? "is-active" : ""}" data-mode="single">Одна доска</button>
-      <button type="button" class="spectator-toggle ${sp.mode === "grid" ? "is-active" : ""}" data-mode="grid">Все доски</button>
+      ${headerToggles}
       <button type="button" class="spectator-leave">Выйти</button>
     </div>
     <div class="spectator-body">
@@ -5919,15 +6267,27 @@ function _spectatorRenderSingle(p) {
   const streakHtml = streak >= 3
     ? `<span class="ps-val ok">🔥 ${streak}</span>`
     : `<span class="ps-val">🔥 ${streak}</span>`;
-  return `
-    <div class="spectator-single">
-      <div class="board-host">${_renderMiniBoardFromFen(fen, p)}</div>
-      <div class="meta-host">
+  // Solo-presence view shows real-rating + current puzzle rating;
+  // party view keeps the score / solved / failed breakdown.
+  const isPresence = state.spectator && state.spectator.kind === "presence";
+  const metaInner = isPresence
+    ? `
+        <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
+        <div class="row">Рейтинг игрока: <b>${Number(p.rating || 0) || "—"}</b></div>
+        <div class="row">Текущий пазл: ${p.puzzle_rating ? `<b>${Number(p.puzzle_rating)}</b>` : "—"}</div>
+        <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
+        <div class="row muted" style="font-size:11px; margin-top:6px;">Соло-режим · настоящий эло</div>
+      `
+    : `
         <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
         <div class="row">Очки: <b>${Number(p.score || 0)}</b></div>
         <div class="row">Решено: ${Number(p.solved || 0)} · ошибок: ${Number(p.failed || 0)} · пропущено: ${Number(p.skipped || 0)}</div>
         <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
-      </div>
+      `;
+  return `
+    <div class="spectator-single">
+      <div class="board-host">${_renderMiniBoardFromFen(fen, p)}</div>
+      <div class="meta-host">${metaInner}</div>
     </div>
   `;
 }

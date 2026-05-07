@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from . import notifications as notifications_db
 from . import party as party_room
+from . import presence as presence_room
 from . import puzzles as puzzles_db
 from . import users as users_db
 from .analysis import analyse_game, import_game_async
@@ -799,6 +800,175 @@ async def _party_ws_spectator(
         logger.warning("party spectator ws error: %s", exc)
     finally:
         await party.detach_spectator(client_id)
+
+
+# ---- Solo presence (live spectating outside parties) ----
+
+
+@app.get("/api/presence/list")
+async def presence_list() -> dict[str, Any]:
+    """Discovery list for the 'Оффлайн' tab — solo puzzle players who
+    are currently live and broadcasting. Excludes the caller? No, the
+    caller filters themselves on the frontend so the same list works
+    for everyone without authenticating the request here."""
+    return {"players": presence_room.list_active()}
+
+
+@app.websocket("/api/presence/ws")
+async def presence_ws(ws: WebSocket) -> None:
+    """Single endpoint that handles both player-broadcast and
+    spectator-attach traffic, distinguished by the ``role`` query
+    parameter. Player connections register their solo session;
+    spectator connections subscribe to a specific player by
+    ``watch=<client_id>``."""
+    client_id = ws.query_params.get("client_id") or ""
+    role = (ws.query_params.get("role") or "player").lower()
+    nickname = ws.query_params.get("nickname") or ""
+    avatar = ws.query_params.get("avatar") or ""
+    if not client_id or len(client_id) < 4:
+        await ws.close(code=4400)
+        return
+    await ws.accept()
+    if role == "spectator":
+        target = ws.query_params.get("watch") or ""
+        if not target:
+            await ws.send_json({"type": "error", "code": "no_target"})
+            await ws.close(code=4400)
+            return
+        await _presence_ws_spectator(ws, spectator_id=client_id, target=target)
+    else:
+        theme = ws.query_params.get("theme") or ""
+        pieces = ws.query_params.get("pieces") or ""
+        legal_color = ws.query_params.get("legal_color") or ""
+        try:
+            rating = int(ws.query_params.get("rating") or 0)
+        except (TypeError, ValueError):
+            rating = 0
+        await _presence_ws_player(
+            ws,
+            client_id=client_id,
+            nickname=nickname,
+            avatar=avatar,
+            theme=theme,
+            pieces=pieces,
+            legal_color=legal_color,
+            rating=rating,
+        )
+
+
+async def _presence_ws_player(
+    ws: WebSocket,
+    *,
+    client_id: str,
+    nickname: str,
+    avatar: str,
+    theme: str,
+    pieces: str,
+    legal_color: str,
+    rating: int,
+) -> None:
+    await presence_room.attach_player(
+        ws,
+        client_id=client_id,
+        nickname=nickname,
+        avatar=avatar,
+        theme=theme,
+        pieces=pieces,
+        legal_color=legal_color,
+        rating=rating,
+    )
+    try:
+        while True:
+            msg = await ws.receive_json()
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "position":
+                await presence_room.update_position(
+                    client_id,
+                    str(msg.get("fen") or ""),
+                    flipped=bool(msg.get("flipped"))
+                    if "flipped" in msg
+                    else None,
+                    last_move=str(msg.get("last_move") or "")
+                    if "last_move" in msg
+                    else None,
+                    puzzle_id=str(msg.get("puzzle_id") or "")
+                    if "puzzle_id" in msg
+                    else None,
+                    puzzle_rating=int(msg.get("puzzle_rating") or 0)
+                    if "puzzle_rating" in msg
+                    else None,
+                    streak=int(msg.get("streak") or 0)
+                    if "streak" in msg
+                    else None,
+                    best_streak=int(msg.get("best_streak") or 0)
+                    if "best_streak" in msg
+                    else None,
+                    rating=int(msg.get("rating") or 0)
+                    if "rating" in msg
+                    else None,
+                )
+            elif mtype == "select":
+                await presence_room.update_selection(
+                    client_id,
+                    from_sq=msg.get("from"),
+                    piece=msg.get("piece"),
+                    legal_moves=msg.get("legal_moves"),
+                    legal_captures=msg.get("legal_captures"),
+                    legal_color=msg.get("legal_color"),
+                )
+            elif mtype == "cursor":
+                await presence_room.relay_cursor(
+                    client_id,
+                    msg.get("x", 0),
+                    msg.get("y", 0),
+                    flipped=bool(msg.get("flipped")),
+                    selected=str(msg.get("selected") or "") or None,
+                    dragging=bool(msg.get("dragging")),
+                    drag_piece=str(msg.get("drag_piece") or "") or None,
+                    drag_from=str(msg.get("drag_from") or "") or None,
+                )
+            elif mtype == "ping":
+                await ws.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("presence player ws error: %s", exc)
+    finally:
+        await presence_room.detach_player(client_id)
+
+
+async def _presence_ws_spectator(
+    ws: WebSocket, *, spectator_id: str, target: str,
+) -> None:
+    presence = await presence_room.attach_spectator(
+        ws, spectator_id=spectator_id, target_client_id=target,
+    )
+    if presence is None:
+        try:
+            await ws.send_json({"type": "presence_gone", "client_id": target})
+        except Exception:
+            pass
+        await ws.close(code=4404)
+        return
+    try:
+        while True:
+            msg = await ws.receive_json()
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "ping":
+                await ws.send_json({"type": "pong"})
+            elif mtype == "leave":
+                await ws.close()
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("presence spectator ws error: %s", exc)
+    finally:
+        await presence_room.detach_spectator(target, spectator_id)
 
 
 # ---- Static frontend ----

@@ -2118,6 +2118,41 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   letter-spacing: 0.05em;
   color: #7c8da9;
   margin: 14px 0 6px;
+  display: flex; align-items: center; gap: 8px;
+}
+.party-section-title .party-refresh-btn {
+  margin-left: auto;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.party-tabs {
+  display: flex; gap: 4px;
+  margin: 8px 0 12px;
+  border-bottom: 1px solid #2a3a52;
+}
+.party-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #94a4be;
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: color .12s, border-color .12s;
+}
+.party-tab:hover { color: #c4d4ec; }
+.party-tab.is-active {
+  color: #e6efff;
+  border-bottom-color: #6da7ff;
+}
+.party-tab-panel { animation: fadeIn .15s ease-out; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
 }
 
 /* ---------- Spectator UI (binoculars) ---------- */
