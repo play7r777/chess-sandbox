@@ -118,31 +118,43 @@ body.view-main     main [data-view="analysis"],
 body.view-main     main [data-view="puzzle"],
 body.view-main     main [data-view="daily"],
 body.view-main     main [data-view="rush"],
+body.view-main     main [data-view="battle"],
 body.view-main     main [data-view="opening"] { display: none !important; }
 body.view-analysis main [data-view="main"],
 body.view-analysis main [data-view="puzzle"],
 body.view-analysis main [data-view="daily"],
 body.view-analysis main [data-view="rush"],
+body.view-analysis main [data-view="battle"],
 body.view-analysis main [data-view="opening"] { display: none !important; }
 body.view-puzzle   main [data-view="main"],
 body.view-puzzle   main [data-view="analysis"],
 body.view-puzzle   main [data-view="daily"],
 body.view-puzzle   main [data-view="rush"],
+body.view-puzzle   main [data-view="battle"],
 body.view-puzzle   main [data-view="opening"] { display: none !important; }
 body.view-daily    main [data-view="main"],
 body.view-daily    main [data-view="analysis"],
 body.view-daily    main [data-view="puzzle"],
 body.view-daily    main [data-view="rush"],
+body.view-daily    main [data-view="battle"],
 body.view-daily    main [data-view="opening"] { display: none !important; }
 body.view-rush     main [data-view="main"],
 body.view-rush     main [data-view="analysis"],
 body.view-rush     main [data-view="puzzle"],
 body.view-rush     main [data-view="daily"],
+body.view-rush     main [data-view="battle"],
 body.view-rush     main [data-view="opening"] { display: none !important; }
+body.view-battle   main [data-view="main"],
+body.view-battle   main [data-view="analysis"],
+body.view-battle   main [data-view="puzzle"],
+body.view-battle   main [data-view="daily"],
+body.view-battle   main [data-view="rush"],
+body.view-battle   main [data-view="opening"] { display: none !important; }
 body.view-opening  main [data-view="main"],
 body.view-opening  main [data-view="analysis"],
 body.view-opening  main [data-view="puzzle"],
 body.view-opening  main [data-view="daily"],
+body.view-opening  main [data-view="battle"],
 body.view-opening  main [data-view="rush"] { display: none !important; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
@@ -3198,6 +3210,72 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
     max-height: 200px;
   }
   .rush-pick-grid { grid-template-columns: 1fr; }
+}
+
+/* AI coach panel (Opening Trainer): Ollama + Stockfish 18. */
+.opening-ai-panel {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(120, 180, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(20, 30, 48, 0.55);
+}
+.opening-ai-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #d8e3f5;
+}
+.opening-ai-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.opening-ai-badge-ok    { background: rgba(74, 199, 124, 0.16); color: #6ad48b; border-color: rgba(74, 199, 124, 0.4); }
+.opening-ai-badge-off   { background: rgba(255, 96, 96, 0.14);  color: #ff8b8b; border-color: rgba(255, 96, 96, 0.35); }
+.opening-ai-badge-checking { background: rgba(247, 198, 49, 0.15); color: #ffd75e; border-color: rgba(247, 198, 49, 0.4); }
+.opening-ai-badge-sf    { background: rgba(120, 180, 255, 0.15); color: #9bc6ff; border-color: rgba(120, 180, 255, 0.35); }
+.opening-ai-badge-sf-off{ background: rgba(255, 255, 255, 0.04); color: #97a8c2; border-color: rgba(255, 255, 255, 0.08); }
+.opening-ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.opening-ai-actions button { font-size: 12px; }
+.opening-ai-text {
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-size: 13px;
+  color: #d6e0f0;
+  min-height: 18px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.opening-ai-text.is-error { color: #ffb3b3; }
+.opening-ai-text.muted    { color: #8aa0c0; font-style: italic; }
+.opening-ai-help {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.opening-ai-help code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #ffd75e;
 }
 
 /* Party avg-ELO chips (lobby header + side panel HUD). */

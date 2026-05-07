@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from . import daily_puzzle as daily_puzzle_pack
 from . import notifications as notifications_db
+from . import ollama as ollama_client
 from . import opening_trainer as opening_trainer_pack
 from . import party as party_room
 from . import presence as presence_room
@@ -138,6 +139,14 @@ class OpeningAttemptRequest(BaseModel):
     opening_id: str = Field(..., min_length=1, max_length=64)
     ply: int = Field(..., ge=0, le=64)
     san: str = Field(..., min_length=1, max_length=12)
+
+
+class OpeningCoachRequest(BaseModel):
+    opening_id: str = Field(..., min_length=1, max_length=64)
+    ply: int = Field(..., ge=0, le=64, description="Ply position the user is asking about")
+    last_san: str | None = Field(default=None, max_length=12, description="The user's actual last move in SAN, if any")
+    correct: bool | None = Field(default=None, description="Whether the user's last move matched the trained line")
+    locale: str = Field(default="ru", min_length=2, max_length=8)
 
 
 def _print_puzzle_banner() -> None:
@@ -745,6 +754,244 @@ def opening_trainer_leaderboard(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
     return {"rows": users_db.opening_trainer_leaderboard(limit=limit)}
+
+
+@app.get("/api/opening_trainer/coach/status")
+async def opening_trainer_coach_status() -> dict[str, Any]:
+    """Probe local Ollama daemon — used by the UI to decide whether to
+    show the AI coach button or fall back to canned coach lines."""
+    cfg = ollama_client.OllamaConfig(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_model,
+        timeout_s=settings.ollama_timeout_s,
+        num_predict=settings.ollama_num_predict,
+    )
+    alive = await ollama_client.is_alive(cfg)
+    models = await ollama_client.list_models(cfg) if alive else []
+    return {
+        "available": alive,
+        "model": settings.ollama_model,
+        "base_url": settings.ollama_base_url,
+        "installed_models": models,
+        "stockfish_running": engine.is_running,
+    }
+
+
+def _coach_eval_summary(
+    score_cp: int | None,
+    score_mate: int | None,
+    pv_san: list[str],
+) -> str:
+    """Format Stockfish output for the LLM prompt in human-readable form."""
+    if score_mate is not None:
+        verdict = f"мат в {abs(score_mate)} (+мат у {'белых' if score_mate > 0 else 'чёрных'})"
+    elif score_cp is not None:
+        cp = score_cp
+        if cp >= 200:
+            verdict = f"перевес белых ≈ +{cp/100:.2f} пешки"
+        elif cp >= 50:
+            verdict = f"небольшой перевес белых ≈ +{cp/100:.2f}"
+        elif cp >= -50:
+            verdict = f"равенство ({cp/100:+.2f})"
+        elif cp >= -200:
+            verdict = f"небольшой перевес чёрных ≈ {cp/100:.2f}"
+        else:
+            verdict = f"перевес чёрных ≈ {cp/100:.2f} пешки"
+    else:
+        verdict = "оценка не получена"
+    line = " ".join(pv_san[:8]) if pv_san else "(нет линии)"
+    return f"оценка: {verdict}; главная линия: {line}"
+
+
+async def _stockfish_top_lines(fen: str, multipv: int = 2, depth: int = 18) -> list[dict[str, Any]]:
+    """Return up to ``multipv`` Stockfish lines as {score_cp, score_mate, pv_san}.
+
+    Returns an empty list if the engine is not configured / fails.
+    """
+    if not engine.is_running:
+        return []
+    try:
+        infos = await engine.analyse_raw(fen, depth=depth, multipv=multipv)
+    except Exception as exc:
+        logger.warning("Stockfish coach eval failed: %s", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    board = chess.Board(fen)
+    for info in infos:
+        score = info.get("score")
+        score_cp: int | None = None
+        score_mate: int | None = None
+        if score is not None:
+            try:
+                pov = score.white()
+            except Exception:
+                pov = score
+            if pov.is_mate():
+                score_mate = pov.mate()
+            else:
+                score_cp = pov.score()
+        pv_moves = info.get("pv") or []
+        pv_san: list[str] = []
+        b = board.copy()
+        for mv in pv_moves[:10]:
+            try:
+                pv_san.append(b.san(mv))
+                b.push(mv)
+            except Exception:
+                break
+        out.append({
+            "score_cp": score_cp,
+            "score_mate": score_mate,
+            "pv_san": pv_san,
+        })
+    return out
+
+
+def _build_coach_prompt(
+    *,
+    opening: opening_trainer_pack.Opening,
+    ply: int,
+    last_san: str | None,
+    correct: bool | None,
+    fen: str,
+    line_so_far: list[str],
+    expected_san: str | None,
+    sf_lines: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Build the chat messages for the AI coach. Russian, concise."""
+    side = "белыми" if opening.side == "white" else "чёрными"
+    sf_text_lines: list[str] = []
+    for i, ln in enumerate(sf_lines, start=1):
+        sf_text_lines.append(
+            f"  {i}) " + _coach_eval_summary(ln.get("score_cp"), ln.get("score_mate"), ln.get("pv_san") or [])
+        )
+    sf_block = "\n".join(sf_text_lines) if sf_text_lines else "  (Stockfish недоступен)"
+    line_history = " ".join(line_so_far) if line_so_far else "(старт партии)"
+    if last_san:
+        if correct is True:
+            outcome_line = f"Ученик сыграл {last_san} — это совпадает с главной теоретической линией."
+        elif correct is False:
+            outcome_line = f"Ученик сыграл {last_san}. Главный ход теории: {expected_san}."
+        else:
+            outcome_line = f"Ход ученика: {last_san}."
+    else:
+        outcome_line = f"Ученик дошёл до позиции на ходу {ply // 2 + 1}. Ожидаемый ход теории: {expected_san or '(линия завершена)'}."
+
+    system = (
+        "Ты — опытный шахматный тренер. Объясняй коротко (3–6 предложений) на русском, "
+        "без шахматной формализации, говори по сути плана, идей и ловушек. "
+        "Не выдумывай: опирайся на оценку Stockfish и теорию дебюта, которые тебе дают. "
+        "Если ход ученика плох, объясни почему и какой план был задуман в дебюте."
+    )
+    user = (
+        f"Дебют: {opening.name} ({opening.eco}), играем {side}.\n"
+        f"Теория дебюта: {opening.theory}\n"
+        f"Сыгранная линия: {line_history}\n"
+        f"{outcome_line}\n"
+        f"FEN: {fen}\n"
+        f"Stockfish (top {len(sf_lines) or 1}):\n{sf_block}\n\n"
+        "Дай ученику разбор: 1) кратко прокомментируй последний ход (или текущую позицию), "
+        "2) объясни план дебюта в этой позиции, 3) если ход был ошибочным — подскажи правильный план."
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def _coach_fallback_text(
+    opening: opening_trainer_pack.Opening,
+    ply: int,
+    expected_san: str | None,
+    correct: bool | None,
+    sf_lines: list[dict[str, Any]],
+) -> str:
+    bank = opening.coach_good if correct else opening.coach_bad
+    base = bank[ply % len(bank)] if bank else opening.coach_complete or ""
+    parts: list[str] = []
+    if base:
+        parts.append(base)
+    parts.append(f"Главный ход теории: {expected_san or '(линия пройдена)'}.")
+    if sf_lines:
+        first = sf_lines[0]
+        parts.append("Stockfish 18: " + _coach_eval_summary(
+            first.get("score_cp"), first.get("score_mate"), first.get("pv_san") or [],
+        ))
+    parts.append(opening.theory)
+    return "\n".join(parts)
+
+
+@app.post("/api/opening_trainer/coach")
+async def opening_trainer_coach(req: OpeningCoachRequest) -> StreamingResponse:
+    """Stream AI-coach text for the given opening position.
+
+    Combines Stockfish 18 evaluation + Ollama LLM. If Ollama is not
+    available, falls back to canned coach lines + theory + Stockfish
+    summary so the user always sees something useful.
+
+    Response is `text/plain` with chunked transfer — frontend reads
+    `response.body.getReader()` and appends each chunk to the panel.
+    """
+    opening = opening_trainer_pack.get_opening(req.opening_id)
+    if opening is None:
+        raise HTTPException(status_code=404, detail="Opening not found.")
+
+    line = opening.line_san
+    ply = req.ply
+    if ply < 0:
+        ply = 0
+    if ply > len(line):
+        ply = len(line)
+    line_so_far = list(line[:ply])
+    expected_san = line[ply] if ply < len(line) else None
+
+    board = chess.Board()
+    for san in line_so_far:
+        try:
+            board.push_san(san)
+        except ValueError:
+            break
+    fen = board.fen()
+
+    # Stockfish snapshot — best-effort, never blocks fallback path.
+    sf_lines = await _stockfish_top_lines(fen, multipv=2, depth=18)
+
+    cfg = ollama_client.OllamaConfig(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_model,
+        timeout_s=settings.ollama_timeout_s,
+        num_predict=settings.ollama_num_predict,
+    )
+    messages = _build_coach_prompt(
+        opening=opening,
+        ply=ply,
+        last_san=req.last_san,
+        correct=req.correct,
+        fen=fen,
+        line_so_far=line_so_far,
+        expected_san=expected_san,
+        sf_lines=sf_lines,
+    )
+
+    async def streamer() -> Any:
+        # Try Ollama first; on any failure fall back to canned text so
+        # the frontend always has something to display.
+        try:
+            async for chunk in ollama_client.stream_chat(cfg, messages):
+                yield chunk.encode("utf-8")
+            return
+        except ollama_client.OllamaUnavailable as exc:
+            logger.info("Ollama unavailable, falling back to canned coach: %s", exc)
+        except Exception as exc:
+            logger.warning("Ollama coach error: %s", exc)
+        yield (
+            "AI-тренер сейчас недоступен (запусти `ollama serve` локально). "
+            "Вот разбор от встроенного тренера + Stockfish:\n\n"
+        ).encode()
+        text = _coach_fallback_text(opening, ply, expected_san, req.correct, sf_lines)
+        yield text.encode()
+
+    return StreamingResponse(streamer(), media_type="text/plain; charset=utf-8")
 
 
 # ---- Party / Co-op puzzles ----

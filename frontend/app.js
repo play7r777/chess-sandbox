@@ -544,6 +544,23 @@ const state = {
     flippedSnapshot: null,
     mastery: {},               // { lineId: { plays, correct, completed_at } }
     coachMsg: "",
+    // AI coach (Ollama + Stockfish 18). status is one of:
+    //   null      — not probed yet
+    //   "checking"— probe in flight
+    //   true/false — last probe outcome (true = Ollama up)
+    aiCoach: {
+      status: null,
+      model: "",
+      baseUrl: "",
+      installedModels: [],
+      stockfishRunning: false,
+      streaming: false,
+      text: "",
+      error: "",
+      lastSan: "",
+      lastCorrect: null,
+      lastPly: 0,
+    },
   },
 };
 
@@ -2413,7 +2430,7 @@ if (dropzone) {
 // ---------- View tabs (Main / Analysis) ----------
 
 function setView(view) {
-  const allowed = ["main", "analysis", "puzzle", "daily", "rush", "opening"];
+  const allowed = ["main", "analysis", "puzzle", "daily", "rush", "battle", "opening"];
   const v = allowed.includes(view) ? view : "main";
   const prev = state.view;
   state.view = v;
@@ -2434,9 +2451,11 @@ function setView(view) {
   if (prev === "rush" && v !== "rush") leaveRushView();
   if (prev === "daily" && v !== "daily") leaveDailyView();
   if (prev === "opening" && v !== "opening") leaveOpeningView();
+  if (prev === "battle" && v !== "battle") leaveBattleView();
   if (v === "puzzle")       enterPuzzleView();
   else if (v === "daily")   enterDailyView();
   else if (v === "rush")    enterRushView();
+  else if (v === "battle")  enterBattleView();
   else if (v === "opening") enterOpeningView();
 }
 
@@ -4836,8 +4855,6 @@ userMenuDropdown?.querySelectorAll(".user-menu-item").forEach((btn) => {
       openProfileModal(state.user.client_id);
     } else if (action === "leaderboard") {
       openLeaderboardModal();
-    } else if (action === "party") {
-      openPartyModal();
     }
   });
 });
@@ -5255,13 +5272,25 @@ function _partyWsUrl(code) {
 }
 
 function _partyEnsureModal(opts) {
+  // Battle (formerly Party) used to live in a modal launched from the
+  // burger menu. We've since promoted it to a full top-bar tab
+  // (`#tab-battle`) — the lobby / scoreboard / results render directly
+  // inside the side-panel container `#battle-body`. We keep the legacy
+  // modal node in the DOM as a fallback host in case future code paths
+  // open it before the panel has a chance to mount, but the panel is
+  // always the preferred render target. Callers are responsible for
+  // switching the view to "battle" (so the panel is visible) — we
+  // deliberately don't do it here to keep this helper free of
+  // recursive setView calls.
+  const panelBody = document.getElementById("battle-body");
+  if (panelBody) {
+    panelBody.classList.toggle("party-card-results", !!(opts && opts.results));
+    return panelBody;
+  }
   const m = document.getElementById("party-modal");
   if (m) m.hidden = false;
   const card = m && m.querySelector(".modal-card");
   if (card) {
-    // Toggle the wide-results modifier on the modal card so the
-    // detailed scoreboard table doesn't get clipped / horizontally
-    // scrolled inside the default 560px party card.
     card.classList.toggle("party-card-results", !!(opts && opts.results));
   }
   return document.getElementById("party-body");
@@ -5350,10 +5379,25 @@ function _formatPartyTimeLeft(endsAt) {
 
 function openPartyModal() {
   if (!state.user.client_id) return;
+  // Promote to the Battle tab if we're not already there. enterBattleView()
+  // will re-render this lobby UI on its own — but we still call into the
+  // chooser renderer below so callers that arrive here directly (e.g. from
+  // accepting an invite) get fresh content immediately.
+  if (state.view !== "battle") setView("battle");
   const body = _partyEnsureModal();
   if (!body) return;
   if (state.party.active && state.party.status === "playing") {
-    closePartyModal();
+    // Battle is in flight — render the live scoreboard inside the panel
+    // instead of the chooser, so peeking at Battle while playing is
+    // useful (was a no-op before).
+    _partyMountSidePanel();
+    _partyRenderScoreboard();
+    return;
+  }
+  if (state.party.active && state.party.status === "lobby") {
+    // Already connected to a lobby — render that lobby instead of the
+    // chooser (otherwise we'd lose the joined party).
+    renderPartyLobby();
     return;
   }
   body.innerHTML = `
@@ -5448,8 +5492,13 @@ function _partyShowError(e) {
 }
 
 function closePartyModal() {
+  // Hide the legacy modal if it's still around. The Battle tab itself
+  // is dismissed by switching the view back to puzzle (or whatever the
+  // user picks); we do that in the start / spectate flows directly.
   const m = document.getElementById("party-modal");
   if (m) m.hidden = true;
+  const panel = document.getElementById("battle-body");
+  if (panel) panel.classList.remove("party-card-results");
 }
 
 async function partyCreate() {
@@ -7622,6 +7671,44 @@ function _hydrateOpeningFromUser(u) {
   _saveOpeningSession();
 }
 
+// ---------- Battle (Puzzle Battle) view ----------
+//
+// The Battle tab is the new home of the former "Party" feature: the
+// lobby chooser, lobby itself, live scoreboard and post-match results
+// all render inside `#battle-body`. enterBattleView dispatches to
+// whichever sub-view the local party state implies.
+async function enterBattleView() {
+  if (!state.user.client_id) {
+    const host = document.getElementById("battle-body");
+    if (host) {
+      host.innerHTML = `<div class="puzzle-empty">Зайди как игрок, чтобы создавать пати и принимать инвайты.</div>`;
+    }
+    return;
+  }
+  if (state.party.active && state.party.status === "lobby") {
+    renderPartyLobby();
+    return;
+  }
+  if (state.party.active && state.party.status === "playing") {
+    _partyMountSidePanel();
+    _partyRenderScoreboard();
+    return;
+  }
+  if (state.party.status === "finished" && Array.isArray(state.party.finalResults) && state.party.finalResults.length) {
+    _partyShowResults();
+    return;
+  }
+  // Default: render the lobby chooser (open parties / create / invite codes).
+  openPartyModal();
+}
+
+function leaveBattleView() {
+  // Nothing to tear down — the panel is hidden by CSS view scoping.
+  // Hide the legacy modal in case some legacy code path opened it.
+  const m = document.getElementById("party-modal");
+  if (m) m.hidden = true;
+}
+
 async function enterOpeningView() {
   _puzzleViewSnapshotFlipped("opening");
   if (!state.legalMode) setBoardMode(true);
@@ -7894,6 +7981,7 @@ function renderOpeningUi() {
     const banner = state.opening.coachMsg
       ? `<div class="puzzle-banner ${fbCls}">${escapeHtml(state.opening.coachMsg)}</div>`
       : "";
+    const coachPanel = _renderOpeningAiCoachPanel();
     let theory = "";
     if (state.opening.mode === "theory" && line) {
       const sansHtml = (line.moves || []).map((s) => `<span class="opening-san">${escapeHtml(s)}</span>`).join(" ");
@@ -7921,6 +8009,7 @@ function renderOpeningUi() {
       <div class="opening-lines">${linesHtml}</div>
       ${theory}
       ${banner}
+      ${coachPanel}
     `;
   }
   card.innerHTML = `
@@ -7951,6 +8040,153 @@ function renderOpeningUi() {
     actions.innerHTML = "";
   }
   if (hist) hist.innerHTML = "";
+  _attachOpeningAiCoachHandlers();
+  // Lazily probe Ollama on first render so the panel can show a live status.
+  if (state.opening.aiCoach.status === null) {
+    _probeOpeningCoach();
+  }
+}
+
+// ---------- AI coach (Ollama + Stockfish 18) ----------
+
+function _renderOpeningAiCoachPanel() {
+  const ai = state.opening.aiCoach;
+  let statusBadge = "";
+  let helpText = "";
+  if (ai.status === null || ai.status === "checking") {
+    statusBadge = `<span class="opening-ai-badge opening-ai-badge-checking">проверяем Ollama…</span>`;
+  } else if (ai.status === true) {
+    statusBadge = `<span class="opening-ai-badge opening-ai-badge-ok">Ollama on · ${escapeHtml(ai.model || "")}</span>`;
+  } else {
+    statusBadge = `<span class="opening-ai-badge opening-ai-badge-off">Ollama off</span>`;
+    helpText = `
+      <div class="opening-ai-help muted">
+        Запусти локально: <code>ollama serve</code> и поставь модель
+        <code>ollama pull llama3.2:3b</code>. Можно сменить через
+        <code>CHESS_OLLAMA_MODEL</code>.
+      </div>`;
+  }
+  const sfBadge = ai.stockfishRunning
+    ? `<span class="opening-ai-badge opening-ai-badge-sf">Stockfish 18 on</span>`
+    : `<span class="opening-ai-badge opening-ai-badge-sf-off">Stockfish off</span>`;
+  const btnDisabled = ai.streaming ? "disabled" : "";
+  const btnLabel = ai.streaming ? "Тренер думает…" : "🧠 Подробнее от тренера";
+  const textBlock = (ai.text || ai.error)
+    ? `<div class="opening-ai-text${ai.error ? " is-error" : ""}">${escapeHtml(ai.error || ai.text)}</div>`
+    : `<div class="opening-ai-text muted">Нажми «Подробнее от тренера» — ИИ объяснит ход и план дебюта на основании Stockfish.</div>`;
+  return `
+    <div class="opening-ai-panel">
+      <div class="opening-ai-header">
+        <strong>AI-тренер</strong>
+        ${statusBadge}
+        ${sfBadge}
+      </div>
+      <div class="opening-ai-actions">
+        <button id="btn-opening-ai-coach" type="button" class="puzzle-secondary" ${btnDisabled}>${btnLabel}</button>
+        <button id="btn-opening-ai-recheck" type="button" class="puzzle-secondary" title="Переподключиться к Ollama">↻</button>
+      </div>
+      ${textBlock}
+      ${helpText}
+    </div>
+  `;
+}
+
+function _attachOpeningAiCoachHandlers() {
+  const askBtn = document.getElementById("btn-opening-ai-coach");
+  if (askBtn) askBtn.onclick = () => requestOpeningCoach();
+  const recheck = document.getElementById("btn-opening-ai-recheck");
+  if (recheck) recheck.onclick = () => _probeOpeningCoach();
+}
+
+async function _probeOpeningCoach() {
+  state.opening.aiCoach.status = "checking";
+  // Avoid re-rendering the whole opening UI here to prevent input
+  // focus/scroll churn while the user is reading — the badge will
+  // refresh on the next renderOpeningUi() call (e.g. after a move).
+  try {
+    const r = await api(`/api/opening_trainer/coach/status`);
+    state.opening.aiCoach.status = !!(r && r.available);
+    state.opening.aiCoach.model = (r && r.model) || "";
+    state.opening.aiCoach.baseUrl = (r && r.base_url) || "";
+    state.opening.aiCoach.installedModels = (r && r.installed_models) || [];
+    state.opening.aiCoach.stockfishRunning = !!(r && r.stockfish_running);
+  } catch (_e) {
+    state.opening.aiCoach.status = false;
+  }
+  renderOpeningUi();
+}
+
+async function requestOpeningCoach() {
+  const op = _selectedOpening();
+  const line = _selectedOpeningLine();
+  if (!op || !line) {
+    return;
+  }
+  const ai = state.opening.aiCoach;
+  if (ai.streaming) return;
+  ai.streaming = true;
+  ai.text = "";
+  ai.error = "";
+  // Snapshot what we want to ask about so the request reflects the
+  // last meaningful event (correct/wrong move) instead of going stale
+  // on the next render.
+  const ply = Math.max(0, Math.min(line.moves.length, state.opening.moveIdx));
+  const lastSan = ply > 0 ? (line.moves[ply - 1] || "") : "";
+  const correct = state.opening.feedback === "correct" || state.opening.feedback === "complete"
+    ? true
+    : state.opening.feedback === "wrong" ? false : null;
+  ai.lastPly = ply;
+  ai.lastSan = lastSan;
+  ai.lastCorrect = correct;
+  renderOpeningUi();
+  try {
+    const resp = await fetch(`/api/opening_trainer/coach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        opening_id: op.id,
+        ply,
+        last_san: lastSan || null,
+        correct,
+        locale: "ru",
+      }),
+    });
+    if (!resp.ok || !resp.body) {
+      ai.error = `Ошибка тренера: HTTP ${resp.status}`;
+      ai.streaming = false;
+      renderOpeningUi();
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let pendingRaf = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length) {
+        ai.text += decoder.decode(value, { stream: true });
+        // Throttle re-renders during stream — paint at most every
+        // animation frame so we don't spam renderOpeningUi() once per
+        // micro-token.
+        if (!pendingRaf) {
+          pendingRaf = true;
+          requestAnimationFrame(() => {
+            pendingRaf = false;
+            const host = document.querySelector(".opening-ai-text");
+            if (host) host.textContent = ai.text;
+          });
+        }
+      }
+    }
+    // Flush the trailing decoder buffer.
+    ai.text += decoder.decode();
+    ai.streaming = false;
+    renderOpeningUi();
+  } catch (e) {
+    ai.streaming = false;
+    ai.error = `Сеть/тренер: ${(e && e.message) || e}`;
+    renderOpeningUi();
+  }
 }
 
 // ---------- Notifications (SSE) + party invitations ----------
