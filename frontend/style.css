@@ -2447,3 +2447,167 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 @media (max-width: 700px) {
   .spectator-side { display: none; }
 }
+
+/* ========================================================================
+   MOBILE / PHONE LAYOUT
+   ------------------------------------------------------------------------
+   Below ~768px we reflow everything onto a single column, swap the
+   sticky Analysis sidebar for an inline panel, shrink the topbar,
+   make the board fill the viewport width, and stretch every modal
+   to the full screen so phone users never have to fight a tiny
+   centred card.
+   ======================================================================== */
+@media (max-width: 768px) {
+  body { font-size: 13px; }
+
+  /* Topbar — wrap actions onto multiple rows; tighten padding. */
+  .topbar {
+    padding: 8px 10px;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .brand { gap: 6px; font-size: 16px; }
+  .brand-piece { font-size: 22px; }
+  .brand-name {
+    /* Drop the wordmark — the piece glyph is the brand on mobile. */
+    display: none;
+  }
+  .view-tabs { margin-left: 6px; padding: 2px; }
+  .view-tab { padding: 6px 10px; font-size: 12px; }
+  .topbar-actions {
+    gap: 4px;
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .topbar-actions button {
+    min-height: 36px;
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+  .topbar-actions .icon-btn { padding: 6px 8px; }
+  .mode-switch { margin-left: 0; }
+  .mode-btn { padding: 6px 9px; font-size: 12px; }
+  .mode-toggle { padding-left: 0; font-size: 12px; }
+
+  /* Layout — single column, every panel stacks below the board. */
+  .layout {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 10px;
+  }
+  body.view-analysis .sidebar {
+    /* Drop sticky/fixed-height behaviour — the panel just flows
+       below the board on phone, scrolling with the page. */
+    height: auto;
+    position: static;
+  }
+  body.view-analysis #panel-review {
+    overflow-y: visible;
+  }
+
+  /* Board — fill the viewport width with a small horizontal margin.
+     Drop the 80vh ceiling so portrait phones use as much height as
+     they want; aspect-ratio keeps it square. */
+  .board {
+    width: 100%;
+    max-width: 100vw;
+    /* Make the touch target a touch larger so tap-to-move is reliable. */
+  }
+  .square { font-size: clamp(22px, 11vmin, 56px); }
+
+  /* Board surroundings */
+  .board-meta {
+    gap: 8px 12px;
+    margin-top: 8px;
+    font-size: 12px;
+  }
+  .castling { padding: 3px 8px; gap: 6px; }
+  .fen-row { gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .fen-row input { flex: 1 1 100%; font-size: 12px; }
+  .board-nav { gap: 4px; }
+  .board-nav button { min-width: 36px; min-height: 36px; padding: 6px; }
+
+  /* Sidebar panels: slimmer paddings */
+  .panel, .palette { padding: 10px 12px; }
+  .panel h2, .palette h2 { font-size: 12px; }
+  .palette-row { grid-template-columns: repeat(6, 1fr); gap: 4px; padding: 4px; }
+  .palette-cell .piece-img { width: 28px; height: 28px; }
+
+  /* Move history — keep readable but cap height so it doesn't hog the
+     phone's whole scroll area. */
+  .move-history { max-height: 160px; font-size: 12px; }
+
+  /* ---- Modals — stretch edge-to-edge, always scrollable ---- */
+  .modal-overlay { padding: 0; }
+  .modal-card {
+    width: 100%;
+    max-width: 100%;
+    height: 100vh;
+    max-height: 100vh;
+    border-radius: 0;
+    padding: 14px 14px 24px;
+  }
+  .modal-card.leaderboard-card,
+  .modal-card.profile-card,
+  .party-card { max-width: 100%; width: 100%; }
+  .modal-close {
+    top: 4px; right: 6px;
+    width: 36px; height: 36px;
+  }
+
+  /* Profile chart — keep readable on narrow screens. */
+  .elo-graph { height: 140px; }
+
+  /* ---- Spectator panel — collapse to single column ---- */
+  .spectator-header {
+    padding: 8px 10px;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .spectator-title { font-size: 14px; }
+  .spectator-meta { font-size: 11px; }
+  .spectator-toggle { padding: 4px 8px; font-size: 12px; }
+  .spectator-leave { padding: 5px 10px; font-size: 12px; }
+  .spectator-stage { padding: 10px; }
+  .spectator-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .spectator-single { gap: 12px; }
+  .spectator-single .board-host { width: 100%; max-width: 100%; }
+  .spectator-single .meta-host {
+    width: 100%;
+    max-width: 100%;
+    flex: 1 1 100%;
+    padding: 10px;
+  }
+
+  /* Party tabs — make tab buttons bigger / tappable. */
+  .party-tabs { gap: 2px; }
+  .party-tab { padding: 8px 12px; font-size: 13px; }
+
+  /* Onboarding hero/heading scales down. */
+  .onboarding-hero h2 { font-size: 18px; }
+
+  /* Topbar burger button — keep prominent on phone. */
+  .user-menu-btn { min-width: 36px; min-height: 36px; }
+  .user-menu-dropdown { right: 4px; }
+
+  /* Status line takes less room. */
+  .status { font-size: 12px; }
+}
+
+/* Very narrow phones (≤ 380px) — squeeze further. */
+@media (max-width: 380px) {
+  .topbar-actions button { padding: 5px 8px; font-size: 11px; }
+  .view-tab { padding: 5px 8px; font-size: 11px; }
+  .layout { padding: 8px; gap: 10px; }
+  .panel, .palette { padding: 8px 10px; }
+}
+
+/* Hint to mobile browsers: prevent double-tap zoom on the board so
+   tap-to-select-tap-to-move feels instant. We keep manipulation
+   (so the user can still pinch-zoom the page outside the board). */
+.board, .square { touch-action: manipulation; }
+.modal-card { -webkit-overflow-scrolling: touch; }

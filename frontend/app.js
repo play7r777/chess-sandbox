@@ -961,6 +961,155 @@ function setStatus(msg, kind = "") {
 
 // ---------- Drag-drop ----------
 
+// HTML5 drag-and-drop is desktop-only — touchstart never fires
+// dragstart on phones. To make the board playable on mobile we run a
+// parallel touch-drag layer at document level (one listener, no
+// per-piece bookkeeping). Tap-to-select-tap-to-move still works via
+// the .square click handler; this is purely the drag affordance.
+const _touchDrag = {
+  active: false,
+  source: null,        // the .piece DOM element being dragged
+  fromSquare: null,    // algebraic source square
+  piece: null,         // FEN char of the piece
+  startX: 0,
+  startY: 0,
+  ghost: null,         // floating piece image following the finger
+  threshold: 8,        // px before we commit to a drag
+  primed: false,       // touch is down on a piece, waiting for movement
+};
+
+function _touchEnsureGhost(srcImg, x, y) {
+  if (_touchDrag.ghost) return _touchDrag.ghost;
+  const g = document.createElement("img");
+  g.src = srcImg ? srcImg.src : "";
+  g.alt = "";
+  g.className = "touch-drag-ghost";
+  g.style.position = "fixed";
+  g.style.left = "0";
+  g.style.top = "0";
+  g.style.width = "56px";
+  g.style.height = "56px";
+  g.style.pointerEvents = "none";
+  g.style.zIndex = "9999";
+  g.style.transform = `translate(${(x - 28).toFixed(1)}px, ${(y - 28).toFixed(1)}px) scale(1.05)`;
+  g.style.filter = "drop-shadow(0 4px 8px rgba(0,0,0,0.5))";
+  document.body.appendChild(g);
+  _touchDrag.ghost = g;
+  return g;
+}
+
+function _touchClearDrag() {
+  if (_touchDrag.source) _touchDrag.source.classList.remove("dragging");
+  if (_touchDrag.ghost) {
+    try { _touchDrag.ghost.remove(); } catch (_) { /* ignore */ }
+  }
+  document.querySelectorAll(".square.drop-target")
+    .forEach((c) => c.classList.remove("drop-target"));
+  clearDragLegalTargets();
+  _touchDrag.active = false;
+  _touchDrag.primed = false;
+  _touchDrag.source = null;
+  _touchDrag.fromSquare = null;
+  _touchDrag.piece = null;
+  _touchDrag.ghost = null;
+}
+
+document.addEventListener("touchstart", (ev) => {
+  // Only react to a single finger on a board piece. Multi-touch
+  // (pinch-zoom etc.) is left to the browser.
+  if (ev.touches.length !== 1) return;
+  const t = ev.touches[0];
+  const pieceEl = t.target.closest && t.target.closest(".piece");
+  if (!pieceEl) return;
+  // Skip palette pieces — they have draggable=true but no fromSquare;
+  // we don't support placing pieces from the palette via touch (rare
+  // use case + tap-to-select doesn't have an obvious target). Users
+  // can still drag from the palette on a desktop.
+  const cell = pieceEl.closest(".square");
+  if (!cell || !cell.dataset.square) return;
+  _touchDrag.primed = true;
+  _touchDrag.source = pieceEl;
+  _touchDrag.fromSquare = cell.dataset.square;
+  _touchDrag.piece = pieceEl.dataset.piece || "";
+  _touchDrag.startX = t.clientX;
+  _touchDrag.startY = t.clientY;
+}, { passive: true });
+
+document.addEventListener("touchmove", (ev) => {
+  if (!_touchDrag.primed && !_touchDrag.active) return;
+  if (ev.touches.length !== 1) { _touchClearDrag(); return; }
+  const t = ev.touches[0];
+  if (!_touchDrag.active) {
+    // Promote primed -> active once the user has moved past the
+    // threshold. Below it we leave the touch alone so tap-to-select
+    // still bubbles into the cell click handler.
+    const dx = t.clientX - _touchDrag.startX;
+    const dy = t.clientY - _touchDrag.startY;
+    if ((dx * dx + dy * dy) < _touchDrag.threshold * _touchDrag.threshold) return;
+    _touchDrag.active = true;
+    if (_touchDrag.source) _touchDrag.source.classList.add("dragging");
+    paintDragLegalTargets(_touchDrag.fromSquare);
+    const srcImg = _touchDrag.source && _touchDrag.source.querySelector("img");
+    _touchEnsureGhost(srcImg, t.clientX, t.clientY);
+  }
+  // Now in active drag — block scroll and follow finger.
+  if (ev.cancelable) ev.preventDefault();
+  if (_touchDrag.ghost) {
+    _touchDrag.ghost.style.transform = `translate(${(t.clientX - 28).toFixed(1)}px, ${(t.clientY - 28).toFixed(1)}px) scale(1.05)`;
+  }
+  // Highlight the cell currently under the finger.
+  const under = document.elementFromPoint(t.clientX, t.clientY);
+  const overCell = under && under.closest && under.closest(".square");
+  document.querySelectorAll(".square.drop-target")
+    .forEach((c) => { if (c !== overCell) c.classList.remove("drop-target"); });
+  if (overCell) overCell.classList.add("drop-target");
+}, { passive: false });
+
+document.addEventListener("touchend", (ev) => {
+  if (!_touchDrag.active) {
+    // Touch ended without moving past threshold — let it become a
+    // click; just reset bookkeeping.
+    _touchClearDrag();
+    return;
+  }
+  const t = (ev.changedTouches && ev.changedTouches[0]) || null;
+  if (!t) { _touchClearDrag(); return; }
+  // Briefly hide the ghost so elementFromPoint doesn't pick *it* up.
+  if (_touchDrag.ghost) _touchDrag.ghost.style.display = "none";
+  const under = document.elementFromPoint(t.clientX, t.clientY);
+  const dropCell = under && under.closest && under.closest(".square");
+  const fromSquare = _touchDrag.fromSquare;
+  const piece = _touchDrag.piece;
+  _touchClearDrag();
+  if (!dropCell || !dropCell.dataset.square) return;
+  const targetSquare = dropCell.dataset.square;
+  if (targetSquare === fromSquare) return;
+  // Mirror handleDrop's branching: game / legal-mode / sandbox.
+  if (state.game.active) {
+    if (!fromSquare) return;
+    tryMakePlayerMove(fromSquare, targetSquare);
+    return;
+  }
+  if (state.legalMode) {
+    if (!fromSquare) return;
+    tryFreeplayMove(fromSquare, targetSquare);
+    return;
+  }
+  if (!fromSquare) return;
+  const fromIdx = idxFromSquareName(fromSquare);
+  const targetIdx = idxFromSquareName(targetSquare);
+  if (fromIdx === targetIdx) return;
+  snapshotForUndo();
+  state.board[targetIdx] = piece || state.board[fromIdx];
+  state.board[fromIdx] = null;
+  state.lastMove = null;
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  renderBoard();
+}, { passive: true });
+
+document.addEventListener("touchcancel", () => _touchClearDrag(), { passive: true });
+
 function attachSquareHandlers(cell) {
   cell.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -5577,6 +5726,56 @@ function _installPartyCursorTracking() {
     if (!board) return;
     if (board !== ev.target && !board.contains(ev.target)) return;
     onMove(ev);
+  }, { passive: true, capture: true });
+  // ---- Touch (phones) — mirror the dragstart/drag/dragend wires
+  // above using clientX/clientY from the touch event so spectators
+  // see the same cursor / drag piece info when the player is on a
+  // phone. Skips multi-touch (pinch-zoom) and only fires when the
+  // touch is over the board.
+  const touchEvAdapter = (te) => {
+    const t = (te.touches && te.touches[0])
+      || (te.changedTouches && te.changedTouches[0])
+      || null;
+    if (!t) return null;
+    return {
+      clientX: t.clientX,
+      clientY: t.clientY,
+      target: te.target,
+    };
+  };
+  document.addEventListener("touchstart", (ev) => {
+    if (!isPartyActive()) return;
+    if (ev.touches.length !== 1) return;
+    const board = document.querySelector(".board");
+    if (!board) return;
+    const fake = touchEvAdapter(ev);
+    if (!fake) return;
+    if (board !== ev.target && !board.contains(ev.target)) return;
+    // If the finger landed on a piece we mark drag-start so spectators
+    // see the floating glyph; otherwise it's just a hover sample.
+    const pieceEl = ev.target.closest && ev.target.closest(".piece");
+    if (pieceEl) onDragStart(fake);
+    else onMove(fake);
+  }, { passive: true, capture: true });
+  document.addEventListener("touchmove", (ev) => {
+    if (!isPartyActive()) return;
+    if (ev.touches.length !== 1) return;
+    const board = document.querySelector(".board");
+    if (!board) return;
+    const fake = touchEvAdapter(ev);
+    if (!fake) return;
+    // We want cursor frames any time the finger is over the board,
+    // even mid-drag, so spectators see the smooth path.
+    onMove(fake);
+  }, { passive: true, capture: true });
+  document.addEventListener("touchend", () => {
+    if (!isPartyActive()) return;
+    if (window.__partyCursorDragging) onDragEnd();
+    else onLeave();
+  }, { passive: true, capture: true });
+  document.addEventListener("touchcancel", () => {
+    if (!isPartyActive()) return;
+    if (window.__partyCursorDragging) onDragEnd();
   }, { passive: true, capture: true });
 }
 _installPartyCursorTracking();
