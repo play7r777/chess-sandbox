@@ -1814,6 +1814,9 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   color: #c0cee0;
   text-transform: uppercase;
 }
+.elo-graph-wrap {
+  position: relative;
+}
 .elo-graph {
   width: 100%;
   height: 160px;
@@ -1822,12 +1825,48 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border-radius: 10px;
   display: block;
 }
+.elo-graph .elo-graph-hover { cursor: crosshair; }
 .elo-graph-empty {
   padding: 28px 8px;
   text-align: center;
   color: #8aa0c0;
   font-size: 13px;
 }
+.elo-graph-tip {
+  position: absolute;
+  pointer-events: none;
+  background: linear-gradient(180deg, #1a2436, #131a26);
+  border: 1px solid #2c3a52;
+  border-radius: 8px;
+  padding: 7px 11px;
+  font-size: 11px;
+  color: #d8e3f2;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+  z-index: 5;
+  min-width: 96px;
+  transition: opacity 0.06s linear;
+}
+.elo-graph-tip[hidden] { display: none; }
+.elo-graph-tip-rating {
+  font-size: 13px;
+  font-weight: 700;
+  color: #6da7ff;
+  letter-spacing: 0.02em;
+}
+.elo-graph-tip-date {
+  font-size: 10px;
+  color: #94a4be;
+  margin-top: 2px;
+}
+.elo-graph-tip-delta {
+  font-size: 11px;
+  margin-top: 4px;
+  font-weight: 600;
+}
+.elo-graph-tip-delta.is-up   { color: #6dd49a; }
+.elo-graph-tip-delta.is-down { color: #ff8aa0; }
+.elo-graph-tip-delta.is-flat { color: #94a4be; }
 .elo-period-tabs {
   display: inline-flex;
   background: #11161f;

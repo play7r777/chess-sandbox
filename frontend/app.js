@@ -3311,10 +3311,12 @@ function enterPuzzleView() {
   if (state.puzzle.flippedSnapshot === null) {
     state.puzzle.flippedSnapshot = state.flipped;
   }
-  // Open the solo-broadcast WS so anyone in the "Оффлайн" tab can
-  // watch this player's puzzle session in real time. No-op while a
-  // party is active.
-  try { presenceConnect(); } catch (_) { /* ignore */ }
+  // We deliberately do *not* open the solo-broadcast WS here — that
+  // happens lazily in loadNextPuzzle(), the first moment a puzzle is
+  // actually on the board. Otherwise an idle user sitting on the
+  // start screen would show up in the Оффлайн tab with the empty
+  // starting position, and spectators could "watch" before the
+  // player has clicked anything.
   // Puzzle mode requires legal-move dispatch — force legal mode on so
   // drag/click attempts are routed through `tryFreeplayMove`.
   if (!state.legalMode) setBoardMode(true);
@@ -3407,6 +3409,10 @@ async function loadNextPuzzle() {
   // Any active puzzle load implicitly leaves the idle "Start" screen
   // — once the user has any puzzle on the board they're committed.
   state.puzzle.idle = false;
+  // Now that a real puzzle is being loaded, register in the solo
+  // presence registry so the Оффлайн tab can find this player. We
+  // skip this in party mode (returned earlier above).
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   const card = document.getElementById("puzzle-card");
   const actions = document.getElementById("puzzle-actions");
   if (card)    card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
@@ -4677,18 +4683,123 @@ function renderEloGraph(host, history) {
     );
   }
   host.innerHTML = `
-    <svg class="elo-graph" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-      ${tickLines.join("")}
-      <path d="${fillPath}" fill="url(#elo-grad)" opacity="0.3" />
-      <path d="${path}" fill="none" stroke="#6da7ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-      <defs>
-        <linearGradient id="elo-grad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%"   stop-color="#6da7ff" stop-opacity="0.6" />
-          <stop offset="100%" stop-color="#6da7ff" stop-opacity="0" />
-        </linearGradient>
-      </defs>
-    </svg>
+    <div class="elo-graph-wrap">
+      <svg class="elo-graph" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+        ${tickLines.join("")}
+        <path d="${fillPath}" fill="url(#elo-grad)" opacity="0.3" />
+        <path d="${path}" fill="none" stroke="#6da7ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+        <g class="elo-cursor" visibility="hidden">
+          <line class="elo-cursor-line" y1="${padT}" y2="${padT + innerH}" stroke="#6da7ff" stroke-width="1" stroke-dasharray="3 3" opacity="0.8" />
+          <circle class="elo-cursor-dot" r="4.5" fill="#6da7ff" stroke="#fff" stroke-width="1.5" />
+        </g>
+        <rect class="elo-graph-hover" x="${padL}" y="${padT}" width="${innerW}" height="${innerH}" fill="transparent" />
+        <defs>
+          <linearGradient id="elo-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="#6da7ff" stop-opacity="0.6" />
+            <stop offset="100%" stop-color="#6da7ff" stop-opacity="0" />
+          </linearGradient>
+        </defs>
+      </svg>
+      <div class="elo-graph-tip" hidden>
+        <div class="elo-graph-tip-rating"></div>
+        <div class="elo-graph-tip-date"></div>
+        <div class="elo-graph-tip-delta"></div>
+      </div>
+    </div>
   `;
+  _wireEloGraphHover(host, {
+    points, w, h, padL, padR, padT, padB, innerW, xOf, yOf,
+  });
+}
+
+// Mouse-tracking crosshair + tooltip for the Elo chart. The SVG uses
+// preserveAspectRatio="none" so its viewBox stretches to the host;
+// we convert clientX -> SVG-x via getBoundingClientRect, then snap
+// to the closest data point by timestamp.
+function _wireEloGraphHover(host, ctx) {
+  const wrap = host.querySelector(".elo-graph-wrap");
+  const svg = host.querySelector(".elo-graph");
+  const hot = host.querySelector(".elo-graph-hover");
+  const cur = host.querySelector(".elo-cursor");
+  const line = host.querySelector(".elo-cursor-line");
+  const dot = host.querySelector(".elo-cursor-dot");
+  const tip = host.querySelector(".elo-graph-tip");
+  const ratingEl = host.querySelector(".elo-graph-tip-rating");
+  const dateEl = host.querySelector(".elo-graph-tip-date");
+  const deltaEl = host.querySelector(".elo-graph-tip-delta");
+  if (!wrap || !svg || !hot || !cur || !tip) return;
+  const pts = ctx.points;
+  const onMove = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const px = ev.clientX - rect.left;
+    // Map screen-x to SVG viewBox-x.
+    const svgX = (px / rect.width) * ctx.w;
+    // Clamp to plot area.
+    const clampedX = Math.max(ctx.padL, Math.min(ctx.w - ctx.padR, svgX));
+    // Pick nearest point by SVG-x distance — points are
+    // monotonically increasing in ts so x is monotonic too.
+    let best = 0, bestDx = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const dx = Math.abs(ctx.xOf(pts[i].ts) - clampedX);
+      if (dx < bestDx) { bestDx = dx; best = i; }
+    }
+    const p = pts[best];
+    const x = ctx.xOf(p.ts), y = ctx.yOf(p.rating);
+    line.setAttribute("x1", x.toFixed(1));
+    line.setAttribute("x2", x.toFixed(1));
+    dot.setAttribute("cx", x.toFixed(1));
+    dot.setAttribute("cy", y.toFixed(1));
+    cur.setAttribute("visibility", "visible");
+    // Compose tooltip.
+    ratingEl.textContent = `Эло ${p.rating}`;
+    const dt = new Date(p.ts * 1000);
+    const datePart = dt.toLocaleDateString("ru-RU", {
+      day: "numeric", month: "short", year: "numeric",
+    });
+    const timePart = dt.toLocaleTimeString("ru-RU", {
+      hour: "2-digit", minute: "2-digit",
+    });
+    dateEl.textContent = `${datePart} · ${timePart}`;
+    if (best > 0) {
+      const dr = p.rating - pts[best - 1].rating;
+      deltaEl.textContent = dr === 0 ? "Δ 0" : (dr > 0 ? `▲ +${dr}` : `▼ ${dr}`);
+      deltaEl.className = "elo-graph-tip-delta " + (dr > 0 ? "is-up" : (dr < 0 ? "is-down" : "is-flat"));
+      deltaEl.hidden = false;
+    } else {
+      deltaEl.hidden = true;
+    }
+    // Position tooltip in client coords. Center horizontally above
+    // the dot, clamp to host bounds.
+    tip.hidden = false;
+    const wrapRect = wrap.getBoundingClientRect();
+    const dotClientX = rect.left + (x / ctx.w) * rect.width;
+    const dotClientY = rect.top + (y / ctx.h) * rect.height;
+    const tipW = tip.offsetWidth || 120;
+    const tipH = tip.offsetHeight || 50;
+    let tipX = dotClientX - wrapRect.left - tipW / 2;
+    let tipY = dotClientY - wrapRect.top - tipH - 14;
+    if (tipX < 4) tipX = 4;
+    if (tipX + tipW > wrapRect.width - 4) tipX = wrapRect.width - tipW - 4;
+    if (tipY < 4) {
+      // Not enough room above — flip below the point.
+      tipY = dotClientY - wrapRect.top + 14;
+    }
+    tip.style.left = `${tipX}px`;
+    tip.style.top = `${tipY}px`;
+  };
+  const onLeave = () => {
+    cur.setAttribute("visibility", "hidden");
+    tip.hidden = true;
+  };
+  hot.addEventListener("mousemove", onMove);
+  hot.addEventListener("mouseleave", onLeave);
+  // Touch support: tap and drag along the chart.
+  hot.addEventListener("touchmove", (ev) => {
+    const t = ev.touches[0];
+    if (t) onMove({ clientX: t.clientX, clientY: t.clientY });
+  });
+  hot.addEventListener("touchend", onLeave);
 }
 
 async function openProfileModal(clientId) {
@@ -4835,12 +4946,15 @@ async function _bootUser() {
   setInterval(userHeartbeat, 60_000);
   // Start the SSE notifications stream so party invitations pop up live.
   _bootNotifications();
-  // setView() runs synchronously at module-load time, before
-  // _bootUser resolves — so an enterPuzzleView() that ran during
-  // boot will have called presenceConnect() before client_id was
-  // set, silently no-op'ing. Now that identity is ready, retry if
-  // we're sitting on the puzzle tab.
-  if (state.view === "puzzle") {
+  // If the user reloads while a puzzle was already in progress, the
+  // session-restore path in enterPuzzleView re-flips the board and
+  // calls renderBoard but does NOT call loadNextPuzzle (which is
+  // where presenceConnect now lives), so we'd never appear in the
+  // Оффлайн list. Catch that here: if we're on the puzzle tab and
+  // a puzzle is actually loaded (not the idle start screen),
+  // register presence now that client_id is known.
+  if (state.view === "puzzle"
+      && state.puzzle.current && !state.puzzle.idle) {
     try { presenceConnect(); } catch (_) { /* ignore */ }
   }
 }
@@ -6248,7 +6362,7 @@ function _spectatorRender() {
   // Presence-mode follows exactly one player, so the grid toggle and
   // timer make no sense — collapse the header to "watching X".
   const headerMeta = isPresence
-    ? `<span class="spectator-meta">соло · настоящий эло</span>`
+    ? `<span class="spectator-meta">соло</span>`
     : `<span class="spectator-meta">${escapeHtml(sp.code || "")} · ${escapeHtml(timer)}</span>`;
   const headerToggles = isPresence
     ? ""
@@ -6314,7 +6428,6 @@ function _spectatorRenderSingle(p) {
         <div class="row">Рейтинг игрока: <b>${Number(p.rating || 0) || "—"}</b></div>
         <div class="row">Текущий пазл: ${p.puzzle_rating ? `<b>${Number(p.puzzle_rating)}</b>` : "—"}</div>
         <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
-        <div class="row muted" style="font-size:11px; margin-top:6px;">Соло-режим · настоящий эло</div>
       `
     : `
         <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
