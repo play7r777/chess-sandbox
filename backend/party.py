@@ -504,8 +504,14 @@ class Party:
     async def start(self, by_client_id: str) -> None:
         if by_client_id != self.host_id:
             raise PartyError("not_host", "Only the host can start")
+        # Idempotent: if the host clicks the start button several times
+        # in a row (or the WS reconnects and replays the message), the
+        # follow-up calls are ignored silently rather than raising — so
+        # we never re-roll the puzzle queue mid-match (which used to
+        # leave players on different puzzles than the one already
+        # dispatched on the first click).
         if self.status != "lobby":
-            raise PartyError("bad_status", "Party already started or finished")
+            return
         if not self.members:
             raise PartyError("empty", "No members")
         now = time.time()

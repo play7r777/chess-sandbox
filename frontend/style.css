@@ -1645,19 +1645,20 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .modal-card.profile-card { max-width: 720px; }
 .modal-close {
   position: absolute;
-  top: 10px; right: 12px;
+  top: 6px; right: 8px;
   background: transparent;
   border: 0;
   font-size: 22px;
   line-height: 1;
   color: #94a4be;
   cursor: pointer;
-  width: 32px; height: 32px;
+  width: 28px; height: 28px;
   padding: 0;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: 2;
 }
 .modal-close:hover { background: rgba(255,255,255,0.08); color: #fff; }
 
@@ -1725,6 +1726,9 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .profile-header {
   display: flex; align-items: center; gap: 14px;
   padding-bottom: 12px;
+  /* Reserve room on the right so the 'Изменить' button never
+     collides with the absolute-positioned modal close button. */
+  padding-right: 40px;
   border-bottom: 1px solid #2c3950;
 }
 .profile-avatar {

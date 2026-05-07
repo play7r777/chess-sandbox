@@ -5090,10 +5090,22 @@ function renderPartyLobby() {
   body.querySelector("#btn-party-leave")?.addEventListener("click", () => {
     leaveParty();
   });
-  body.querySelector("#btn-party-start")?.addEventListener("click", () => {
+  body.querySelector("#btn-party-start")?.addEventListener("click", (ev) => {
+    const btn = ev.currentTarget;
+    // Hard guard against the user clicking 'Start' multiple times
+    // before the server's puzzle response arrives — extra sends were
+    // ignored on the server, but the round-trip is long enough on a
+    // big puzzle bank that the user can rack up several clicks. We
+    // disable the button immediately and re-enable on error / leave.
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = "Запускаем матч…";
     const ws = state.party.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "start" }));
+    } else {
+      btn.disabled = false;
+      btn.textContent = "Начать матч (10 мин)";
     }
   });
 }
@@ -5744,7 +5756,14 @@ function _miniBoardThemeStyle(themeKey) {
   // different themes side by side, so we cannot mutate :root.
   const lightSq = t.image ? "transparent" : t.light;
   const darkSq = t.image ? "transparent" : t.dark;
-  const boardImage = t.image ? `url("${t.image}")` : "none";
+  // Inline style attributes are quoted with `"` in our HTML strings,
+  // so the URL must NOT contain a literal `"` (it would terminate
+  // the attribute and the whole rule would be silently dropped —
+  // which is what was killing the board background for image-based
+  // themes in the spectator). CSS allows unquoted url(...) for paths
+  // without parentheses or whitespace; our static asset paths are
+  // safe so we emit them bare.
+  const boardImage = t.image ? `url(${t.image})` : "none";
   const cls = t.image ? "mini-board-wrap board-theme-image" : "mini-board-wrap";
   return {
     cls,
