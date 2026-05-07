@@ -6125,15 +6125,15 @@ function _renderPartyResultsHTML(results, meta, opts) {
       <table class="party-results-table">
         <thead>
           <tr>
-            <th>#</th>
-            <th>Игрок</th>
-            <th>Очки</th>
-            <th>✔</th>
-            <th>✘</th>
-            <th>↷</th>
-            <th>Винрейт</th>
-            <th>Серия</th>
-            <th>Среднее / лучшее</th>
+            <th class="col-rank">#</th>
+            <th class="col-player">Игрок</th>
+            <th class="col-num">Очки</th>
+            <th class="col-num">✔</th>
+            <th class="col-num">✘</th>
+            <th class="col-num">↷</th>
+            <th class="col-num">Винрейт</th>
+            <th class="col-num">Серия</th>
+            <th class="col-time">Ср. / лучшее</th>
           </tr>
         </thead>
         <tbody>${tableRows || `<tr><td colspan="9" class="party-empty">Никто ничего не решил.</td></tr>`}</tbody>
@@ -6387,8 +6387,8 @@ function _partyShowResults() {
     <div class="party-results-card">${tableHtml}</div>
     <div class="party-actions party-actions-results">
       <button id="btn-party-save-img" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
-      <button id="btn-party-share-tg" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
       <button id="btn-party-share-discord" type="button" class="puzzle-secondary">💬 Поделиться в Discord</button>
+      <button id="btn-party-share-tg" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
       <button id="btn-party-close-results" type="button" class="puzzle-primary">Закрыть</button>
     </div>
   `;
@@ -6477,8 +6477,8 @@ function openPartyResultDetail(entry, opts) {
     <div class="party-results-card">${tableHtml}</div>
     <div class="party-actions party-actions-results">
       <button id="btn-party-detail-save" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
-      <button id="btn-party-detail-share" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
       <button id="btn-party-detail-share-discord" type="button" class="puzzle-secondary">💬 Поделиться в Discord</button>
+      <button id="btn-party-detail-share" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
       <button id="btn-party-detail-close" type="button" class="puzzle-primary">Закрыть</button>
     </div>
   `;

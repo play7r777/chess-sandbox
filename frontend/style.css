@@ -2086,17 +2086,20 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 
 /* Detailed end-of-match results. */
-.party-card.party-card-results { width: min(1200px, 98vw); padding: 24px 22px; }
+.party-card.party-card-results {
+  width: min(1400px, 99vw);
+  padding: 20px 18px;
+}
 .party-results-card {
   margin: 12px 0;
-  padding: 14px;
+  padding: 12px;
   background: #131c2c;
   border: 1px solid #2c3950;
   border-radius: 12px;
 }
 .party-results-meta {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   flex-wrap: wrap;
   font-size: 13px;
   color: #c0cce0;
@@ -2105,6 +2108,9 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border-bottom: 1px solid #2c3950;
 }
 .party-results-meta strong { color: #e7eef9; }
+/* Wrapper used to scroll horizontally if the table overflows; we keep
+   the property defined so legacy mobile zoom doesn't visually clip
+   content, but tighten cell sizing below so it never triggers. */
 .party-results-tablewrap { overflow-x: auto; }
 .party-results-table {
   width: 100%;
@@ -2115,17 +2121,33 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 .party-results-table thead th {
   text-align: left;
-  padding: 8px 10px;
+  padding: 6px 6px;
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.3px;
   color: #94a4be;
   font-weight: 700;
   border-bottom: 1px solid #2c3950;
+  white-space: nowrap;
 }
 .party-results-table tbody td {
-  padding: 9px 10px;
+  padding: 7px 6px;
   border-bottom: 1px solid #1f2a3d;
+}
+.party-results-table .col-rank { width: 32px; }
+.party-results-table .col-num { white-space: nowrap; }
+.party-results-table .col-time { white-space: nowrap; }
+.party-results-table .col-player { width: auto; }
+.party-results-table .party-results-player {
+  min-width: 0;
+}
+.party-results-table .party-results-player .party-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
 }
 .party-results-table tbody tr:last-child td { border-bottom: none; }
 .party-results-table tbody tr:hover { background: rgba(109, 167, 255, 0.06); }
@@ -2160,9 +2182,12 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   flex-direction: row;
   flex-wrap: wrap;
   gap: 8px;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 .party-actions-results > button { flex: 0 1 auto; }
+/* Push only the trailing primary (Закрыть) to the far right;
+   share/save buttons stay grouped on the left so the new Discord
+   button sits directly next to "Сохранить в галерею". */
 .party-actions-results .puzzle-primary { margin-left: auto; }
 
 /* Profile: clickable battle history row. */
@@ -2231,10 +2256,24 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 
 @media (max-width: 720px) {
-  .party-card.party-card-results { width: 98vw; padding: 14px; }
-  .party-results-meta { font-size: 12px; gap: 10px; }
-  .party-results-table { font-size: 12px; }
-  .party-results-table thead th, .party-results-table tbody td { padding: 6px 8px; }
+  .party-card.party-card-results {
+    width: 100vw;
+    max-width: 100vw;
+    padding: 10px 6px;
+    border-radius: 0;
+  }
+  .party-results-card { padding: 8px 6px; margin: 8px 0; }
+  .party-results-meta { font-size: 11px; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; }
+  .party-results-table { font-size: 11px; }
+  .party-results-table thead th {
+    padding: 4px 3px;
+    font-size: 9px;
+    letter-spacing: 0.2px;
+  }
+  .party-results-table tbody td { padding: 4px 3px; }
+  .party-results-table .party-avatar { font-size: 13px; }
+  .party-results-table .party-results-player { gap: 4px; }
+  .party-results-table .party-results-num.muted { font-size: 10px; }
   .profile-party-row {
     grid-template-columns: 40px 1fr 80px 14px;
     grid-template-areas:
