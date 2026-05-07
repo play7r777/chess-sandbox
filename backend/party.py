@@ -42,6 +42,14 @@ MAX_MEMBERS = 16
 # so 1000 leaves plenty of headroom while keeping the queue cheap to
 # build (one SQLite call) regardless of total bank size.
 PARTY_QUEUE_SIZE = 1000
+# When picking a queue we pull puzzles within +-PARTY_BAND_HALF_WIDTH
+# of the average lobby rating, so a lobby of 1200-rated players gets
+# 1000-1400 puzzles instead of the bank's full spread. Tuned wide
+# enough that small lobbies still see variety; narrow enough that
+# beating beginners isn't the same as beating grandmasters.
+PARTY_BAND_HALF_WIDTH = 350
+PARTY_BAND_MIN = 600
+PARTY_BAND_MAX = 2800
 # Max attempts kept per player for the in-memory match log. A 10-min
 # match maxes out at <300 attempts even for the fastest solvers, so
 # 500 is a safe ceiling and keeps the per-room footprint bounded.
@@ -229,6 +237,27 @@ class Party:
     # Shared, shuffled puzzle order for the whole match. Built in
     # `start()` from the entire pool, then re-used across every member.
     puzzle_queue: list[dict[str, Any]] = field(default_factory=list)
+    # Average rating of all members at the moment of `start()`. We use it
+    # to scope the puzzle bank for this match so a 1200-rated lobby
+    # doesn't end up grinding 600-rated puzzles. Mirrored back to the
+    # client in `public_state()` so the lobby UI can show "средний эло".
+    avg_rating: int = 0
+
+    def average_member_rating(self) -> int:
+        """Live average of every member's profile rating.
+
+        Falls back to 1200 if no member has a rating set (fresh client_id
+        with no puzzle history).
+        """
+        ratings: list[int] = []
+        for m in self.members.values():
+            u = users_db.get_user(m.client_id) or {}
+            r = int(u.get("rating") or 0)
+            if r > 0:
+                ratings.append(r)
+        if not ratings:
+            return 1200
+        return int(round(sum(ratings) / len(ratings)))
 
     def public_member(self, m: Member) -> dict[str, Any]:
         return {
@@ -259,6 +288,7 @@ class Party:
             "allowed_durations_sec": list(PARTY_ALLOWED_DURATIONS_SEC),
             "members": [self.public_member(m) for m in self.members.values()],
             "spectator_count": sum(1 for s in self.spectators.values() if s.ws is not None),
+            "avg_rating": int(self.avg_rating or self.average_member_rating()),
         }
 
     def scoreboard(self) -> list[dict[str, Any]]:
@@ -690,10 +720,14 @@ class Party:
         # Sample a fresh queue from the puzzle bank for each match. Every
         # member walks through that same ordered list, so the comparison
         # is fair (same puzzles, same order); a different sample per match
-        # keeps players from seeing identical openings. With the SQLite
-        # bank backing 500k+ puzzles repeats inside a match are
-        # essentially impossible.
-        self.puzzle_queue = list(puzzle_pack.sample_puzzles(PARTY_QUEUE_SIZE))
+        # keeps players from seeing identical openings.
+        # The queue is scoped to the lobby's *average* rating ±BAND_HALF_WIDTH
+        # so a 1200-rated lobby drills 850-1550 puzzles instead of the
+        # bank's full spread. This also closes the door on rating farming —
+        # a grandmaster joining a beginner lobby gets beginner puzzles.
+        avg_rating = self.average_member_rating()
+        self.avg_rating = avg_rating
+        self.puzzle_queue = _sample_band_queue(avg_rating, PARTY_QUEUE_SIZE)
         random.shuffle(self.puzzle_queue)
         for m in self.members.values():
             m.puzzle_index = 0
@@ -885,6 +919,39 @@ class Party:
                 "ended_at": finished_at,
             }
         )
+
+
+def _sample_band_queue(avg_rating: int, n: int) -> list[dict[str, Any]]:
+    """Sample ``n`` puzzles centred on ``avg_rating``.
+
+    Two-pass strategy:
+
+    1. Try the strict band ``[avg-HALF_WIDTH, avg+HALF_WIDTH]``.
+    2. If that comes up short (small bank, edge of the rating spectrum),
+       widen one band's worth at a time until we either fill the queue
+       or hit the global ``[PARTY_BAND_MIN, PARTY_BAND_MAX]`` envelope.
+
+    Falls back to ``puzzle_pack.sample_puzzles`` only if the bank can't
+    even produce one match, so we never break a lobby.
+    """
+    if n <= 0:
+        return []
+    width = PARTY_BAND_HALF_WIDTH
+    while True:
+        lo = max(PARTY_BAND_MIN, avg_rating - width)
+        hi = min(PARTY_BAND_MAX, avg_rating + width)
+        pool = puzzle_pack.filter_puzzles(min_rating=lo, max_rating=hi)
+        if len(pool) >= n:
+            random.shuffle(pool)
+            return pool[:n]
+        if width >= (PARTY_BAND_MAX - PARTY_BAND_MIN):
+            # Even the maximum envelope can't fill the queue: top up
+            # with whatever the bank does have.
+            if pool:
+                random.shuffle(pool)
+                return pool
+            return list(puzzle_pack.sample_puzzles(n))
+        width += PARTY_BAND_HALF_WIDTH
 
 
 def _party_elo_award(placement: int, participants: int, solved: int, score: int) -> int:

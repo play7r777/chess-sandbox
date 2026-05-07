@@ -13,9 +13,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import daily_puzzle as daily_puzzle_pack
 from . import notifications as notifications_db
+from . import opening_trainer as opening_trainer_pack
 from . import party as party_room
 from . import presence as presence_room
+from . import puzzle_rush as puzzle_rush_room
 from . import puzzles as puzzles_db
 from . import users as users_db
 from .analysis import analyse_game, import_game_async
@@ -102,6 +105,39 @@ class PartyInviteRequest(BaseModel):
 
 class InviteActionRequest(BaseModel):
     client_id: str = Field(..., min_length=4, max_length=64)
+
+
+class PuzzleRushStartRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    mode: str = Field(..., description="3min | 5min | survival")
+
+
+class PuzzleRushAttemptRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    session_id: str = Field(..., min_length=4, max_length=64)
+    puzzle_id: str = Field(..., min_length=1, max_length=64)
+    outcome: str = Field(..., description="solved | failed | skipped")
+    solve_ms: int = Field(default=0, ge=0, le=10_000_000)
+
+
+class PuzzleRushFinalizeRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    session_id: str = Field(..., min_length=4, max_length=64)
+
+
+class DailyPuzzleAttemptRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    date: str = Field(..., min_length=10, max_length=10, description="ISO date YYYY-MM-DD (UTC)")
+    puzzle_id: str = Field(..., min_length=1, max_length=64)
+    outcome: str = Field(..., description="solved | failed")
+    solve_ms: int = Field(default=0, ge=0, le=10_000_000)
+
+
+class OpeningAttemptRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    opening_id: str = Field(..., min_length=1, max_length=64)
+    ply: int = Field(..., ge=0, le=64)
+    san: str = Field(..., min_length=1, max_length=12)
 
 
 def _print_puzzle_banner() -> None:
@@ -527,6 +563,188 @@ def users_puzzle_attempt(req: PuzzleAttemptRequest) -> dict[str, Any]:
 # meant any caller could `curl` a fake "I won, +500 ELO" entry into
 # their own profile. The server-side path remains the only way to
 # append to `parties[]`.
+
+
+# ---- Puzzle Rush ----
+
+@app.post("/api/puzzle_rush/start")
+def puzzle_rush_start(req: PuzzleRushStartRequest) -> dict[str, Any]:
+    if req.mode not in puzzle_rush_room.MODE_DURATION_SEC:
+        raise HTTPException(status_code=400, detail="mode must be 3min|5min|survival")
+    try:
+        return puzzle_rush_room.start_session(client_id=req.client_id, mode=req.mode)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/puzzle_rush/attempt")
+def puzzle_rush_attempt(req: PuzzleRushAttemptRequest) -> dict[str, Any]:
+    if req.outcome not in ("solved", "failed", "skipped"):
+        raise HTTPException(status_code=400, detail="outcome must be solved|failed|skipped")
+    try:
+        return puzzle_rush_room.attempt(
+            session_id=req.session_id,
+            client_id=req.client_id,
+            puzzle_id=req.puzzle_id,
+            outcome=req.outcome,
+            solve_ms=req.solve_ms,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/puzzle_rush/finalize")
+def puzzle_rush_finalize(req: PuzzleRushFinalizeRequest) -> dict[str, Any]:
+    try:
+        return puzzle_rush_room.finalize(
+            session_id=req.session_id, client_id=req.client_id
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.get("/api/puzzle_rush/state")
+def puzzle_rush_state(
+    session_id: str = Query(..., min_length=4, max_length=64),
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    try:
+        return puzzle_rush_room.get_state(session_id=session_id, client_id=client_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.get("/api/puzzle_rush/leaderboard")
+def puzzle_rush_leaderboard(
+    mode: str = Query(..., description="3min | 5min | survival"),
+    period: str = Query(default="all", description="all | today"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    if mode not in puzzle_rush_room.MODE_DURATION_SEC:
+        raise HTTPException(status_code=400, detail="mode must be 3min|5min|survival")
+    if period not in ("all", "today"):
+        raise HTTPException(status_code=400, detail="period must be all|today")
+    return {
+        "mode": mode,
+        "period": period,
+        "rows": users_db.puzzle_rush_leaderboard(mode=mode, period=period, limit=limit),
+    }
+
+
+# ---- Daily Puzzle ----
+
+@app.get("/api/daily_puzzle/today")
+def daily_puzzle_today() -> dict[str, Any]:
+    date = daily_puzzle_pack.today_iso()
+    p = daily_puzzle_pack.get_for_date(date)
+    if not p:
+        raise HTTPException(status_code=503, detail="No puzzle available for today.")
+    payload = daily_puzzle_pack.public_payload(p, date=date)
+    serialized = _serialize_puzzle(p)
+    payload["side_to_solve"] = serialized.get("side_to_solve")
+    payload["setup_san"] = serialized.get("setup_san")
+    payload["themes_ru"] = serialized.get("themes_ru") or []
+    return payload
+
+
+@app.post("/api/daily_puzzle/attempt")
+def daily_puzzle_attempt(req: DailyPuzzleAttemptRequest) -> dict[str, Any]:
+    if req.outcome not in ("solved", "failed"):
+        raise HTTPException(status_code=400, detail="outcome must be solved|failed")
+    expected = daily_puzzle_pack.get_for_date(req.date)
+    if not expected or str(expected.get("id") or "") != req.puzzle_id:
+        raise HTTPException(status_code=400, detail="puzzle_id does not match the daily puzzle")
+    u = users_db.record_daily_puzzle_attempt(
+        req.client_id,
+        date=req.date,
+        puzzle_id=req.puzzle_id,
+        outcome=req.outcome,
+        solve_ms=req.solve_ms,
+    )
+    if u is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return u
+
+
+@app.get("/api/daily_puzzle/leaderboard")
+def daily_puzzle_leaderboard(
+    date: str | None = Query(default=None, description="ISO date YYYY-MM-DD; defaults to today UTC"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    target = date or daily_puzzle_pack.today_iso()
+    return {
+        "date": target,
+        "rows": users_db.daily_puzzle_leaderboard(target, limit=limit),
+    }
+
+
+# ---- Opening Trainer ----
+
+@app.get("/api/opening_trainer/list")
+def opening_trainer_list() -> dict[str, Any]:
+    return {"openings": opening_trainer_pack.list_openings()}
+
+
+@app.get("/api/opening_trainer/{opening_id}")
+def opening_trainer_get(opening_id: str) -> dict[str, Any]:
+    op = opening_trainer_pack.get_opening(opening_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail="Opening not found.")
+    return op.to_dict()
+
+
+@app.get("/api/opening_trainer/{opening_id}/position")
+def opening_trainer_position(
+    opening_id: str,
+    ply: int = Query(default=0, ge=0, le=64),
+) -> dict[str, Any]:
+    try:
+        return opening_trainer_pack.position_at(opening_id, ply)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IndexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/opening_trainer/attempt")
+def opening_trainer_attempt(req: OpeningAttemptRequest) -> dict[str, Any]:
+    try:
+        evaluation = opening_trainer_pack.evaluate_move(
+            opening_id=req.opening_id,
+            ply=req.ply,
+            san=req.san,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IndexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    user = users_db.record_opening_attempt(
+        req.client_id,
+        opening_id=req.opening_id,
+        correct=bool(evaluation.get("correct")),
+        line_completed=bool(evaluation.get("finished")),
+    )
+    return {
+        "evaluation": evaluation,
+        "user": user,
+    }
+
+
+@app.get("/api/opening_trainer/leaderboard")
+def opening_trainer_leaderboard(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    return {"rows": users_db.opening_trainer_leaderboard(limit=limit)}
 
 
 # ---- Party / Co-op puzzles ----
