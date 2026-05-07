@@ -7950,6 +7950,7 @@ function _resetOpeningBoard() {
   state.opening.moveIdx = 0;
   state.opening.feedback = null;
   state.opening.coachMsg = "";
+  state.opening.lastWrongSan = "";
   try { loadFen(_startposFen()); } catch (_) { /* ignore */ }
   state.lastMove = null;
   renderBoard();
@@ -8046,7 +8047,11 @@ function tryOpeningMove(from, to) {
   const expected = line && line.moves[state.opening.moveIdx];
   // Compare via SAN (allow chess.js to normalise).
   if (!expected || move.san !== expected) {
-    // Wrong move.
+    // Wrong move. We snapshot the user's actual SAN before undoing so
+    // the AI coach can ask Stockfish for the precise cp loss versus
+    // the theory move (otherwise the verdict can only say «не теория»
+    // without knowing how bad it was).
+    state.opening.lastWrongSan = move.san || "";
     try { c.undo(); } catch (_) { /* ignore */ }
     state.opening.feedback = "wrong";
     state.opening.coachMsg = expected
@@ -8254,42 +8259,92 @@ function renderOpeningUi() {
 
 // ---------- AI coach (Ollama + Stockfish 18) ----------
 
-// Parse the chess.com-style coach output into a big headline (verdict)
-// + smaller body. The backend prompts the LLM to emit:
+// Parse the hybrid coach output. The backend now streams a strict
+// structured block instead of free-form LLM prose:
 //
-//   ВЕРДИКТ: <one short line>
+//   ВЕРДИКТ: <one short line>          ← deterministic, never wrong
+//   ТОН: <good|warn|bad|info>          ← drives the headline colour
+//   ОЦЕНКА: Stockfish 18, depth N: ±X.XX
+//   ЛУЧШИЙ ХОД: <san>                  ← optional
 //   <blank line>
-//   <2-4 sentences>
+//   ИДЕЯ: <one sentence from LLM>
 //
-// We're permissive: if the model forgets the prefix, we still treat the
-// first non-empty line as the headline so the UI never looks broken.
+// We are *permissive* on stragglers: if a section is missing, we just
+// skip it. We are also tolerant of legacy outputs (free-form Russian
+// prose) so an old client cache still renders something useful — the
+// first non-empty line becomes the headline, the rest is the idea.
 function _formatCoachText(raw) {
   const trimmed = (raw || "").trim();
-  if (!trimmed) return { headline: "", body: "" };
+  if (!trimmed) return { headline: "", tone: "", evalText: "", bestSan: "", idea: "" };
   const lines = trimmed.split(/\n/);
   let headline = "";
-  let bodyStartIdx = 0;
+  let tone = "";
+  let evalText = "";
+  let bestSan = "";
+  let idea = "";
+  let sawHeadline = false;
+  // We accumulate idea lines (LLM might add a trailing newline) until we
+  // hit something non-textual. Anything after the first ИДЕЯ: line is
+  // treated as a continuation of the idea sentence.
+  let ideaStarted = false;
+  const ideaParts = [];
+  const stripPrefix = (ln, prefix) => ln.slice(prefix.length).replace(/^[\s::\-—]+/, "").trim();
   for (let i = 0; i < lines.length; i++) {
-    const ln = lines[i].trim();
-    if (!ln) continue;
-    const m = ln.match(/^(?:\*+\s*)?(?:ВЕРДИКТ|VERDICT|ЗАКЛЮЧЕНИЕ|ОЦЕНКА)\s*[::\-—]?\s*(.+?)\s*\**$/i);
-    headline = m ? m[1].trim() : ln.replace(/^\*+\s*/, "").replace(/\s*\*+$/, "");
-    bodyStartIdx = i + 1;
-    break;
+    const ln = lines[i];
+    const trimmedLn = ln.trim();
+    if (ideaStarted) {
+      if (trimmedLn) ideaParts.push(trimmedLn);
+      continue;
+    }
+    if (!trimmedLn) continue;
+    if (/^ВЕРДИКТ\s*[::\-—]/i.test(trimmedLn)) {
+      headline = stripPrefix(trimmedLn, "ВЕРДИКТ");
+      sawHeadline = true;
+      continue;
+    }
+    if (/^ТОН\s*[::\-—]/i.test(trimmedLn)) {
+      tone = stripPrefix(trimmedLn, "ТОН").toLowerCase();
+      continue;
+    }
+    if (/^ОЦЕНКА\s*[::\-—]/i.test(trimmedLn)) {
+      evalText = stripPrefix(trimmedLn, "ОЦЕНКА");
+      continue;
+    }
+    if (/^ЛУЧШИЙ\s+ХОД\s*[::\-—]/i.test(trimmedLn)) {
+      bestSan = stripPrefix(trimmedLn, "ЛУЧШИЙ ХОД");
+      continue;
+    }
+    if (/^ИДЕЯ\s*[::\-—]/i.test(trimmedLn)) {
+      const after = stripPrefix(trimmedLn, "ИДЕЯ");
+      if (after) ideaParts.push(after);
+      ideaStarted = true;
+      continue;
+    }
+    // Legacy / free-form fallback: first stray line becomes the headline,
+    // rest accumulates as idea so old streams still render.
+    if (!sawHeadline) {
+      headline = trimmedLn.replace(/^\*+\s*/, "").replace(/\s*\*+$/, "");
+      sawHeadline = true;
+    } else {
+      ideaParts.push(trimmedLn);
+    }
   }
-  const body = lines.slice(bodyStartIdx).join("\n").replace(/^\s*\n+/, "").trim();
-  return { headline, body };
+  idea = ideaParts.join(" ").trim();
+  return { headline, tone, evalText, bestSan, idea };
 }
 
 // Map a verdict string to a CSS modifier for colour-coding (good/bad).
-// Used to colour the big headline so the user sees the gist at a glance,
-// the same way chess.com paints a green "Best!" or red "Mistake".
-function _verdictTone(headline) {
+// Backend already emits an explicit ТОН line, but we keep this as a
+// fallback for legacy outputs and as a sanity check on the explicit
+// tone (we trust the backend if it gave us one).
+function _verdictTone(headline, explicit) {
+  const e = (explicit || "").toLowerCase().trim();
+  if (e === "good" || e === "warn" || e === "bad" || e === "info") return e;
   const h = (headline || "").toLowerCase();
   if (!h) return "";
   if (/(грубая ошибка|зевок|зевнул|blunder)/.test(h)) return "bad";
-  if (/(не лучший|неточн|inaccur|mistake)/.test(h)) return "warn";
-  if (/(точно по теории|по теории|лучший ход|best|brilliant|хороший ход|сильный ход|good)/.test(h)) return "good";
+  if (/(не лучший|не теоретический|неточн|inaccur|mistake)/.test(h)) return "warn";
+  if (/(точно по теории|по теории|лучший ход|best|brilliant|хороший ход|сильный ход|good|готовимся)/.test(h)) return "good";
   return "";
 }
 
@@ -8316,16 +8371,31 @@ function _renderOpeningAiCoachPanel() {
   const btnDisabled = ai.streaming ? "disabled" : "";
   const btnLabel = ai.streaming ? "Тренер думает…" : "🧠 Подробнее от тренера";
   const formatted = _formatCoachText(ai.text);
-  const tone = _verdictTone(formatted.headline);
+  const tone = _verdictTone(formatted.headline, formatted.tone);
   const toneCls = tone ? ` opening-ai-verdict-${tone}` : "";
   let textBlock;
   if (ai.error) {
     textBlock = `<div class="opening-ai-text is-error">${escapeHtml(ai.error)}</div>`;
   } else if (ai.text || ai.streaming) {
+    // Hybrid coach output: deterministic headline + Stockfish eval line +
+    // optional best-move chip + LLM idea sentence. Only render the parts
+    // we actually have, so a partial stream (streaming = headline first)
+    // doesn't draw empty boxes.
+    const evalLine = formatted.evalText || formatted.bestSan
+      ? `<div class="opening-ai-evalrow">${
+          formatted.evalText ? `<span class="opening-ai-eval">${escapeHtml(formatted.evalText)}</span>` : ""
+        }${
+          formatted.bestSan ? `<span class="opening-ai-best">Лучше: <code>${escapeHtml(formatted.bestSan)}</code></span>` : ""
+        }</div>`
+      : "";
+    const ideaLine = formatted.idea
+      ? `<div class="opening-ai-idea">${escapeHtml(formatted.idea)}</div>`
+      : (ai.streaming ? `<div class="opening-ai-idea muted">…</div>` : "");
     textBlock = `
       <div class="opening-ai-text">
-        <div class="opening-ai-verdict${toneCls}">${escapeHtml(formatted.headline)}</div>
-        <div class="opening-ai-body">${escapeHtml(formatted.body)}</div>
+        ${formatted.headline ? `<div class="opening-ai-verdict${toneCls}">${escapeHtml(formatted.headline)}</div>` : ""}
+        ${evalLine}
+        ${ideaLine}
       </div>`;
   } else {
     textBlock = `<div class="opening-ai-text muted">Нажми «Подробнее от тренера» — ИИ объяснит ход и план дебюта на основании Stockfish.</div>`;
@@ -8432,6 +8502,13 @@ async function requestOpeningCoach() {
   const correct = state.opening.feedback === "correct" || state.opening.feedback === "complete"
     ? true
     : state.opening.feedback === "wrong" ? false : null;
+  // When the user just played a *wrong* move, ``state.opening.lastWrongSan``
+  // holds the SAN they actually attempted (we snapshotted it in the
+  // wrong-move branch before undoing the chess.js move). Sending it to
+  // the backend lets it ask Stockfish for the precise cp loss versus
+  // the theory move, so the verdict can grade «inaccuracy / mistake /
+  // blunder» instead of always saying «не теория».
+  const playedSan = correct === false ? (state.opening.lastWrongSan || "") : "";
   ai.lastPly = ply;
   ai.lastSan = lastSan;
   ai.lastCorrect = correct;
@@ -8444,6 +8521,7 @@ async function requestOpeningCoach() {
         opening_id: op.id,
         ply,
         last_san: lastSan || null,
+        played_san: playedSan || null,
         correct,
         locale: "ru",
         depth: _readCoachDepth(),

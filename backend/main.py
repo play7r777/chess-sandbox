@@ -144,7 +144,13 @@ class OpeningAttemptRequest(BaseModel):
 class OpeningCoachRequest(BaseModel):
     opening_id: str = Field(..., min_length=1, max_length=64)
     ply: int = Field(..., ge=0, le=64, description="Ply position the user is asking about")
-    last_san: str | None = Field(default=None, max_length=12, description="The user's actual last move in SAN, if any")
+    # NOTE: ``last_san`` historically carries the *theory* SAN at this ply
+    # (the move the trainer expected). ``played_san`` is the move the user
+    # actually attempted — only meaningful when ``correct=False``. The
+    # backend uses ``played_san`` to compute the precise cp-loss versus
+    # the best line, so the verdict can say e.g. «Грубая ошибка (-1.8)».
+    last_san: str | None = Field(default=None, max_length=12, description="Theory SAN at this ply (what the trainer expected)")
+    played_san: str | None = Field(default=None, max_length=12, description="The user's actual last move (only set when correct=False)")
     correct: bool | None = Field(default=None, description="Whether the user's last move matched the trained line")
     locale: str = Field(default="ru", min_length=2, max_length=8)
     # Stockfish knobs (front-end picker on the AI panel). Defaults match
@@ -874,102 +880,291 @@ async def _stockfish_top_lines(fen: str, multipv: int = 2, depth: int = 18) -> l
     return out
 
 
-def _build_coach_prompt(
+def _cp_from_pov(score_cp: int | None, score_mate: int | None, white_to_move: bool) -> int | None:
+    """Stockfish returns scores from White's POV. Flip to side-to-move POV.
+
+    Mate scores are clamped to ±10000 cp so the rest of the verdict logic
+    can stay numeric without special-casing mate.
+    """
+    if score_mate is not None:
+        sgn = 1 if score_mate > 0 else -1
+        if not white_to_move:
+            sgn = -sgn
+        return sgn * 10000
+    if score_cp is None:
+        return None
+    return score_cp if white_to_move else -score_cp
+
+
+def _format_eval_short(score_cp: int | None, score_mate: int | None) -> str:
+    """One-line White-POV eval, e.g. '+0.32' or '#3'."""
+    if score_mate is not None:
+        return f"#{score_mate}" if score_mate > 0 else f"#-{abs(score_mate)}"
+    if score_cp is None:
+        return "n/a"
+    return f"{score_cp / 100:+.2f}"
+
+
+async def _eval_position_cp(fen: str, *, depth: int) -> tuple[int | None, int | None]:
+    """Single-line Stockfish probe for cp loss math.
+
+    Returns ``(score_cp_white_pov, score_mate_white_pov)``. Both ``None``
+    if the engine is not running or fails — the verdict logic falls back
+    to the «we don't know cp loss» branch in that case.
+    """
+    if not engine.is_running:
+        return (None, None)
+    try:
+        infos = await engine.analyse_raw(fen, depth=depth, multipv=1)
+    except Exception as exc:
+        logger.warning("Stockfish probe failed: %s", exc)
+        return (None, None)
+    if not infos:
+        return (None, None)
+    score = infos[0].get("score")
+    if score is None:
+        return (None, None)
+    try:
+        pov = score.white()
+    except Exception:
+        pov = score
+    if pov.is_mate():
+        return (None, pov.mate())
+    return (pov.score(), None)
+
+
+def _compute_coach_verdict(
+    *,
+    correct: bool | None,
+    expected_san: str | None,
+    played_san: str | None,
+    sf_lines: list[dict[str, Any]],
+    cp_loss: int | None,
+    white_to_move: bool,
+) -> dict[str, Any]:
+    """Compute the deterministic verdict block (headline + tone + eval).
+
+    The whole point of this function is that the *factual* part of the
+    coach output never depends on the LLM. Stockfish + theory drive the
+    headline, the LLM only fills in a one-sentence «idea» afterwards.
+
+    Tone keys mirror the frontend CSS classes (`opening-ai-verdict-*`):
+    ``good`` (green), ``warn`` (yellow), ``bad`` (red), ``info`` (neutral).
+    """
+    best_san: str | None = None
+    if sf_lines:
+        pv = sf_lines[0].get("pv_san") or []
+        if pv:
+            best_san = pv[0]
+    if not best_san and expected_san:
+        best_san = expected_san
+
+    sf0 = sf_lines[0] if sf_lines else {}
+    eval_text = "(оценка не получена)"
+    if sf_lines:
+        eval_text = _format_eval_short(sf0.get("score_cp"), sf0.get("score_mate"))
+
+    if correct is True:
+        return {
+            "headline": "Точно по теории",
+            "tone": "good",
+            "best_san": expected_san or best_san,
+            "eval_text": eval_text,
+            "cp_loss": 0,
+        }
+
+    if correct is False:
+        # We have a played move; classify by cp-loss vs the best line.
+        # Without cp_loss (e.g. Stockfish off) we degrade gracefully to a
+        # generic «не теория» verdict instead of inventing a number.
+        target_san = expected_san or best_san or "?"
+        if cp_loss is None:
+            return {
+                "headline": f"Не теоретический ход. По теории: {target_san}",
+                "tone": "warn",
+                "best_san": target_san,
+                "eval_text": eval_text,
+                "cp_loss": None,
+            }
+        if cp_loss <= 30:
+            return {
+                "headline": f"Хороший ход (потеря {cp_loss} cp). По теории: {target_san}",
+                "tone": "good",
+                "best_san": target_san,
+                "eval_text": eval_text,
+                "cp_loss": cp_loss,
+            }
+        if cp_loss <= 100:
+            return {
+                "headline": f"Не лучший ход (-{cp_loss / 100:.2f}). Лучше: {target_san}",
+                "tone": "warn",
+                "best_san": target_san,
+                "eval_text": eval_text,
+                "cp_loss": cp_loss,
+            }
+        return {
+            "headline": f"Грубая ошибка (-{cp_loss / 100:.2f}). Нужно: {target_san}",
+            "tone": "bad",
+            "best_san": target_san,
+            "eval_text": eval_text,
+            "cp_loss": cp_loss,
+        }
+
+    # No move yet — preview / start of the line.
+    preview_san = expected_san or best_san
+    if preview_san:
+        return {
+            "headline": f"Готовимся к ходу: {preview_san}",
+            "tone": "info",
+            "best_san": preview_san,
+            "eval_text": eval_text,
+            "cp_loss": None,
+        }
+    return {
+        "headline": "Линия пройдена",
+        "tone": "good",
+        "best_san": None,
+        "eval_text": eval_text,
+        "cp_loss": None,
+    }
+
+
+def _build_coach_idea_prompt(
     *,
     opening: opening_trainer_pack.Opening,
-    ply: int,
-    last_san: str | None,
+    verdict: dict[str, Any],
     correct: bool | None,
-    fen: str,
-    line_so_far: list[str],
-    expected_san: str | None,
-    sf_lines: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    """Build the chat messages for the AI coach.
+    """Build a *narrowly scoped* prompt asking the LLM for one sentence.
 
-    The output format is chess.com Game-Review style:
-        ВЕРДИКТ: <одна короткая строка>
-        <пустая строка>
-        <2–4 коротких предложения>
+    The deterministic block (verdict + eval + best move) is rendered by
+    the backend before this LLM call, so we don't need the model to act
+    as a chess engine — we just need a one-line plan/idea written in
+    Russian. The constraints are:
 
-    The frontend parses this and renders the verdict as a big bold
-    headline, with the body underneath. We are very explicit with the
-    LLM about chess terminology (фигуры vs клетки/поля) because models
-    like to write nonsense like «фигура e4» otherwise.
+    * exactly one short sentence, 10–25 words
+    * no markdown, no lists, no headers
+    * NO concrete squares (e4, d5…) and NO piece names — talk only
+      about high-level ideas (control of centre, development, king
+      safety, pressure on a file, …). This is the single biggest
+      hallucination source on a 7B model so we just forbid it.
+    * stick to the opening theory we hand it; do not invent variations
     """
     side = "белыми" if opening.side == "white" else "чёрными"
-    sf_text_lines: list[str] = []
-    for i, ln in enumerate(sf_lines, start=1):
-        sf_text_lines.append(
-            f"  {i}) " + _coach_eval_summary(ln.get("score_cp"), ln.get("score_mate"), ln.get("pv_san") or [])
+
+    if correct is True:
+        outcome_hint = "Ход совпадает с главной теорией. Объясни одной фразой ИДЕЮ этого хода в дебюте."
+    elif correct is False:
+        outcome_hint = (
+            "Ход не теория. Объясни одной фразой ИДЕЮ правильного теоретического хода — "
+            "что он даёт стороне и какой план реализует."
         )
-    sf_block = "\n".join(sf_text_lines) if sf_text_lines else "  (Stockfish недоступен)"
-    line_history = " ".join(line_so_far) if line_so_far else "(старт партии)"
-    if last_san:
-        if correct is True:
-            outcome_line = f"Последний ход ученика: {last_san} — совпадает с главной теоретической линией."
-        elif correct is False:
-            outcome_line = (
-                f"Последний ход ученика: {last_san}. "
-                f"Главный ход теории здесь: {expected_san or '(линия завершена)'}."
-            )
-        else:
-            outcome_line = f"Последний ход ученика: {last_san}."
     else:
-        outcome_line = (
-            f"Ход {ply // 2 + 1}. Сейчас очередь {side}. "
-            f"Главный ход теории: {expected_san or '(линия пройдена)'}."
-        )
+        outcome_hint = "Ход ещё не сыгран. Объясни одной фразой ИДЕЮ следующего теоретического хода."
 
     system = (
-        "Ты — шахматный тренер. Отвечаешь коротко и по делу, как Game Review на chess.com. "
-        "Никакой воды, никаких длинных объяснений.\n"
+        "Ты — шахматный тренер. Твоя задача — написать РОВНО ОДНО короткое предложение "
+        "(10–25 слов) на русском языке про идею/план в дебютной позиции.\n"
         "\n"
-        "ФОРМАТ ОТВЕТА (СТРОГО):\n"
-        "ВЕРДИКТ: <одна короткая строка — оценка хода или позиции>\n"
+        "ЖЁСТКИЕ ПРАВИЛА:\n"
+        "1. Ровно одно предложение. Никаких списков, абзацев, markdown, **звёздочек**.\n"
+        "2. ЗАПРЕЩЕНО упоминать конкретные клетки (e4, d5, f7…) и конкретные фигуры "
+        "(пешка, конь, слон, ладья, ферзь, король). Не пиши «слон на b5», «конь d4», "
+        "«пешка e4», «Bb5», «Nxd4». Никаких SAN, никаких координат, никаких фигур.\n"
+        "3. Говори только про общие шахматные идеи: контроль центра, развитие лёгких "
+        "фигур, безопасность короля, давление на ферзевый/королевский фланг, размен, "
+        "пешечное напряжение, открытие линий, игра на двух флангах, инициатива, "
+        "пространство, ослабление, темпы.\n"
+        "4. Не оценивай ход цифрами и не ссылайся на Stockfish — это уже сделано "
+        "до тебя. Только идея/план.\n"
+        "5. Опирайся только на дебютную теорию, которую тебе дали. Не придумывай.\n"
+        "6. Никаких преамбул («Идея в том, что…», «Этот ход…»). Сразу по делу.\n"
         "\n"
-        "<2–4 коротких предложения с объяснением>\n"
-        "\n"
-        "Никакого markdown, никаких звёздочек, никаких bullet-points, никаких заголовков "
-        "вроде «Объяснение:».\n"
-        "\n"
-        "ТЕРМИНОЛОГИЯ — ВАЖНО, НЕ ПУТАЙ:\n"
-        "• ФИГУРЫ — это пешка, конь, слон, ладья, ферзь, король.\n"
-        "• ПОЛЯ (клетки) — это e4, d5, f7 и т.п. (буква + цифра).\n"
-        "• Правильно: «пешка на e4», «слон с c4 на f7», «конь занял поле d5», «поле e6 ослаблено».\n"
-        "• НЕПРАВИЛЬНО: «фигура e4», «клетка слон», «слон на коня c6». Никогда так не пиши.\n"
-        "• Описывая ход, пиши сначала фигуру, потом поле: «слон на b5», а не «b5 слон».\n"
-        "• Если хочешь сослаться на ход в нотации — пиши SAN как есть: «Bb5», «Nxd4».\n"
-        "\n"
-        "ЧТО ПИСАТЬ В ВЕРДИКТЕ (одна короткая строка, 4–8 слов):\n"
-        "• Если ход совпадает с главной теорией → «Точно по теории».\n"
-        "• Если ход не теория, но Stockfish не теряет оценки (≤ 30 cp от лучшего) → «Хороший ход».\n"
-        "• Если ход теряет 30–100 cp → «Не лучший ход. Лучше: <SAN>».\n"
-        "• Если ход теряет больше 100 cp → «Грубая ошибка. Нужно было: <SAN>».\n"
-        "• Если ход вообще не оценивается (старт линии) → «Готовимся к ходу <SAN>».\n"
-        "\n"
-        "ЧТО ПИСАТЬ В ОБЪЯСНЕНИИ:\n"
-        "• Если ход правильный — одной фразой почему он хорош (план, идея дебюта).\n"
-        "• Если ход плохой — одной фразой что не так и какой был план у правильного хода.\n"
-        "• Опирайся ТОЛЬКО на теорию дебюта и оценку Stockfish, которые тебе дали. "
-        "Не придумывай линии и не считай тактику дальше Stockfish.\n"
-        "• Отвечай по-русски."
+        "Если не понимаешь идею — напиши общую фразу про развитие фигур и контроль "
+        "центра. Это лучше, чем выдумать поле или фигуру."
     )
     user = (
         f"Дебют: {opening.name} ({opening.eco}), играем {side}.\n"
         f"Теория дебюта: {opening.theory}\n"
-        f"Сыгранная линия: {line_history}\n"
-        f"{outcome_line}\n"
-        f"FEN: {fen}\n"
-        f"Stockfish (top {len(sf_lines) or 1}):\n{sf_block}\n"
+        f"Вердикт от Stockfish (уже выведен пользователю): {verdict['headline']}\n"
+        f"{outcome_hint}\n"
         f"\n"
-        f"Дай разбор строго в указанном формате: одна строка ВЕРДИКТ + 2–4 коротких "
-        f"предложения объяснения. Помни про терминологию (фигуры vs поля)."
+        f"Напиши РОВНО ОДНО короткое предложение про идею. "
+        f"Без клеток, без фигур, без SAN, без markdown."
     )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+
+
+# Substrings that almost always indicate the LLM forgot the «no concrete
+# squares / pieces» rule. We surface these to the user as a flag rather
+# than try to silently rewrite the sentence (rewriting tends to make
+# things worse and the deterministic block already gives the correct
+# answer above the idea line).
+_BAD_TERMINOLOGY_PATTERNS = (
+    "фигура e",
+    "фигура d",
+    "фигура f",
+    "фигура c",
+    "фигура a",
+    "фигура b",
+    "фигура g",
+    "фигура h",
+    "клетка слон",
+    "клетка конь",
+    "клетка ладь",
+    "клетка ферз",
+    "клетка корол",
+    "клетка пешк",
+    "слон на коня",
+    "конь на слон",
+    "ладья на ферз",
+)
+
+
+def _scrub_idea_sentence(text: str) -> str:
+    """Light post-processing of the LLM's idea sentence.
+
+    We don't try to rewrite the model — too risky on a small LLM. We
+    just:
+
+    * strip markdown (``**bold**``, ``*italic*``, leading ``-``/``*``
+      bullets, headers like ``Идея:`` or ``Объяснение:``);
+    * collapse whitespace;
+    * truncate to the first sentence — anything past ``.``/``!``/``?``
+      is the model continuing past its budget;
+    * tag the result with a soft warning if it tripped the «фигура e4 /
+      клетка слон / слон на коня» pattern, so the frontend can mute it
+      instead of presenting wrong terminology as authoritative.
+    """
+    s = (text or "").strip()
+    if not s:
+        return s
+    # Strip leading list markers / headers.
+    s = s.lstrip("-*•— ").strip()
+    for prefix in ("Идея:", "ИДЕЯ:", "Объяснение:", "ОБЪЯСНЕНИЕ:", "План:", "ПЛАН:"):
+        if s.startswith(prefix):
+            s = s[len(prefix):].strip()
+    # Drop markdown emphasis.
+    s = s.replace("**", "").replace("__", "")
+    # First sentence only.
+    cut = len(s)
+    for ch in (".", "!", "?", "\n"):
+        idx = s.find(ch)
+        if idx != -1 and idx + 1 < cut:
+            cut = idx + 1
+    s = s[:cut].strip()
+    # Cap length so a runaway model can't blow out the panel.
+    if len(s) > 300:
+        s = s[:300].rstrip() + "…"
+    return s
+
+
+def _idea_has_bad_terminology(text: str) -> bool:
+    low = (text or "").lower()
+    return any(pat in low for pat in _BAD_TERMINOLOGY_PATTERNS)
 
 
 def _coach_fallback_text(
@@ -998,12 +1193,24 @@ def _coach_fallback_text(
 async def opening_trainer_coach(req: OpeningCoachRequest) -> StreamingResponse:
     """Stream AI-coach text for the given opening position.
 
-    Combines Stockfish 18 evaluation + Ollama LLM. If Ollama is not
-    available, falls back to canned coach lines + theory + Stockfish
-    summary so the user always sees something useful.
+    Hybrid architecture (chess.com-style):
 
-    Response is `text/plain` with chunked transfer — frontend reads
-    `response.body.getReader()` and appends each chunk to the panel.
+    1. **Deterministic block** — backend computes the verdict, the best
+       move, and the eval *itself* from Stockfish + theory, then streams
+       it as a fixed prefix. This part can never hallucinate, so the
+       big bold headline is always factually correct.
+
+    2. **One-sentence idea from the LLM** — Ollama is asked for a single
+       sentence about the *plan* in the position, with strict rules
+       forbidding squares/pieces/SAN. The LLM is the smallest possible
+       contributor, so even a 7B model can't drag the whole answer
+       into nonsense.
+
+    The response is plain text framed with line-prefixed sections the
+    frontend parses (``ВЕРДИКТ:``, ``ОЦЕНКА:``, ``ЛУЧШИЙ ХОД:``,
+    ``ИДЕЯ:``). If Ollama is offline, the deterministic block still
+    streams in full, and the ``ИДЕЯ`` line falls back to the opening's
+    theory blurb.
     """
     opening = opening_trainer_pack.get_opening(req.opening_id)
     if opening is None:
@@ -1018,6 +1225,9 @@ async def opening_trainer_coach(req: OpeningCoachRequest) -> StreamingResponse:
     line_so_far = list(line[:ply])
     expected_san = line[ply] if ply < len(line) else None
 
+    # Theory position at this ply (board after the trainer's expected
+    # moves up to ply). Stockfish evaluates this position; the «best»
+    # PV from here is the answer to «what is the principal continuation».
     board = chess.Board()
     for san in line_so_far:
         try:
@@ -1025,46 +1235,105 @@ async def opening_trainer_coach(req: OpeningCoachRequest) -> StreamingResponse:
         except ValueError:
             break
     fen = board.fen()
+    white_to_move = board.turn == chess.WHITE
 
-    # Stockfish snapshot — best-effort, never blocks fallback path. Depth
-    # and multipv come from the AI-panel picker so the user can dial in
-    # the speed/quality trade-off (chess.com Game Review uses ~22).
     sf_lines = await _stockfish_top_lines(fen, multipv=req.multipv, depth=req.depth)
+
+    # Compute cp loss when the user actually played a non-theory move.
+    # The frontend snaps the board back to the theory position on a
+    # wrong attempt, so we apply ``played_san`` to a *copy* of the
+    # board rather than mutating the canonical one used for the FEN /
+    # sf_lines above.
+    cp_loss: int | None = None
+    if req.correct is False and req.played_san:
+        try:
+            after = board.copy()
+            after.push_san(req.played_san)
+            after_cp, after_mate = await _eval_position_cp(after.fen(), depth=req.depth)
+        except ValueError:
+            after_cp, after_mate = None, None
+        before_cp, before_mate = (
+            sf_lines[0].get("score_cp") if sf_lines else None,
+            sf_lines[0].get("score_mate") if sf_lines else None,
+        )
+        # Convert both to side-to-move POV (the side who just moved is
+        # the side currently *not* on move on the «after» board, i.e.
+        # the side that was on move on the «before» board).
+        before_pov = _cp_from_pov(before_cp, before_mate, white_to_move)
+        # ``after`` board has the opposite side to move; flipping the
+        # POV brings both numbers back to the moving side.
+        after_pov_opp = _cp_from_pov(after_cp, after_mate, not white_to_move)
+        if before_pov is not None and after_pov_opp is not None:
+            # Best line keeps eval at ``before_pov`` for the moving
+            # side; the move played leaves it at ``-after_pov_opp``
+            # (sign flip because evaluation is from the opposite POV
+            # after the move). cp_loss is non-negative.
+            played_pov = -after_pov_opp
+            loss = before_pov - played_pov
+            cp_loss = max(0, int(loss))
+
+    verdict = _compute_coach_verdict(
+        correct=req.correct,
+        expected_san=expected_san,
+        played_san=req.played_san,
+        sf_lines=sf_lines,
+        cp_loss=cp_loss,
+        white_to_move=white_to_move,
+    )
 
     cfg = ollama_client.OllamaConfig(
         base_url=settings.ollama_base_url,
         model=settings.ollama_model,
         timeout_s=settings.ollama_timeout_s,
-        num_predict=settings.ollama_num_predict,
+        num_predict=140,  # idea is one sentence; cap hard.
     )
-    messages = _build_coach_prompt(
+    idea_messages = _build_coach_idea_prompt(
         opening=opening,
-        ply=ply,
-        last_san=req.last_san,
+        verdict=verdict,
         correct=req.correct,
-        fen=fen,
-        line_so_far=line_so_far,
-        expected_san=expected_san,
-        sf_lines=sf_lines,
     )
 
     async def streamer() -> Any:
-        # Try Ollama first; on any failure fall back to canned text so
-        # the frontend always has something to display.
+        # 1) Deterministic block — emitted immediately so the user sees
+        # the headline and best move *before* the LLM warms up.
+        yield f"ВЕРДИКТ: {verdict['headline']}\n".encode()
+        yield f"ТОН: {verdict['tone']}\n".encode()
+        yield f"ОЦЕНКА: Stockfish 18, depth {req.depth}: {verdict['eval_text']}\n".encode()
+        if verdict.get("best_san"):
+            yield f"ЛУЧШИЙ ХОД: {verdict['best_san']}\n".encode()
+        yield "\nИДЕЯ: ".encode()
+
+        # 2) LLM idea sentence. Lower temperature + small num_predict
+        # keep the model focused. We collect the whole reply (it's
+        # tiny) then post-process it before yielding so we can strip
+        # markdown/preambles cleanly. Streaming token-by-token is not
+        # worth it for a 1-sentence reply.
         try:
-            async for chunk in ollama_client.stream_chat(cfg, messages):
-                yield chunk.encode("utf-8")
-            return
+            raw = await ollama_client.chat_collect(
+                cfg,
+                idea_messages,
+                extra_options={"temperature": 0.2, "num_predict": 140, "top_p": 0.85},
+            )
         except ollama_client.OllamaUnavailable as exc:
-            logger.info("Ollama unavailable, falling back to canned coach: %s", exc)
+            logger.info("Ollama unavailable, using theory blurb as idea: %s", exc)
+            yield opening.theory.encode("utf-8")
+            return
         except Exception as exc:
             logger.warning("Ollama coach error: %s", exc)
-        yield (
-            "AI-тренер сейчас недоступен (запусти `ollama serve` локально). "
-            "Вот разбор от встроенного тренера + Stockfish:\n\n"
-        ).encode()
-        text = _coach_fallback_text(opening, ply, expected_san, req.correct, sf_lines)
-        yield text.encode()
+            yield opening.theory.encode("utf-8")
+            return
+
+        sentence = _scrub_idea_sentence(raw)
+        if not sentence:
+            yield opening.theory.encode("utf-8")
+            return
+        if _idea_has_bad_terminology(sentence):
+            # Don't pretend to know — show the theory line instead and
+            # surface a hint that the LLM tripped over terminology.
+            logger.info("Coach idea tripped terminology guard: %r", sentence)
+            yield (opening.theory + "\n(тренер запутался в терминологии — показана теория из дебюта)").encode("utf-8")
+            return
+        yield sentence.encode("utf-8")
 
     return StreamingResponse(streamer(), media_type="text/plain; charset=utf-8")
 

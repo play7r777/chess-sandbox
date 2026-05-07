@@ -3320,6 +3320,46 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   white-space: pre-wrap;
 }
 .opening-ai-body:empty { display: none; }
+/* Hybrid coach output: eval row sits between the bold headline and the
+   one-sentence «idea». ``opening-ai-eval`` shows Stockfish numbers,
+   ``opening-ai-best`` shows the recommended SAN as a small chip — both
+   are deterministic so we render them in muted/numeric style instead of
+   compete-with-the-headline weight. */
+.opening-ai-evalrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: baseline;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  color: #aab8d0;
+  font-variant-numeric: tabular-nums;
+}
+.opening-ai-eval {
+  white-space: nowrap;
+}
+.opening-ai-best code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(106, 212, 139, 0.14);
+  border: 1px solid rgba(106, 212, 139, 0.32);
+  color: #b8eccc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+/* The LLM-written sentence — soft / italic so it visually defers to the
+   Stockfish-driven block above. */
+.opening-ai-idea {
+  display: block;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: #cfd9ea;
+  font-style: italic;
+  white-space: pre-wrap;
+}
+.opening-ai-idea.muted { color: #8aa0c0; }
+.opening-ai-idea:empty { display: none; }
 .opening-ai-help {
   margin-top: 6px;
   font-size: 11.5px;
