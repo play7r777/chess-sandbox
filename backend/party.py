@@ -229,6 +229,11 @@ class Party:
     # Shared, shuffled puzzle order for the whole match. Built in
     # `start()` from the entire pool, then re-used across every member.
     puzzle_queue: list[dict[str, Any]] = field(default_factory=list)
+    # Average lobby rating snapshotted at start(); used for puzzle-window
+    # selection AND so the Glicko-lite party-ELO award can compare each
+    # finishing player against the average opponent rather than treating
+    # 800-elo and 2400-elo lobbies identically.
+    avg_lobby_rating: int = 0
 
     def public_member(self, m: Member) -> dict[str, Any]:
         return {
@@ -259,6 +264,7 @@ class Party:
             "allowed_durations_sec": list(PARTY_ALLOWED_DURATIONS_SEC),
             "members": [self.public_member(m) for m in self.members.values()],
             "spectator_count": sum(1 for s in self.spectators.values() if s.ws is not None),
+            "avg_lobby_rating": int(self.avg_lobby_rating),
         }
 
     def scoreboard(self) -> list[dict[str, Any]]:
@@ -687,13 +693,44 @@ class Party:
         self.status = "playing"
         self.started_at = now
         self.ends_at = now + self.duration_sec
-        # Sample a fresh queue from the puzzle bank for each match. Every
-        # member walks through that same ordered list, so the comparison
-        # is fair (same puzzles, same order); a different sample per match
-        # keeps players from seeing identical openings. With the SQLite
-        # bank backing 500k+ puzzles repeats inside a match are
-        # essentially impossible.
-        self.puzzle_queue = list(puzzle_pack.sample_puzzles(PARTY_QUEUE_SIZE))
+        # Snapshot the average lobby rating from each member's persisted
+        # profile. We use that average to:
+        #   1) build a puzzle queue centred on the lobby's skill — an
+        #      800-elo lobby gets 600..1100 puzzles, a 2200-elo lobby
+        #      gets 1900..2400 puzzles. Without this, every match drew
+        #      from the entire 600-3000 spread.
+        #   2) feed Glicko-lite into `_party_elo_award`, so beating
+        #      stronger opponents pays more than beating weak ones.
+        ratings: list[int] = []
+        for mem in self.members.values():
+            u = users_db.get_user(mem.client_id)
+            if u:
+                ratings.append(int(u.get("rating") or 1200))
+        if ratings:
+            avg = sum(ratings) // len(ratings)
+            self.avg_lobby_rating = avg
+            # ±300 around the average; clamp to the puzzle bank's bounds.
+            min_r = max(400, avg - 300)
+            max_r = min(3000, avg + 350)
+            self.puzzle_queue = list(
+                puzzle_pack.sample_puzzles(
+                    PARTY_QUEUE_SIZE, min_rating=min_r, max_rating=max_r,
+                )
+            )
+            # If the window was so tight the bank couldn't fill it, top
+            # the queue up with an unfiltered sample so members never run
+            # out of puzzles mid-match.
+            if len(self.puzzle_queue) < PARTY_QUEUE_SIZE // 2:
+                fill = puzzle_pack.sample_puzzles(
+                    PARTY_QUEUE_SIZE - len(self.puzzle_queue)
+                )
+                seen = {p.get("id") for p in self.puzzle_queue}
+                for p in fill:
+                    if p.get("id") not in seen:
+                        self.puzzle_queue.append(p)
+        else:
+            self.avg_lobby_rating = 0
+            self.puzzle_queue = list(puzzle_pack.sample_puzzles(PARTY_QUEUE_SIZE))
         random.shuffle(self.puzzle_queue)
         for m in self.members.values():
             m.puzzle_index = 0
@@ -808,8 +845,27 @@ class Party:
         for rank, row in enumerate(rows, start=1):
             placement = rank
             participants = len(rows)
-            party_elo = _party_elo_award(placement, participants, row["solved"], row["score"])
             cid = row["client_id"]
+            user_now = users_db.get_user(cid) or {}
+            my_rating = int(user_now.get("rating") or 1200)
+            # Average opponent rating from this lobby, excluding the
+            # finishing player. Falls back to the lobby average so a
+            # solo lobby still gets a sensible compare value.
+            opp_ratings: list[int] = []
+            for other in rows:
+                if other["client_id"] == cid:
+                    continue
+                ou = users_db.get_user(other["client_id"]) or {}
+                opp_ratings.append(int(ou.get("rating") or 1200))
+            avg_opp = (
+                sum(opp_ratings) // len(opp_ratings)
+                if opp_ratings
+                else int(self.avg_lobby_rating or my_rating)
+            )
+            party_elo = _party_elo_award(
+                placement, participants, row["solved"], row["score"],
+                user_rating=my_rating, avg_opp_rating=avg_opp,
+            )
             m = self.members.get(cid)
             attempts_total = row["solved"] + row["failed"] + row["skipped"]
             winrate = (row["solved"] / attempts_total * 100.0) if attempts_total else 0.0
@@ -831,6 +887,8 @@ class Party:
                 "avg_solve_ms": avg_solve_ms,
                 "best_solve_ms": best_solve_ms,
                 "party_elo": party_elo,
+                "my_rating": my_rating,
+                "avg_opp_rating": avg_opp,
             }
             results.append(entry)
         # Second pass: write per-player profile history. We pass the
@@ -842,6 +900,13 @@ class Party:
             cid = entry["client_id"]
             m = self.members.get(cid)
             attempts_log = list(m.attempts_log) if m else []
+            # Apply the Glicko-lite party-ELO delta to the user's
+            # persistent rating BEFORE recording so the leaderboard
+            # reflects strong-vs-weak lobby outcomes immediately.
+            try:
+                users_db.apply_rating_delta(cid, entry["party_elo"], reason="party")
+            except Exception:
+                pass
             try:
                 users_db.record_party_result(
                     cid,
@@ -858,6 +923,9 @@ class Party:
                         "avg_solve_ms": entry["avg_solve_ms"],
                         "best_solve_ms": entry["best_solve_ms"],
                         "elo_gained": entry["party_elo"],
+                        "avg_lobby_rating": int(self.avg_lobby_rating),
+                        "avg_opp_rating": entry["avg_opp_rating"],
+                        "my_rating": entry["my_rating"],
                         "duration_sec": int(self.duration_sec),
                         "started_at": int(self.started_at),
                         "ended_at": finished_at,
@@ -887,12 +955,59 @@ class Party:
         )
 
 
-def _party_elo_award(placement: int, participants: int, solved: int, score: int) -> int:
-    if participants <= 0 or solved == 0:
+def _party_elo_award(
+    placement: int,
+    participants: int,
+    solved: int,
+    score: int,
+    *,
+    user_rating: int = 1200,
+    avg_opp_rating: int = 1200,
+) -> int:
+    """Glicko-lite party rating delta.
+
+    Replaces the old purely-linear ``base + bonus`` award which paid the
+    same +20 elo whether you crushed a lobby of 800-rated newbies or a
+    lobby of 2400-rated grandmasters. Now we compute the *expected*
+    placement from the user's rating vs. the average opponent rating
+    (Elo expected-score formula) and pay out ``K * (actual - expected)``
+    plus a small score-based engagement bonus.
+
+    Beating stronger lobbies pays more; getting last in a stronger
+    lobby is forgiven; placing first in a much weaker lobby is muted.
+    """
+    if participants <= 0:
         return 0
-    base = max(0, participants - placement + 1) * 5
-    bonus = score // 100
-    return int(base + bonus)
+    if solved == 0:
+        # No real participation — no rating change.
+        return 0
+    # Expected score (0..1) from Elo formula.
+    expected = 1.0 / (1.0 + 10.0 ** ((avg_opp_rating - user_rating) / 400.0))
+    # Actual score: 1.0 for #1, 0.0 for last, linear in between.
+    if participants == 1:
+        actual = 1.0
+    else:
+        actual = (participants - placement) / (participants - 1)
+    # K-factor mirrors the puzzle attempt scale (slightly larger because
+    # a party is worth more than a single puzzle).
+    if user_rating >= 2200:
+        k = 24
+    elif user_rating >= 1700:
+        k = 28
+    elif user_rating >= 1200:
+        k = 32
+    else:
+        k = 36
+    raw = k * (actual - expected)
+    # Engagement bonus: rewards solving regardless of placement, capped
+    # so it can't dominate the rating-based component.
+    bonus = min(10, max(0, score // 250))
+    delta = round(raw) + bonus
+    # Floor first place at +3 (you came first, you earn at least a bit
+    # even if expected was 1.0).
+    if placement == 1 and delta < 3:
+        delta = 3
+    return int(delta)
 
 
 class PartyError(Exception):

@@ -288,6 +288,321 @@ def record_party_result(client_id: str, summary: dict[str, Any]) -> None:
         _save(data)
 
 
+def apply_rating_delta(client_id: str, delta: int, *, reason: str = "") -> int | None:
+    """Apply a pre-computed rating delta to a user (party / rush / etc).
+
+    Returns the new rating, or None if the user doesn't exist. Mirrors
+    the elo_history bookkeeping used by ``record_puzzle_attempt`` so the
+    profile chart stays continuous regardless of which mode the delta
+    came from.
+    """
+    try:
+        d = int(delta)
+    except (TypeError, ValueError):
+        return None
+    if d == 0:
+        return None
+    now = int(time.time())
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        prev = int(u.get("rating") or 1200)
+        prev = max(_MIN_RATING, min(_MAX_RATING, prev))
+        new_rating = max(_MIN_RATING, min(_MAX_RATING, prev + d))
+        u["rating"] = new_rating
+        u["last_seen"] = now
+        history = u.setdefault("elo_history", [])
+        history.append(
+            {
+                "ts": now,
+                "rating": new_rating,
+                "delta": new_rating - prev,
+                "outcome": reason or "delta",
+            }
+        )
+        if len(history) > 5000:
+            del history[: len(history) - 5000]
+        _save(data)
+        return new_rating
+
+
+# ---------------------------------------------------------------------------
+# Daily Puzzle progress
+# ---------------------------------------------------------------------------
+#
+# Each user gets a per-date entry under ``daily.attempts[YYYY-MM-DD]`` with
+# ``{ puzzle_id, outcome, solve_ms, ts }``. ``daily.streak`` and
+# ``daily.best_streak`` are maintained incrementally; ``daily.last_solved``
+# tracks the most recent solved date so missing a day breaks the chain.
+
+def get_daily_progress(client_id: str) -> dict[str, Any]:
+    """Return the user's daily-puzzle bag (creates a default if missing)."""
+    u = get_user(client_id)
+    if not u:
+        return {"attempts": {}, "streak": 0, "best_streak": 0, "last_solved": ""}
+    d = u.get("daily")
+    if not isinstance(d, dict):
+        return {"attempts": {}, "streak": 0, "best_streak": 0, "last_solved": ""}
+    return {
+        "attempts": d.get("attempts") or {},
+        "streak": int(d.get("streak") or 0),
+        "best_streak": int(d.get("best_streak") or 0),
+        "last_solved": str(d.get("last_solved") or ""),
+    }
+
+
+def record_daily_attempt(
+    client_id: str,
+    *,
+    date_key: str,
+    puzzle_id: str,
+    outcome: str,
+    solve_ms: int,
+) -> dict[str, Any] | None:
+    """Persist today's attempt for a user. Streak only advances on solve.
+
+    Returns the updated daily bag (attempts/streak/best_streak/last_solved).
+    A second attempt on the same date is ignored — Daily Puzzle is
+    one-shot per day, like Wordle.
+    """
+    if outcome not in ("solved", "failed"):
+        return None
+    now = int(time.time())
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        bag = u.setdefault("daily", {})
+        attempts: dict[str, Any] = bag.setdefault("attempts", {})
+        if date_key in attempts:
+            # Already attempted today — keep the first try authoritative.
+            return {
+                "attempts": attempts,
+                "streak": int(bag.get("streak") or 0),
+                "best_streak": int(bag.get("best_streak") or 0),
+                "last_solved": str(bag.get("last_solved") or ""),
+            }
+        attempts[date_key] = {
+            "puzzle_id": puzzle_id,
+            "outcome": outcome,
+            "solve_ms": int(solve_ms or 0),
+            "ts": now,
+        }
+        if outcome == "solved":
+            last = str(bag.get("last_solved") or "")
+            streak = int(bag.get("streak") or 0)
+            if last and _date_is_yesterday(last, date_key):
+                streak += 1
+            else:
+                streak = 1
+            best = max(int(bag.get("best_streak") or 0), streak)
+            bag["streak"] = streak
+            bag["best_streak"] = best
+            bag["last_solved"] = date_key
+        else:
+            # Failed today — reset the streak so the chain breaks.
+            bag["streak"] = 0
+        u["last_seen"] = now
+        _save(data)
+        return {
+            "attempts": attempts,
+            "streak": int(bag.get("streak") or 0),
+            "best_streak": int(bag.get("best_streak") or 0),
+            "last_solved": str(bag.get("last_solved") or ""),
+        }
+
+
+def list_daily_leaderboard(date_key: str) -> list[dict[str, Any]]:
+    """Return everyone who solved today, sorted by solve time ascending."""
+    data = _load()
+    out: list[dict[str, Any]] = []
+    for u in data["users"].values():
+        bag = u.get("daily") or {}
+        attempts = bag.get("attempts") or {}
+        rec = attempts.get(date_key)
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("outcome") != "solved":
+            continue
+        out.append(
+            {
+                "client_id": u.get("client_id"),
+                "nickname": u.get("nickname"),
+                "avatar": u.get("avatar"),
+                "solve_ms": int(rec.get("solve_ms") or 0),
+                "rating": int(u.get("rating") or 1200),
+                "streak": int(bag.get("streak") or 0),
+                "ts": int(rec.get("ts") or 0),
+            }
+        )
+    out.sort(key=lambda r: (r["solve_ms"] or 10**9, r["ts"]))
+    return out
+
+
+def _date_is_yesterday(prev: str, today: str) -> bool:
+    """True iff ``prev`` (YYYY-MM-DD) is exactly one day before ``today``."""
+    import datetime as _dt
+    try:
+        a = _dt.date.fromisoformat(prev)
+        b = _dt.date.fromisoformat(today)
+    except ValueError:
+        return False
+    return (b - a).days == 1
+
+
+# ---------------------------------------------------------------------------
+# Puzzle Rush progress
+# ---------------------------------------------------------------------------
+#
+# Each user has a ``rush`` bag of best records keyed by duration_sec
+# (e.g. 180 / 300). Per-record fields: solved, accuracy, ts.
+
+def get_rush_progress(client_id: str) -> dict[str, Any]:
+    u = get_user(client_id)
+    if not u:
+        return {"best": {}, "history": []}
+    bag = u.get("rush")
+    if not isinstance(bag, dict):
+        return {"best": {}, "history": []}
+    return {
+        "best": dict(bag.get("best") or {}),
+        "history": list(bag.get("history") or [])[-50:],
+    }
+
+
+def record_rush_session(
+    client_id: str,
+    *,
+    duration_sec: int,
+    solved: int,
+    failed: int,
+    started_at: int,
+    ended_at: int,
+) -> dict[str, Any] | None:
+    """Save a finished Rush session; updates per-duration best record."""
+    if duration_sec <= 0:
+        return None
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        bag = u.setdefault("rush", {})
+        best: dict[str, Any] = bag.setdefault("best", {})
+        history: list[dict[str, Any]] = bag.setdefault("history", [])
+        key = str(int(duration_sec))
+        prev_best = int((best.get(key) or {}).get("solved") or 0)
+        entry = {
+            "duration_sec": int(duration_sec),
+            "solved": int(solved),
+            "failed": int(failed),
+            "started_at": int(started_at),
+            "ended_at": int(ended_at),
+        }
+        history.append(entry)
+        if len(history) > 100:
+            del history[: len(history) - 100]
+        if int(solved) > prev_best:
+            best[key] = {
+                "solved": int(solved),
+                "ts": int(ended_at),
+                "duration_sec": int(duration_sec),
+            }
+        u["last_seen"] = int(ended_at) or int(time.time())
+        _save(data)
+        return {"best": dict(best), "last": entry}
+
+
+def list_rush_leaderboard(duration_sec: int) -> list[dict[str, Any]]:
+    """Return the top Rush records for a given duration."""
+    key = str(int(duration_sec))
+    data = _load()
+    out: list[dict[str, Any]] = []
+    for u in data["users"].values():
+        bag = u.get("rush") or {}
+        best = (bag.get("best") or {}).get(key)
+        if not isinstance(best, dict):
+            continue
+        out.append(
+            {
+                "client_id": u.get("client_id"),
+                "nickname": u.get("nickname"),
+                "avatar": u.get("avatar"),
+                "solved": int(best.get("solved") or 0),
+                "ts": int(best.get("ts") or 0),
+                "rating": int(u.get("rating") or 1200),
+            }
+        )
+    out.sort(key=lambda r: (-r["solved"], r["ts"]))
+    return out[:50]
+
+
+# ---------------------------------------------------------------------------
+# Opening Trainer progress
+# ---------------------------------------------------------------------------
+#
+# Per-opening progress stored under ``openings.{opening_id}``:
+#   { "drill_attempts": int, "drill_solved": int, "best_streak": int,
+#     "last_practiced": ts, "theory_seen": bool }
+
+def get_openings_progress(client_id: str) -> dict[str, Any]:
+    u = get_user(client_id)
+    if not u:
+        return {}
+    bag = u.get("openings")
+    return dict(bag) if isinstance(bag, dict) else {}
+
+
+def record_opening_drill(
+    client_id: str,
+    *,
+    opening_id: str,
+    solved: int,
+    failed: int,
+    streak: int,
+    duration_ms: int,
+) -> dict[str, Any] | None:
+    """Update per-opening drill counters."""
+    if not opening_id:
+        return None
+    now = int(time.time())
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        bag = u.setdefault("openings", {})
+        rec = bag.setdefault(opening_id, {})
+        rec["drill_attempts"] = int(rec.get("drill_attempts") or 0) + int(solved) + int(failed)
+        rec["drill_solved"] = int(rec.get("drill_solved") or 0) + int(solved)
+        rec["best_streak"] = max(int(rec.get("best_streak") or 0), int(streak))
+        rec["last_practiced"] = now
+        rec["last_duration_ms"] = int(duration_ms or 0)
+        u["last_seen"] = now
+        _save(data)
+        return dict(rec)
+
+
+def mark_opening_theory_seen(client_id: str, opening_id: str) -> None:
+    if not opening_id:
+        return
+    now = int(time.time())
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return
+        bag = u.setdefault("openings", {})
+        rec = bag.setdefault(opening_id, {})
+        rec["theory_seen"] = True
+        rec.setdefault("first_seen", now)
+        u["last_seen"] = now
+        _save(data)
+
+
 def reset_for_tests() -> None:
     """Test-only helper: drop the on-disk store."""
     with _LOCK:

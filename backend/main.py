@@ -13,10 +13,13 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import daily as daily_mode
 from . import notifications as notifications_db
+from . import openings as openings_mod
 from . import party as party_room
 from . import presence as presence_room
 from . import puzzles as puzzles_db
+from . import rush as rush_mode
 from . import users as users_db
 from .analysis import analyse_game, import_game_async
 from .recognize import diagnostics as recognize_diagnostics
@@ -102,6 +105,40 @@ class PartyInviteRequest(BaseModel):
 
 class InviteActionRequest(BaseModel):
     client_id: str = Field(..., min_length=4, max_length=64)
+
+
+class DailyAttemptRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    outcome: str = Field(..., description="solved|failed")
+    solve_ms: int = Field(default=0, ge=0, le=10_000_000)
+    played_moves: list[str] = Field(default_factory=list)
+
+
+class RushStartRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    duration_sec: int = Field(..., ge=60, le=600)
+
+
+class RushAttemptRequest(BaseModel):
+    session_id: str = Field(..., min_length=4, max_length=64)
+    puzzle_id: str = Field(..., min_length=1, max_length=64)
+    outcome: str = Field(..., description="solved|failed")
+    solve_ms: int = Field(default=0, ge=0, le=10_000_000)
+    played_moves: list[str] = Field(default_factory=list)
+
+
+class OpeningDrillRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    opening_id: str = Field(..., min_length=1, max_length=64)
+    solved: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    streak: int = Field(default=0, ge=0)
+    duration_ms: int = Field(default=0, ge=0, le=24 * 60 * 60 * 1000)
+
+
+class OpeningTheoryRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    opening_id: str = Field(..., min_length=1, max_length=64)
 
 
 def _print_puzzle_banner() -> None:
@@ -527,6 +564,105 @@ def users_puzzle_attempt(req: PuzzleAttemptRequest) -> dict[str, Any]:
 # meant any caller could `curl` a fake "I won, +500 ELO" entry into
 # their own profile. The server-side path remains the only way to
 # append to `parties[]`.
+
+
+# ---- Daily Puzzle ----
+
+@app.get("/api/daily/today")
+def daily_today(client_id: str | None = None) -> dict[str, Any]:
+    """Today's globally-shared daily puzzle + the caller's per-user status."""
+    return daily_mode.get_today(client_id)
+
+
+@app.post("/api/daily/attempt")
+def daily_attempt(req: DailyAttemptRequest) -> dict[str, Any]:
+    res = daily_mode.submit_attempt(
+        req.client_id,
+        outcome=req.outcome,
+        solve_ms=int(req.solve_ms),
+        played_moves=list(req.played_moves or []),
+    )
+    if res is None:
+        raise HTTPException(status_code=400, detail="Daily attempt rejected.")
+    return res
+
+
+@app.get("/api/daily/leaderboard")
+def daily_leaderboard() -> dict[str, Any]:
+    return {"date": daily_mode.today_key(), "rows": daily_mode.leaderboard()}
+
+
+# ---- Puzzle Rush ----
+
+@app.post("/api/rush/start")
+def rush_start(req: RushStartRequest) -> dict[str, Any]:
+    res = rush_mode.start(req.client_id, int(req.duration_sec))
+    if res is None:
+        raise HTTPException(status_code=400, detail="Rush start failed.")
+    return res
+
+
+@app.post("/api/rush/attempt")
+def rush_attempt(req: RushAttemptRequest) -> dict[str, Any]:
+    res = rush_mode.attempt(
+        req.session_id,
+        puzzle_id=req.puzzle_id,
+        outcome=req.outcome,
+        solve_ms=int(req.solve_ms),
+        played_moves=list(req.played_moves or []),
+    )
+    if res is None:
+        raise HTTPException(status_code=404, detail="Rush session not found or finished.")
+    return res
+
+
+@app.get("/api/rush/status/{session_id}")
+def rush_status(session_id: str) -> dict[str, Any]:
+    res = rush_mode.status(session_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="Rush session not found.")
+    return res
+
+
+@app.get("/api/rush/leaderboard")
+def rush_leaderboard(duration_sec: int = 180) -> dict[str, Any]:
+    return {"duration_sec": int(duration_sec), "rows": rush_mode.leaderboard(int(duration_sec))}
+
+
+# ---- Opening Trainer ----
+
+@app.get("/api/openings")
+def openings_list(client_id: str | None = None) -> dict[str, Any]:
+    return {"openings": openings_mod.list_openings(client_id)}
+
+
+@app.get("/api/openings/{opening_id}")
+def openings_detail(opening_id: str, client_id: str | None = None) -> dict[str, Any]:
+    o = openings_mod.get_opening(opening_id, client_id)
+    if not o:
+        raise HTTPException(status_code=404, detail="Opening not found.")
+    return o
+
+
+@app.post("/api/openings/drill")
+def openings_drill(req: OpeningDrillRequest) -> dict[str, Any]:
+    res = openings_mod.record_drill(
+        req.client_id,
+        opening_id=req.opening_id,
+        solved=int(req.solved),
+        failed=int(req.failed),
+        streak=int(req.streak),
+        duration_ms=int(req.duration_ms),
+    )
+    if res is None:
+        raise HTTPException(status_code=404, detail="Opening or user not found.")
+    return res
+
+
+@app.post("/api/openings/theory_seen")
+def openings_theory_seen(req: OpeningTheoryRequest) -> dict[str, Any]:
+    openings_mod.mark_theory_seen(req.client_id, req.opening_id)
+    return {"ok": True}
 
 
 # ---- Party / Co-op puzzles ----

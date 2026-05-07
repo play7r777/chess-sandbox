@@ -80,11 +80,24 @@ def all_puzzles() -> list[dict[str, Any]]:
     return _json_puzzles()
 
 
-def sample_puzzles(n: int) -> list[dict[str, Any]]:
-    """Return *n* random puzzles, suitable for a party-room queue."""
+def sample_puzzles(
+    n: int,
+    *,
+    min_rating: int | None = None,
+    max_rating: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return *n* random puzzles, suitable for a party-room queue.
+
+    Optional rating window scales party difficulty by lobby strength:
+    a 900-elo lobby never sees 2400-elo puzzles. If the window is too
+    narrow to fill ``n`` slots the result is whatever the bank has;
+    callers handle the partial-queue case.
+    """
     if using_sqlite():
-        return puzzle_db.sample_puzzles(n)
-    pool = list(_json_puzzles())
+        return puzzle_db.sample_puzzles(n, min_rating=min_rating, max_rating=max_rating)
+    pool = filter_puzzles(min_rating=min_rating, max_rating=max_rating) if (
+        min_rating is not None or max_rating is not None
+    ) else list(_json_puzzles())
     random.shuffle(pool)
     return pool[:n] if n > 0 else pool
 

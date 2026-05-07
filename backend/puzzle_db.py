@@ -162,9 +162,22 @@ def get_by_id(puzzle_id: str) -> dict[str, Any] | None:
     return _row_to_dict(row) if row else None
 
 
-def sample_puzzles(n: int) -> list[dict[str, Any]]:
-    """Return *n* random puzzles — used by party rooms to build a queue."""
-    rows = _conn().execute("SELECT * FROM puzzles ORDER BY RANDOM() LIMIT ?", (n,)).fetchall()
+def sample_puzzles(
+    n: int,
+    *,
+    min_rating: int | None = None,
+    max_rating: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return *n* random puzzles — used by party rooms to build a queue.
+
+    Optional ``min_rating`` / ``max_rating`` constrain the sample to a
+    rating window so e.g. an 800-elo lobby doesn't draw 2400-elo puzzles.
+    If the window matches less than ``n`` rows the result is whatever the
+    bank has — caller is responsible for fallback.
+    """
+    where, params = _build_where(min_rating=min_rating, max_rating=max_rating)
+    sql = f"SELECT * FROM puzzles{where} ORDER BY RANDOM() LIMIT ?"
+    rows = _conn().execute(sql, [*params, n]).fetchall()
     return [_row_to_dict(r) for r in rows]
 
 
