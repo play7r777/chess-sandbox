@@ -1,6 +1,7 @@
 # Chess Sandbox
 
-Локальная веб-песочница для шахмат:
+Локальная веб-песочница для шахмат, всё крутится у тебя на машине,
+никаких облаков:
 
 - 🎲 **Редактор позиции** — стартовая позиция, перетаскивание фигур обеими сторонами,
   любая расстановка через палитру (добавить/удалить любую фигуру в любой клетке),
@@ -12,6 +13,9 @@
   диаграммой (lichess, chess.com, chesscom-like, рендеры python-chess), бэкенд
   возвращает FEN, который тут же подставляется в редактор. Можно подправить
   вручную и продолжить.
+- 🧩 **500 000+ пазлов из открытой базы Lichess** (CC0). Скрипт импорта
+  скачивает официальный CSV, семплирует нужное количество и кладёт в
+  локальный SQLite. Соло-режим и пати-комнаты тянут пазлы из той же базы.
 
 Бэкенд на FastAPI + python-chess; фронтенд — нативный JS/HTML/CSS, без бандлеров.
 Кросс-платформенный (тестировался на Linux, целевая ОС — Windows).
@@ -49,13 +53,146 @@ pip install -e .
    ```
 3. Положить `stockfish.exe` в `PATH` — приложение само его найдёт.
 
-### 3. Запуск сервера
+### 3. (Опционально) База пазлов из Lichess
+
+Без этого шага доступно только 90 встроенных пазлов (для разработки).
+Чтобы подтянуть полноценную базу из открытого датасета
+[Lichess Puzzle Database](https://database.lichess.org/#puzzles) (CC0),
+запусти один раз.
+
+**Полная база (~5.5 млн пазлов, ~1.5 GB SQLite, рекомендуется):**
+
+```powershell
+.venv\Scripts\python -m backend.import_puzzles --all
+```
+
+**Сэмпл 500k пазлов (быстрее, ~150 MB SQLite):**
+
+```powershell
+.venv\Scripts\python -m backend.import_puzzles
+```
+
+Скрипт:
+
+1. Скачает `lichess_db_puzzle.csv.zst` (~300 MB) в `backend/data/`.
+   Если файл уже там — скачивание пропускается.
+2. Стримом распакует и пройдёт по всем ~5.5 млн пазлов.
+3. С `--all` — запишет все, без семплинга. Без флага — reservoir-семпл
+   на N пазлов в `backend/data/puzzles.sqlite` с индексами по рейтингу
+   и сложности.
+
+Полный прогон занимает ~10–15 минут (download) + 1–3 минуты (семпл) или
+~20–40 минут (запись всех 5.5M в SQLite). Дальше команду повторно
+запускать не надо — база живёт локально.
+
+Параметры:
+
+- `--all` — без семплинга, импортировать все пазлы (~5.5 млн).
+- `--target N` — другое количество (например `--target 100000`).
+- `--url …` — другой источник CSV.
+
+При запуске сервер печатает первой строкой:
+
+```
+[chess-sandbox] Пазлы: 5,500,000 (источник: sqlite — Lichess база)
+```
+
+Так что сразу видно, какая база подключилась. Если SQLite-файла нет,
+бэкенд автоматически работает с встроенными 90 пазлами (`source: "json"`).
+
+### 4. Запуск сервера
 
 ```powershell
 .venv\Scripts\python -m uvicorn backend.main:app --host 127.0.0.1 --port 8001
 ```
 
 Открой в браузере [http://127.0.0.1:8001/](http://127.0.0.1:8001/).
+
+---
+
+## Игра с друзьями (туннель в интернет)
+
+Локальный сервер по умолчанию слушает `127.0.0.1` — снаружи невидим.
+Чтобы кенты из других стран подключались (соло-пазлы, пати-комнаты,
+анализ — всё через одну ссылку), нужен туннель: либо
+**[ngrok](https://ngrok.com)**, либо **[playit.gg](https://playit.gg)**.
+
+В репо есть готовые скрипты, которые ставят `CHESS_HOST=0.0.0.0`,
+запускают сервер и параллельно поднимают туннель.
+
+### Windows — PowerShell
+
+```powershell
+# ngrok (по умолчанию)
+.\scripts\start-public.ps1
+
+# playit.gg
+.\scripts\start-public.ps1 -Tunnel playit
+
+# Просто 0.0.0.0, туннель поднимешь сам
+.\scripts\start-public.ps1 -Tunnel none -Port 9000
+```
+
+### Linux / macOS — bash
+
+```bash
+./scripts/start-public.sh                       # ngrok
+./scripts/start-public.sh --tunnel playit
+./scripts/start-public.sh --tunnel none --port 9000
+```
+
+### Что нужно поставить заранее
+
+**ngrok** (рекомендую — самый простой, работает по WebSocket из коробки):
+
+1. Качаешь с [ngrok.com/download](https://ngrok.com/download).
+2. Регистрируешься, копируешь authtoken из дашборда.
+3. Один раз: `ngrok config add-authtoken <твой_токен>`.
+4. **Где разместить `ngrok.exe`** (скрипт смотрит в этом порядке):
+   - В папке `scripts\` рядом со `start-public.ps1` — самый простой вариант,
+     ничего не настраивать.
+   - В корне проекта (рядом с `pyproject.toml`).
+   - В `PATH` (Win+R → `sysdm.cpl` → «Дополнительно» → «Переменные среды» →
+     `Path` → «Изменить» → добавить путь к папке с `ngrok.exe` → закрыть
+     все окна PowerShell и открыть новое).
+5. Запускаешь скрипт выше — он сам стартанёт `ngrok http 8001`,
+   опросит локальный API ngrok (`http://127.0.0.1:4040/api/tunnels`)
+   и напечатает публичный URL вида `https://abc-123.ngrok-free.app`.
+
+На бесплатном тарифе ngrok при первом заходе показывает страницу-предупреждение
+с кнопкой «Visit Site» — кенты кликают один раз и играют. Платный тариф
+($8/мес) даёт постоянный URL без warning-страницы.
+
+**playit.gg** (TCP-туннели для геймсерверов, но и HTTP/WebSocket поддерживает):
+
+1. Качаешь агента с [playit.gg/download](https://playit.gg/download),
+   регистрируешься.
+2. `playit.exe` положи рядом со скриптом (`scripts\`), в корень проекта,
+   или в `PATH` — как и ngrok.
+3. Запускаешь скрипт с `-Tunnel playit` (или `--tunnel playit`).
+4. В веб-консоли [playit.gg/account/tunnels/add](https://playit.gg/account/tunnels/add)
+   создаёшь туннель типа **HTTPS**, локальный порт **8001**.
+5. Получаешь URL вида `https://*.playit.gg` — кидаешь кентам.
+
+В отличие от ngrok, у playit нужно вручную настроить туннель в
+веб-интерфейсе один раз — потом он постоянный и бесплатный.
+
+> Бинарники `ngrok.exe` / `playit.exe` уже добавлены в `.gitignore` —
+> можешь смело класть их в `scripts\` или корень проекта, в коммит они
+> не попадут.
+
+### Что важно знать
+
+- **Пати-комнаты по WebSocket.** Фронт сам собирает `wss://` URL из
+  `location.host`/`location.protocol`, поэтому пати работает через
+  любой туннель без правок (см. `frontend/app.js`, функция `_partyWsUrl`).
+- **Не светите URL чужим.** Любой, у кого ссылка, видит твою лидерборд-базу
+  и может играть. Если нужен закрытый клуб — поставь
+  [Tailscale](https://tailscale.com), это VPN-сетка между вашими
+  машинами без публичных URL.
+- **Stockfish крутится у тебя.** Все запросы анализа / лучшего хода
+  работают за счёт твоего CPU. Если кент гоняет анализ на 30 ply,
+  это нагрузит твой компьютер.
 
 ---
 
@@ -123,6 +260,16 @@ backend/
   settings.py         # Настройки через env + UI override
   stockfish_engine.py # Async-обёртка над python-chess.engine.SimpleEngine
   recognize.py        # CV pipeline: chesscog → template → occupancy
+  puzzles.py          # Фасад: SQLite (если есть) или JSON-fallback
+  puzzle_db.py        # Read-only обёртка над puzzles.sqlite
+  import_puzzles.py   # CLI для импорта Lichess Puzzle DB (CC0)
+  party.py            # Пати-комнаты на WebSocket, общий queue
+  users.py            # Профиль / лидерборд / история ELO
+  analysis.py         # Импорт партии (PGN/URL) + анализ Stockfish
+  data/
+    puzzles.json      # Встроенные ~90 пазлов (fallback для разработки)
+    puzzles.sqlite    # 500k пазлов после `python -m backend.import_puzzles`
+    users.json        # JSON-стор пользователей и лидерборда
 frontend/
   index.html          # Один экран SPA
   style.css           # Тёмная тема
@@ -143,6 +290,10 @@ API:
 | POST  | `/api/move/apply`          | применить UCI-ход к FEN            |
 | POST  | `/api/legal_moves`         | легальные ходы из клетки           |
 | POST  | `/api/recognize`           | FEN из изображения (multipart)     |
+| GET   | `/api/puzzle/stats`        | количество пазлов, источник (sqlite/json) |
+| GET   | `/api/puzzle/random`       | случайный пазл (`difficulty`, `theme`, `min_rating`, `max_rating`) |
+| GET   | `/api/puzzle/{id}`         | пазл по Lichess id                 |
+| WS    | `/api/party/ws/{code}`     | пати-комната: общий queue 1000 пазлов на матч |
 
 ### Настройки (env, префикс `CHESS_`)
 

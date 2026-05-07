@@ -12,8 +12,30 @@
         <span class="brand-piece">♛</span>
         <span class="brand-name">Chess Sandbox</span>
         <div class="view-tabs" role="tablist" aria-label="Режим интерфейса">
-          <button id="tab-main"     class="view-tab is-active" type="button" role="tab" aria-selected="true"  data-view="main">Main</button>
-          <button id="tab-analysis" class="view-tab"           type="button" role="tab" aria-selected="false" data-view="analysis">Analysis</button>
+          <button id="tab-main"     class="view-tab is-active" type="button" role="tab" aria-selected="true"  data-view="main">
+            <svg class="view-tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2 9 5h2v3H8v2H5l-2 3 2 3h3v8h8v-8h3l2-3-2-3h-3V8h-3V5h2z"/></svg>
+            <span class="view-tab-label">Main</span>
+          </button>
+          <button id="tab-analysis" class="view-tab"           type="button" role="tab" aria-selected="false" data-view="analysis">
+            <svg class="view-tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 21V11h4v10H3zm7 0V3h4v18h-4zm7 0v-7h4v7h-4z"/></svg>
+            <span class="view-tab-label">Analysis</span>
+          </button>
+          <button id="tab-puzzle"   class="view-tab"           type="button" role="tab" aria-selected="false" data-view="puzzle">
+            <svg class="view-tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19 11h-1V8a2 2 0 0 0-2-2h-3V5a2.5 2.5 0 1 0-5 0v1H5a2 2 0 0 0-2 2v3.6h.6a2.4 2.4 0 0 1 0 4.8H3V20a2 2 0 0 0 2 2h3.6v-.6a2.4 2.4 0 0 1 4.8 0V22H17a2 2 0 0 0 2-2v-3h1a2.5 2.5 0 0 0 0-5z"/></svg>
+            <span class="view-tab-label">Puzzle</span>
+          </button>
+          <button id="tab-daily"    class="view-tab"           type="button" role="tab" aria-selected="false" data-view="daily">
+            <svg class="view-tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 2h2v2h6V2h2v2h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2V2zm12 8H5v10h14V10zm-7 2 1.5 3 3.3.4-2.4 2.3.6 3.3L12 19l-3 1.6.6-3.3-2.4-2.3 3.3-.4L12 12z"/></svg>
+            <span class="view-tab-label">Daily</span>
+          </button>
+          <button id="tab-rush"     class="view-tab"           type="button" role="tab" aria-selected="false" data-view="rush">
+            <svg class="view-tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M13 2 3 14h7l-1 8 11-13h-7l1-7z"/></svg>
+            <span class="view-tab-label">Rush</span>
+          </button>
+          <button id="tab-opening"  class="view-tab"           type="button" role="tab" aria-selected="false" data-view="opening">
+            <svg class="view-tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h7V5a2 2 0 0 0-2-2H4zm9 2v16h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-5a2 2 0 0 0-2 2zm2 1h5v3h-5V6zm0 5h5v2h-5v-2zm0 4h5v2h-5v-2z"/></svg>
+            <span class="view-tab-label">Opening</span>
+          </button>
         </div>
       </div>
       <div class="topbar-actions">
@@ -35,6 +57,27 @@
           <button id="btn-mode-sandbox" type="button" class="mode-btn" title="Свободная расстановка, любые ходы">🧪 Песочница</button>
         </div>
         <button id="btn-settings" type="button" class="settings-btn" title="Настройки доски">⚙</button>
+        <div class="user-menu" id="user-menu">
+          <button id="btn-user-menu" type="button" class="settings-btn user-menu-btn" title="Profile / Leaderboard" aria-haspopup="true" aria-expanded="false">
+            <span class="user-menu-burger" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+          </button>
+          <div id="user-menu-dropdown" class="user-menu-dropdown" hidden role="menu">
+            <button type="button" class="user-menu-item" data-action="profile" role="menuitem">
+              <span class="user-menu-glyph">👤</span>
+              <span>Profile</span>
+            </button>
+            <button type="button" class="user-menu-item" data-action="leaderboard" role="menuitem">
+              <span class="user-menu-glyph">🏆</span>
+              <span>Leaderboard</span>
+            </button>
+            <button type="button" class="user-menu-item" data-action="party" role="menuitem">
+              <span class="user-menu-glyph">🎉</span>
+              <span>Party</span>
+            </button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -172,8 +215,16 @@
           <ol id="move-history" class="move-history"></ol>
         </section>
 
+        <section class="panel" id="panel-puzzle" data-view="puzzle">
+          <h2>Puzzle <span class="puzzle-h-sub">— тактические задачи</span></h2>
+          <div id="puzzle-stats-bar" class="puzzle-stats-bar"></div>
+          <div id="puzzle-card" class="puzzle-card"></div>
+          <div id="puzzle-actions" class="puzzle-actions"></div>
+          <div id="puzzle-history" class="puzzle-history"></div>
+        </section>
+
         <section class="panel" id="panel-review" data-view="analysis">
-          <h2>Анализ партии (как chess.com)</h2>
+          <h2>Анализ партии</h2>
           <div class="row">
             <input id="review-source" type="text" placeholder="https://www.chess.com/game/live/... или https://lichess.org/... или PGN" style="flex:1; min-width:260px;" />
             <button id="btn-review-import" type="button">Загрузить</button>
@@ -227,6 +278,169 @@
       </aside>
     </main>
 
+    <section class="training-view" data-view="daily" hidden>
+      <div class="training-shell">
+        <header class="training-head">
+          <div>
+            <h1>📅 Ежедневная задача</h1>
+            <p class="muted" id="daily-subline">Один пазл для всех на сегодня — успей в общий лидерборд.</p>
+          </div>
+          <div class="training-streak" id="daily-streak">
+            <div class="training-streak-row">
+              <span class="training-streak-num" id="daily-streak-num">0</span>
+              <span class="training-streak-fire">🔥</span>
+            </div>
+            <div class="training-streak-label">дней подряд</div>
+            <div class="training-streak-best" id="daily-streak-best">Лучшая: 0</div>
+          </div>
+        </header>
+        <div class="training-grid">
+          <div class="training-board-card">
+            <div id="daily-board-frame" class="training-board-frame">
+              <div id="daily-board-ranks" class="board-ranks" aria-hidden="true"></div>
+              <div id="daily-board" class="board" aria-label="Daily puzzle board"></div>
+              <div id="daily-board-files" class="board-files" aria-hidden="true"></div>
+            </div>
+            <div id="daily-status" class="training-status muted">Загружаем сегодняшнюю задачу…</div>
+            <div class="training-actions" id="daily-actions"></div>
+          </div>
+          <aside class="training-side">
+            <div class="training-card">
+              <h3>📊 Лидерборд дня</h3>
+              <div id="daily-leaderboard" class="training-leaderboard"></div>
+            </div>
+            <div class="training-card">
+              <h3>ℹ️ Как это работает</h3>
+              <ul class="training-info-list">
+                <li>Один и тот же пазл для всех в этот день (UTC).</li>
+                <li>Одна попытка в день — потом она просто покажется ещё раз.</li>
+                <li>Серия растёт за каждый «решено», обнуляется на «провал».</li>
+              </ul>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section class="training-view" data-view="rush" hidden>
+      <div class="training-shell">
+        <header class="training-head">
+          <div>
+            <h1>⚡ Puzzle Rush</h1>
+            <p class="muted">Решай как можно больше задач за отведённое время. Ошибся — забег закончен.</p>
+          </div>
+          <div id="rush-clock" class="training-clock" hidden>
+            <div class="training-clock-time" id="rush-clock-time">3:00</div>
+            <div class="training-clock-label">Осталось</div>
+          </div>
+        </header>
+        <div id="rush-pre" class="training-rush-pre">
+          <div class="training-card training-rush-pick">
+            <h3>Выбери длительность</h3>
+            <div class="training-rush-buttons">
+              <button class="rush-duration-btn" data-duration="180" type="button">3 минуты</button>
+              <button class="rush-duration-btn" data-duration="300" type="button">5 минут</button>
+            </div>
+            <p class="muted" style="margin-top:10px;">Лучший результат сохранится в твоём профиле.</p>
+          </div>
+          <div class="training-card">
+            <h3>🏆 Рекорды</h3>
+            <div class="training-rush-leaderboards">
+              <div>
+                <h4 class="training-sub">3 мин</h4>
+                <div id="rush-leaderboard-180" class="training-leaderboard"></div>
+              </div>
+              <div>
+                <h4 class="training-sub">5 мин</h4>
+                <div id="rush-leaderboard-300" class="training-leaderboard"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="rush-active" class="training-grid" hidden>
+          <div class="training-board-card">
+            <div id="rush-board-frame" class="training-board-frame">
+              <div id="rush-board-ranks" class="board-ranks" aria-hidden="true"></div>
+              <div id="rush-board" class="board" aria-label="Rush puzzle board"></div>
+              <div id="rush-board-files" class="board-files" aria-hidden="true"></div>
+            </div>
+            <div id="rush-status" class="training-status muted">—</div>
+          </div>
+          <aside class="training-side">
+            <div class="training-card training-rush-stats">
+              <div class="training-rush-stat">
+                <div class="training-rush-stat-num" id="rush-solved">0</div>
+                <div class="training-rush-stat-lbl">Решено</div>
+              </div>
+              <div class="training-rush-stat training-rush-stat-fail">
+                <div class="training-rush-stat-num" id="rush-failed">0</div>
+                <div class="training-rush-stat-lbl">Промах</div>
+              </div>
+            </div>
+            <div class="training-card">
+              <h3>📜 Подсказка</h3>
+              <p class="muted">Один промах — забег заканчивается. Ходи быстро, считай чисто.</p>
+              <button id="btn-rush-abort" type="button" class="puzzle-ghost">Сдаться</button>
+            </div>
+          </aside>
+        </div>
+        <div id="rush-end" class="training-rush-end" hidden></div>
+      </div>
+    </section>
+
+    <section class="training-view" data-view="opening" hidden>
+      <div class="training-shell">
+        <header class="training-head">
+          <div>
+            <h1>📖 Тренер дебютов</h1>
+            <p class="muted">Выбери дебют, изучи теорию и закрепи на практике. Личный коуч ловит ошибки и объясняет, как нужно правильно.</p>
+          </div>
+        </header>
+        <div id="opening-picker-wrap" class="training-card opening-picker-wrap">
+          <h3>Выбери дебют</h3>
+          <div id="opening-picker" class="opening-picker"></div>
+        </div>
+        <div id="opening-runner" class="opening-runner" hidden>
+          <header class="opening-runner-head">
+            <button id="btn-opening-back" type="button" class="puzzle-ghost">← К списку</button>
+            <h2 id="opening-name"></h2>
+            <div class="opening-tabs" role="tablist">
+              <button class="opening-tab is-active" data-pane="theory" type="button" role="tab">📚 Теория</button>
+              <button class="opening-tab" data-pane="drill" type="button" role="tab">🎯 Практика</button>
+            </div>
+          </header>
+          <div id="opening-pane-theory" class="opening-pane">
+            <div id="opening-theory" class="opening-theory"></div>
+          </div>
+          <div id="opening-pane-drill" class="opening-pane" hidden>
+            <div class="training-grid">
+              <div class="training-board-card">
+                <div id="opening-board-frame" class="training-board-frame">
+                  <div id="opening-board-ranks" class="board-ranks" aria-hidden="true"></div>
+                  <div id="opening-board" class="board" aria-label="Opening drill board"></div>
+                  <div id="opening-board-files" class="board-files" aria-hidden="true"></div>
+                </div>
+                <div id="opening-coach" class="opening-coach"></div>
+              </div>
+              <aside class="training-side">
+                <div class="training-card">
+                  <h3>Прогресс</h3>
+                  <div id="opening-progress" class="opening-progress"></div>
+                </div>
+                <div class="training-card">
+                  <h3>Управление</h3>
+                  <div class="training-actions">
+                    <button id="btn-opening-line" type="button" class="puzzle-ghost">Сменить вариант</button>
+                    <button id="btn-opening-restart" type="button" class="puzzle-primary">↻ Перезапуск</button>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <div id="settings-modal" class="settings-modal" hidden>
       <div class="settings-modal-card">
         <h3>Настройки доски</h3>
@@ -237,6 +451,45 @@
         <div class="settings-row">
           <label>Набор фигур</label>
           <div class="settings-options" id="settings-pieces"></div>
+        </div>
+        <div class="settings-row">
+          <label for="settings-pv-arrows">Стрелки (на сторону)</label>
+          <div class="settings-options">
+            <input id="settings-pv-arrows" type="number" min="1" max="12" step="1" />
+            <span class="muted" style="margin-left:8px;">от 1 до 12</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <label for="settings-best-line">Лучшая линия (полуходов в подсказке)</label>
+          <div class="settings-options">
+            <input id="settings-best-line" type="number" min="1" max="24" step="1" />
+            <span class="muted" style="margin-left:8px;">от 1 до 24</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <label for="settings-legal-dot">Цвет подсказок ходов</label>
+          <div class="settings-options settings-color-row">
+            <input id="settings-legal-dot" type="color" />
+            <button type="button" id="settings-legal-dot-reset" class="settings-color-reset">Сброс</button>
+            <span class="muted">Точки на куда можно сходить и кольцо взятия</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <label for="settings-piece-size">Размер фигуры (% клетки)</label>
+          <div class="settings-options settings-slider-row">
+            <input id="settings-piece-size" type="range" min="50" max="100" step="1" />
+            <input id="settings-piece-size-num" type="number" min="50" max="100" step="1" />
+            <span class="muted">от 50 до 100</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <label for="settings-piece-offset">Смещение вниз (% клетки)</label>
+          <div class="settings-options settings-slider-row">
+            <input id="settings-piece-offset" type="range" min="-10" max="20" step="1" />
+            <input id="settings-piece-offset-num" type="number" min="-10" max="20" step="1" />
+            <button type="button" id="settings-piece-reset" class="settings-color-reset">Сброс</button>
+            <span class="muted">отриц. — поднять, полож. — опустить</span>
+          </div>
         </div>
         <div class="settings-actions">
           <button type="button" id="btn-settings-close">Готово</button>
@@ -255,6 +508,56 @@
         </div>
       </div>
     </div>
+
+    <div id="onboarding-modal" class="modal-overlay" hidden>
+      <div class="modal-card onboarding-card">
+        <div class="onboarding-hero">
+          <div class="onboarding-piece">♛</div>
+          <h2>Добро пожаловать!</h2>
+          <p class="muted">Придумай ник и выбери аватар — он будет виден в лидерборде и профиле.</p>
+        </div>
+        <label class="onboarding-field">
+          <span>Ник</span>
+          <input id="onboarding-nick" type="text" maxlength="32" placeholder="Например, Tactician42" />
+        </label>
+        <div class="onboarding-field">
+          <span>Аватар</span>
+          <div id="onboarding-avatars" class="onboarding-avatars"></div>
+        </div>
+        <div class="onboarding-actions">
+          <button id="btn-onboarding-save" type="button" class="puzzle-primary">Сохранить</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="profile-modal" class="modal-overlay" hidden>
+      <div class="modal-card profile-card">
+        <button class="modal-close" data-close="profile-modal" type="button" aria-label="Закрыть">×</button>
+        <div id="profile-body" class="profile-body"></div>
+      </div>
+    </div>
+
+    <div id="leaderboard-modal" class="modal-overlay" hidden>
+      <div class="modal-card leaderboard-card">
+        <button class="modal-close" data-close="leaderboard-modal" type="button" aria-label="Закрыть">×</button>
+        <header class="leaderboard-header">
+          <h2>🏆 Лидерборд</h2>
+          <p class="muted">Игроки этого сервера. Нажми на игрока, чтобы открыть профиль.</p>
+        </header>
+        <div id="leaderboard-body" class="leaderboard-body"></div>
+      </div>
+    </div>
+
+    <div id="party-modal" class="modal-overlay" hidden>
+      <div class="modal-card party-card">
+        <button class="modal-close" data-close="party-modal" type="button" aria-label="Закрыть">×</button>
+        <div id="party-body" class="party-body"></div>
+      </div>
+    </div>
+
+    <!-- Toasts: bottom-right stack for party invitations and similar nudges. -->
+    <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
     <script type="module" src="/static/app.js"></script>
   </body>
 </html>

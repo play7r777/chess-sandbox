@@ -15,6 +15,7 @@ dependencies = [
     "pydantic-settings>=2.2",
     "cairosvg>=2.7",
     "requests>=2.31",
+    "zstandard>=0.22",
 ]
 
 [project.optional-dependencies]
@@ -37,7 +38,7 @@ build-backend = "setuptools.build_meta"
 include = ["backend*"]
 
 [tool.setuptools.package-data]
-"backend" = ["data/*.txt.gz"]
+"backend" = ["data/*.txt.gz", "data/*.json"]
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,245 @@
+[
+  {
+    "id": "italian-game",
+    "name": "Итальянская партия",
+    "eco": "C50-C54",
+    "side": "w",
+    "description": "Классика 1.e4 e5: белые быстро выводят коней и слонов, целятся слоном на f7. Простой план — для любого уровня.",
+    "theory": "Главные идеи:\n• 1.e4 e5 2.Nf3 Nc6 3.Bc4 — слон смотрит на слабый пункт f7.\n• Не торопись с d4 без подготовки: после ...exd4 у тебя лишний темп, но фигура висит.\n• Вариант Giuoco Pianissimo: 4.d3 Nf6 5.c3 — медленно, надёжно, готовим d4 + Re1.\n• Главные ошибки чёрных: ранний ход ...Nf6 без защиты пешки e5 после ...Bc4 / ...Nxe5 идею Fork Trick.\n\nКуда уводят варианты:\n— Спокойная позиция в центре с чёткой структурой.\n— Возможны жертвы на f7 при невнимательной игре чёрных.",
+    "lines": [
+      {
+        "id": "italian-main",
+        "name": "Главная линия (Giuoco Pianissimo)",
+        "moves": [
+          {"move": "e2e4", "san": "e4", "fen_after": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "why": "Захватываем центр и открываем диагональ слону f1.", "mistakes": []},
+          {"move": "e7e5", "san": "e5", "fen_after": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2", "why": "Симметричный ответ — крепкий центр.", "mistakes": []},
+          {"move": "g1f3", "san": "Nf3", "fen_after": "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2", "why": "Развитие + давление на e5.", "mistakes": []},
+          {"move": "b8c6", "san": "Nc6", "fen_after": "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3", "why": "Защита пешки e5.", "mistakes": []},
+          {"move": "f1c4", "san": "Bc4", "fen_after": "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3", "why": "Слон целится на f7 — самое слабое поле в позиции чёрных.", "mistakes": [{"move": "d2d4", "san": "d4?!", "why": "Преждевременно. После 3...exd4 4.Nxd4 у белых нет Bc4 в нужный момент."}]},
+          {"move": "g8f6", "san": "Nf6", "fen_after": "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4", "why": "Развитие + давление на e4.", "mistakes": [{"move": "d7d6", "san": "d6", "why": "Пассивно, чёрный слон c8 надолго заперт."}]},
+          {"move": "d2d3", "san": "d3", "fen_after": "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R b KQkq - 0 4", "why": "Готовим c3 + d4 — спокойная установка.", "mistakes": [{"move": "b1c3", "san": "Nc3", "why": "Не плохо, но не главный план Italian: блокирует пешку c, делает d4 невозможной без размена."}]},
+          {"move": "f8c5", "san": "Bc5", "fen_after": "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R w KQkq - 1 5", "why": "Атакуем слона на c4 и контролируем диагональ.", "mistakes": []},
+          {"move": "c2c3", "san": "c3", "fen_after": "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2PP1N2/PP3PPP/RNBQK2R b KQkq - 0 5", "why": "Готовим d4 — главная идея.", "mistakes": []}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "ruy-lopez",
+    "name": "Испанская партия (Ruy Lopez)",
+    "eco": "C60-C99",
+    "side": "w",
+    "description": "Сильнейший ответ на 1.e4 e5 на высоком уровне. Долгая стратегическая игра, давление на коня c6.",
+    "theory": "Главные идеи:\n• 3.Bb5 — связка коня c6 косвенно атакует e5.\n• Угроза 4.Bxc6 + Nxe5 не проходит: ...Qd4 или ...Qg5 отыгрывают пешку.\n• Берлинская защита (3...Nf6) ведёт к эндшпильной игре.\n• Закрытая Испанская: Nf6 → Be7 → O-O → Re1 → c3 → d4 — медленный, но мощный план.\n\nЧёрные стремятся:\n— Освободить слона c8 ходом ...d6 + ...Bg4 / ...Bd7.\n— Укрепить центр и провести ...c5 при удобном случае.",
+    "lines": [
+      {
+        "id": "ruy-main",
+        "name": "Закрытая Испанская",
+        "moves": [
+          {"move": "e2e4", "san": "e4", "fen_after": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "why": "Захват центра.", "mistakes": []},
+          {"move": "e7e5", "san": "e5", "fen_after": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2", "why": "Стандартный ответ.", "mistakes": []},
+          {"move": "g1f3", "san": "Nf3", "fen_after": "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2", "why": "Атака на e5.", "mistakes": []},
+          {"move": "b8c6", "san": "Nc6", "fen_after": "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3", "why": "Защита e5.", "mistakes": []},
+          {"move": "f1b5", "san": "Bb5", "fen_after": "r1bqkbnr/1ppp1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4", "why": "Косвенное давление на коня и пешку e5.", "mistakes": [{"move": "f1c4", "san": "Bc4", "why": "Это уже Италия, не Испанская."}]},
+          {"move": "a7a6", "san": "a6", "fen_after": "r1bqkbnr/1ppp1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4", "why": "Загонит слона: либо ход назад, либо размен.", "mistakes": []},
+          {"move": "b5a4", "san": "Ba4", "fen_after": "r1bqkbnr/1ppp1ppp/p1n5/4p3/B3P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 1 5", "why": "Сохраняем слона на активной диагонали.", "mistakes": [{"move": "b5c6", "san": "Bxc6", "why": "Размен Лопеса: упрощает игру, но даёт чёрным двух слонов."}]},
+          {"move": "g8f6", "san": "Nf6", "fen_after": "r1bqkb1r/1ppp1ppp/p1n2n2/4p3/B3P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 5", "why": "Атака на e4.", "mistakes": []},
+          {"move": "e1g1", "san": "O-O", "fen_after": "r1bqkb1r/1ppp1ppp/p1n2n2/4p3/B3P3/5N2/PPPP1PPP/RNBQ1RK1 b kq - 3 6", "why": "Рокировка + готовится Re1 для защиты e4.", "mistakes": [{"move": "d2d3", "san": "d3?!", "why": "Слишком пассивно для уровня Испанской."}]}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "sicilian-najdorf",
+    "name": "Сицилианская: Найдорф",
+    "eco": "B90-B99",
+    "side": "b",
+    "description": "Острейшая защита Сицилианской. ...a6 готовит ...e5 / ...b5, ставит пешечную базу для контратаки.",
+    "theory": "Главные идеи:\n• ...a6 — сначала контролируем b5, потом решаем как развивать слона c8.\n• Английская атака: 6.Be3 — белые играют f3, Qd2, O-O-O, g4-g5.\n• Главная цель чёрных — провести ...e5 в нужный момент, чтобы разменять центр и оживить слонов.\n• Опасные пункты: пешка e6 при ...e5 нужна защита, иначе белые врываются Nd5.\n\nТипичная игра: контратака на ферзевом фланге, ...b5 → ...b4 → давление.",
+    "lines": [
+      {
+        "id": "najdorf-main",
+        "name": "Найдорф — Английская атака",
+        "moves": [
+          {"move": "e2e4", "san": "e4", "fen_after": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "why": "Стандартное начало.", "mistakes": []},
+          {"move": "c7c5", "san": "c5", "fen_after": "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2", "why": "Сицилианская — несимметричный ответ, борьба за инициативу.", "mistakes": []},
+          {"move": "g1f3", "san": "Nf3", "fen_after": "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2", "why": "Развитие.", "mistakes": []},
+          {"move": "d7d6", "san": "d6", "fen_after": "rnbqkbnr/pp2pppp/3p4/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3", "why": "Подготовка ...Nf6 без угрозы e5.", "mistakes": []},
+          {"move": "d2d4", "san": "d4", "fen_after": "rnbqkbnr/pp2pppp/3p4/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq d3 0 3", "why": "Открытая Сицилианская — главный план.", "mistakes": []},
+          {"move": "c5d4", "san": "cxd4", "fen_after": "rnbqkbnr/pp2pppp/3p4/8/3pP3/5N2/PPP2PPP/RNBQKB1R w KQkq - 0 4", "why": "Размен пешки c.", "mistakes": [{"move": "g8f6", "san": "Nf6", "why": "Не плохо, но позже — сначала разменяй d4 чтобы избежать e5 от белых."}]},
+          {"move": "f3d4", "san": "Nxd4", "fen_after": "rnbqkbnr/pp2pppp/3p4/8/3NP3/8/PPP2PPP/RNBQKB1R b KQkq - 0 4", "why": "Конь на d4 — командный пункт.", "mistakes": []},
+          {"move": "g8f6", "san": "Nf6", "fen_after": "rnbqkb1r/pp2pppp/3p1n2/8/3NP3/8/PPP2PPP/RNBQKB1R w KQkq - 1 5", "why": "Развитие + давление на e4.", "mistakes": []},
+          {"move": "b1c3", "san": "Nc3", "fen_after": "rnbqkb1r/pp2pppp/3p1n2/8/3NP3/2N5/PPP2PPP/R1BQKB1R b KQkq - 2 5", "why": "Защита e4 + развитие.", "mistakes": []},
+          {"move": "a7a6", "san": "a6", "fen_after": "rnbqkb1r/1p2pppp/p2p1n2/8/3NP3/2N5/PPP2PPP/R1BQKB1R w KQkq - 0 6", "why": "Знаковый ход Найдорфа: подготавливает ...b5 + ...e5, ограничивает Nb5.", "mistakes": [{"move": "b8c6", "san": "Nc6", "why": "Это уже Sveshnikov, другая теория."}]}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "caro-kann",
+    "name": "Защита Каро-Канн",
+    "eco": "B10-B19",
+    "side": "b",
+    "description": "Прочная защита от 1.e4. Чёрные строят пешечный треугольник c6-d5 без слабого слона как во Французской.",
+    "theory": "Главные идеи:\n• 1...c6 готовит ...d5 без проблем со слоном c8.\n• В классическом варианте 4...Bf5 — слон уходит на активную диагональ ДО хода ...e6.\n• Структура: пешки c6/d5/e6 — крепость; борьба идёт за пункт e5 и линию c.\n• Слабость: после ...e6 поле e5 у чёрных «дыра», белые могут провести f4-f5 или Ne5.\n\nНе путать с Французской: главное отличие — слон c8 выходит ДО ...e6.",
+    "lines": [
+      {
+        "id": "caro-classical",
+        "name": "Каро-Канн — Классический вариант",
+        "moves": [
+          {"move": "e2e4", "san": "e4", "fen_after": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "why": "Стандарт.", "mistakes": []},
+          {"move": "c7c6", "san": "c6", "fen_after": "rnbqkbnr/pp1ppppp/2p5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2", "why": "Готовим ...d5 без блокировки слона c8.", "mistakes": []},
+          {"move": "d2d4", "san": "d4", "fen_after": "rnbqkbnr/pp1ppppp/2p5/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq d3 0 2", "why": "Большой центр.", "mistakes": []},
+          {"move": "d7d5", "san": "d5", "fen_after": "rnbqkbnr/pp2pppp/2p5/3p4/3PP3/8/PPP2PPP/RNBQKBNR w KQkq d6 0 3", "why": "Контратака центра.", "mistakes": []},
+          {"move": "b1c3", "san": "Nc3", "fen_after": "rnbqkbnr/pp2pppp/2p5/3p4/3PP3/2N5/PPP2PPP/R1BQKBNR b KQkq - 1 3", "why": "Защита e4 — главное продолжение.", "mistakes": []},
+          {"move": "d5e4", "san": "dxe4", "fen_after": "rnbqkbnr/pp2pppp/2p5/8/3Pp3/2N5/PPP2PPP/R1BQKBNR w KQkq - 0 4", "why": "Освобождение пункта d5.", "mistakes": []},
+          {"move": "c3e4", "san": "Nxe4", "fen_after": "rnbqkbnr/pp2pppp/2p5/8/3PN3/8/PPP2PPP/R1BQKBNR b KQkq - 0 4", "why": "Конь на e4 — мощная фигура.", "mistakes": []},
+          {"move": "c8f5", "san": "Bf5", "fen_after": "rn1qkbnr/pp2pppp/2p5/5b2/3PN3/8/PPP2PPP/R1BQKBNR w KQkq - 1 5", "why": "Главный ход Классики: слон выходит на активную позицию ДО ...e6.", "mistakes": [{"move": "g8f6", "san": "Nf6", "why": "После 6.Nxf6+ gxf6 у чёрных рваная пешечная структура."}]},
+          {"move": "e4g3", "san": "Ng3", "fen_after": "rn1qkbnr/pp2pppp/2p5/5b2/3P4/6N1/PPP2PPP/R1BQKBNR b KQkq - 2 5", "why": "Атакует слона и угрожает h4-h5.", "mistakes": []},
+          {"move": "f5g6", "san": "Bg6", "fen_after": "rn1qkbnr/pp2pppp/2p3b1/8/3P4/6N1/PPP2PPP/R1BQKBNR w KQkq - 3 6", "why": "Слон сохраняет диагональ b1-h7, защищая от h5.", "mistakes": []}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "queens-gambit",
+    "name": "Ферзевый гамбит",
+    "eco": "D06-D69",
+    "side": "w",
+    "description": "Гамбит лишь по форме: 2.c4 — давление на пункт d5 без серьёзной жертвы материала.",
+    "theory": "Главные идеи:\n• 2.c4 — атакует d5; чёрные либо принимают (2...dxc4) либо защищают (2...e6, 2...c6).\n• Принятый ферзевый гамбит: чёрные не могут удержать пешку c4 без потери позиции.\n• Отказанный (QGD): чёрные строят прочную, но пассивную пешечную цепь.\n• Славянская защита (2...c6) — наиболее популярна на высоком уровне.\n\nКуда уводят варианты:\n— Спокойная позиционная игра.\n— Возможность атаки на королевском фланге через e3 + Nf3 + Bd3 + e4.",
+    "lines": [
+      {
+        "id": "qgd-main",
+        "name": "Ферзевый гамбит — отказанный",
+        "moves": [
+          {"move": "d2d4", "san": "d4", "fen_after": "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1", "why": "Закрытое начало с центром.", "mistakes": []},
+          {"move": "d7d5", "san": "d5", "fen_after": "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq d6 0 2", "why": "Симметрия в центре.", "mistakes": []},
+          {"move": "c2c4", "san": "c4", "fen_after": "rnbqkbnr/ppp1pppp/8/3p4/2PP4/8/PP2PPPP/RNBQKBNR b KQkq c3 0 2", "why": "Знаковый гамбит-ход — давление на d5.", "mistakes": []},
+          {"move": "e7e6", "san": "e6", "fen_after": "rnbqkbnr/ppp2ppp/4p3/3p4/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 0 3", "why": "Защита d5 и подготовка ...Nf6.", "mistakes": [{"move": "d5c4", "san": "dxc4", "why": "Принятый вариант, другая теория."}]},
+          {"move": "b1c3", "san": "Nc3", "fen_after": "rnbqkbnr/ppp2ppp/4p3/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq - 1 3", "why": "Развитие коня и поддержка центра.", "mistakes": []},
+          {"move": "g8f6", "san": "Nf6", "fen_after": "rnbqkb1r/ppp2ppp/4pn2/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4", "why": "Стандартное развитие.", "mistakes": []},
+          {"move": "c1g5", "san": "Bg5", "fen_after": "rnbqkb1r/ppp2ppp/4pn2/3p2B1/2PP4/2N5/PP2PPPP/R1BQKB1R b KQkq - 3 4", "why": "Связка коня f6 — главное оружие в QGD.", "mistakes": [{"move": "g1f3", "san": "Nf3", "why": "Тоже хорошо, но не самый агрессивный план."}]}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "kings-indian",
+    "name": "Староиндийская защита",
+    "eco": "E60-E99",
+    "side": "b",
+    "description": "Гипермодерный ответ на 1.d4: чёрные позволяют белым построить большой центр, потом разрушают его контратакой.",
+    "theory": "Главные идеи:\n• Чёрные фианкеттируют слона на g7, ждут полной мобилизации белых, затем взрывают центр ходом ...e5 (или ...c5).\n• Главные опасности для чёрных: пассивная игра без плана.\n• Главная задумка: при d5 у белых — атака на ферзевом фланге; при cxd5 — типичная тактика на королевском с f5 / g4.\n• На высоком уровне Староиндийская — оружие за победу: позиционная игра без размена ферзей.\n\nКуда уводят варианты:\n— Атака коней на f5/h5; продвижение пешек f и g.\n— Жертвы на f5 / h3 для прорыва короля.",
+    "lines": [
+      {
+        "id": "kid-main",
+        "name": "Староиндийская — классический вариант",
+        "moves": [
+          {"move": "d2d4", "san": "d4", "fen_after": "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1", "why": "Закрытый дебют.", "mistakes": []},
+          {"move": "g8f6", "san": "Nf6", "fen_after": "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 1 2", "why": "Контролируем e4 без хода ...d5.", "mistakes": []},
+          {"move": "c2c4", "san": "c4", "fen_after": "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq c3 0 2", "why": "Стандартный план d4-c4 за центр.", "mistakes": []},
+          {"move": "g7g6", "san": "g6", "fen_after": "rnbqkb1r/pppppp1p/5np1/8/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 0 3", "why": "Готовим фианкетто слона g7.", "mistakes": [{"move": "e7e6", "san": "e6", "why": "Это уже Новоиндийская / Боголюбова, другая теория."}]},
+          {"move": "b1c3", "san": "Nc3", "fen_after": "rnbqkb1r/pppppp1p/5np1/8/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq - 1 3", "why": "Развитие.", "mistakes": []},
+          {"move": "f8g7", "san": "Bg7", "fen_after": "rnbqk2r/ppppppbp/5np1/8/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4", "why": "Слон на длинной диагонали — ключевая фигура Староиндийской.", "mistakes": []},
+          {"move": "e2e4", "san": "e4", "fen_after": "rnbqk2r/ppppppbp/5np1/8/2PPP3/2N5/PP3PPP/R1BQKBNR b KQkq e3 0 4", "why": "Полный центральный план.", "mistakes": []},
+          {"move": "d7d6", "san": "d6", "fen_after": "rnbqk2r/ppp1ppbp/3p1np1/8/2PPP3/2N5/PP3PPP/R1BQKBNR w KQkq - 0 5", "why": "Готовим ...e5 — главную ломающую идею.", "mistakes": [{"move": "d7d5", "san": "d5", "why": "Это Грюнфельд, очень другая теория."}]}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "english",
+    "name": "Английское начало",
+    "eco": "A10-A39",
+    "side": "w",
+    "description": "Гибкое начало 1.c4: можно перейти в Сицилианскую с переменой цветов, КИО, ферзевый гамбит — выбор за вами.",
+    "theory": "Главные идеи:\n• 1.c4 — давит на d5 без обязательства d4.\n• Симметричный вариант (1...c5) — минное поле как в Сицилианской с переменой цветов.\n• Может перейти в Каталанский/QGD при d4, или в чисто английскую структуру с g3.\n• Лучший вариант для тех, кто не хочет учить главные линии 1.e4.",
+    "lines": [
+      {
+        "id": "english-symmetrical",
+        "name": "Симметричный вариант",
+        "moves": [
+          {"move": "c2c4", "san": "c4", "fen_after": "rnbqkbnr/pppppppp/8/8/2P5/8/PP1PPPPP/RNBQKBNR b KQkq c3 0 1", "why": "Английское начало.", "mistakes": []},
+          {"move": "c7c5", "san": "c5", "fen_after": "rnbqkbnr/pp1ppppp/8/2p5/2P5/8/PP1PPPPP/RNBQKBNR w KQkq c6 0 2", "why": "Симметричный ответ.", "mistakes": []},
+          {"move": "g1f3", "san": "Nf3", "fen_after": "rnbqkbnr/pp1ppppp/8/2p5/2P5/5N2/PP1PPPPP/RNBQKB1R b KQkq - 1 2", "why": "Развитие.", "mistakes": []},
+          {"move": "b8c6", "san": "Nc6", "fen_after": "r1bqkbnr/pp1ppppp/2n5/2p5/2P5/5N2/PP1PPPPP/RNBQKB1R w KQkq - 2 3", "why": "Развитие.", "mistakes": []},
+          {"move": "g2g3", "san": "g3", "fen_after": "r1bqkbnr/pp1ppppp/2n5/2p5/2P5/5NP1/PP1PPP1P/RNBQKB1R b KQkq - 0 3", "why": "Готовим длинное фианкетто слона.", "mistakes": []},
+          {"move": "g7g6", "san": "g6", "fen_after": "r1bqkbnr/pp1pp1pp/2n3p1/2p5/2P5/5NP1/PP1PPP1P/RNBQKB1R w KQkq - 0 4", "why": "Также фианкетто.", "mistakes": []},
+          {"move": "f1g2", "san": "Bg2", "fen_after": "r1bqkbnr/pp1pp1pp/2n3p1/2p5/2P5/5NP1/PP1PPPBP/RNBQK2R b KQkq - 1 4", "why": "Слон на главной диагонали.", "mistakes": []}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "scandinavian",
+    "name": "Скандинавская защита",
+    "eco": "B01",
+    "side": "b",
+    "description": "Сразу 1...d5 против 1.e4 — простая для изучения защита, ферзь рано выходит, но позиция надёжная.",
+    "theory": "Главные идеи:\n• 1.e4 d5 2.exd5 — белые забирают пешку, чёрные обязаны её отыграть.\n• 2...Qxd5 3.Nc3 — ферзь должен уйти; обычно на a5 (Скандинавская атака) или d6.\n• 2...Nf6 — современный вариант, чёрные жертвуют темп ради активной игры (Иванчука).\n• Простая для понимания, надёжная — рекомендуется новичкам как репертуар против 1.e4.",
+    "lines": [
+      {
+        "id": "scandinavian-main",
+        "name": "Скандинавская — главная линия",
+        "moves": [
+          {"move": "e2e4", "san": "e4", "fen_after": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "why": "Стандарт.", "mistakes": []},
+          {"move": "d7d5", "san": "d5", "fen_after": "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2", "why": "Сразу атакуем e4.", "mistakes": []},
+          {"move": "e4d5", "san": "exd5", "fen_after": "rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 2", "why": "Берём пешку — других хороших ходов нет.", "mistakes": []},
+          {"move": "d8d5", "san": "Qxd5", "fen_after": "rnb1kbnr/ppp1pppp/8/3q4/8/8/PPPP1PPP/RNBQKBNR w KQkq - 0 3", "why": "Отыгрываем пешку. Минус — ферзь рано выходит и попадёт под темпы.", "mistakes": [{"move": "g8f6", "san": "Nf6", "why": "Современный вариант, играют на гамбит, надо знать другую теорию."}]},
+          {"move": "b1c3", "san": "Nc3", "fen_after": "rnb1kbnr/ppp1pppp/8/3q4/8/2N5/PPPP1PPP/R1BQKBNR b KQkq - 1 3", "why": "Атакуем ферзя с темпом.", "mistakes": []},
+          {"move": "d5a5", "san": "Qa5", "fen_after": "rnb1kbnr/ppp1pppp/8/q7/8/2N5/PPPP1PPP/R1BQKBNR w KQkq - 2 4", "why": "Атакуем коня; самый популярный отступ.", "mistakes": [{"move": "d5d6", "san": "Qd6", "why": "Тоже играют, но ферзь блокирует пешку d, что неэстетично."}]}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "french-defense",
+    "name": "Французская защита",
+    "eco": "C00-C19",
+    "side": "b",
+    "description": "Прочная защита 1...e6: чёрные строят пешечную цепь и контратакуют центр.",
+    "theory": "Главные идеи:\n• 1.e4 e6 2.d4 d5 — стандартная Французская структура.\n• Главная проблема: «французский слон» c8 на длинном диагонали b8-h2 — закрыт пешкой e6.\n• Активная контратака: ...c5 в нужный момент сломает центр белых.\n• Особенности: при 3.e5 (Advance) — пешечная цепь, обе стороны атакуют пешки; при 3.Nc3 (Mainline) — острая теория.\n\nКлючевая концепция: если белые играют 3.e5, чёрные планируют ...c5, ...Nc6, ...Qb6 — давление на d4.",
+    "lines": [
+      {
+        "id": "french-advance",
+        "name": "Французская — Advance variation",
+        "moves": [
+          {"move": "e2e4", "san": "e4", "fen_after": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "why": "Стандартный ход белых.", "mistakes": []},
+          {"move": "e7e6", "san": "e6", "fen_after": "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2", "why": "Подготовка ...d5.", "mistakes": [{"move": "e7e5", "san": "e5", "why": "Тогда это Открытая партия, не Французская."}]},
+          {"move": "d2d4", "san": "d4", "fen_after": "rnbqkbnr/pppp1ppp/4p3/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq d3 0 2", "why": "Большой центр.", "mistakes": []},
+          {"move": "d7d5", "san": "d5", "fen_after": "rnbqkbnr/ppp2ppp/4p3/3p4/3PP3/8/PPP2PPP/RNBQKBNR w KQkq d6 0 3", "why": "Контратака центра.", "mistakes": []},
+          {"move": "e4e5", "san": "e5", "fen_after": "rnbqkbnr/ppp2ppp/4p3/3pP3/3P4/8/PPP2PPP/RNBQKBNR b KQkq - 0 3", "why": "Закрываем центр и захватываем пространство.", "mistakes": []},
+          {"move": "c7c5", "san": "c5", "fen_after": "rnbqkbnr/pp3ppp/4p3/2ppP3/3P4/8/PPP2PPP/RNBQKBNR w KQkq c6 0 4", "why": "Главная идея чёрных в Advance: атаковать пешечную цепь на основании.", "mistakes": []},
+          {"move": "c2c3", "san": "c3", "fen_after": "rnbqkbnr/pp3ppp/4p3/2ppP3/3P4/2P5/PP3PPP/RNBQKBNR b KQkq - 0 4", "why": "Поддержка d4 — главный план белых.", "mistakes": []},
+          {"move": "b8c6", "san": "Nc6", "fen_after": "r1bqkbnr/pp3ppp/2n1p3/2ppP3/3P4/2P5/PP3PPP/RNBQKBNR w KQkq - 1 5", "why": "Давление на d4.", "mistakes": []}
+        ]
+      }
+    ]
+  },
+  {
+    "id": "london-system",
+    "name": "Лондонская система",
+    "eco": "D02",
+    "side": "w",
+    "description": "Простая для изучения система за белых: одинаковая расстановка против любого ответа чёрных. Отлично для новичков.",
+    "theory": "Главные идеи:\n• 1.d4 → 2.Nf3 → 3.Bf4 — слон выходит ДО хода e3, иначе он останется заперт.\n• Стандартная расстановка: d4, Nf3, Bf4, e3, Bd3, c3, Nbd2, h3 — \"Лондонский треугольник\".\n• Подходит против всех чёрных ответов кроме самых редких.\n• Легко учится, даёт рабочую партию против любого соперника.\n\nГлавный приём: подрыв e4 с d3 + Nbd2 при удобном случае; готовится также длинная рокировка с атакой.",
+    "lines": [
+      {
+        "id": "london-main",
+        "name": "Лондонская система — главная схема",
+        "moves": [
+          {"move": "d2d4", "san": "d4", "fen_after": "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1", "why": "Запираем центр.", "mistakes": []},
+          {"move": "d7d5", "san": "d5", "fen_after": "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq d6 0 2", "why": "Симметрия.", "mistakes": []},
+          {"move": "g1f3", "san": "Nf3", "fen_after": "rnbqkbnr/ppp1pppp/8/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2", "why": "Развитие.", "mistakes": []},
+          {"move": "g8f6", "san": "Nf6", "fen_after": "rnbqkb1r/ppp1pppp/5n2/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq - 2 3", "why": "Развитие.", "mistakes": []},
+          {"move": "c1f4", "san": "Bf4", "fen_after": "rnbqkb1r/ppp1pppp/5n2/3p4/3P1B2/5N2/PPP1PPPP/RNBQK2R b KQkq - 3 3", "why": "Знаковый ход Лондонской: слон ВЫХОДИТ ДО e3, иначе останется заперт пешкой e3.", "mistakes": [{"move": "e2e3", "san": "e3", "why": "Главная ошибка любителей: после e3 слон c1 заперт, и Лондонской не получается."}]},
+          {"move": "e7e6", "san": "e6", "fen_after": "rnbqkb1r/ppp2ppp/4pn2/3p4/3P1B2/5N2/PPP1PPPP/RNBQK2R w KQkq - 0 4", "why": "Стандартный ответ.", "mistakes": []},
+          {"move": "e2e3", "san": "e3", "fen_after": "rnbqkb1r/ppp2ppp/4pn2/3p4/3P1B2/4PN2/PPP2PPP/RNBQK2R b KQkq - 0 4", "why": "Теперь e3 безопасен — слон уже на f4.", "mistakes": []},
+          {"move": "f8d6", "san": "Bd6", "fen_after": "rnbqk2r/ppp2ppp/3bpn2/3p4/3P1B2/4PN2/PPP2PPP/RNBQK2R w KQkq - 1 5", "why": "Бьёт по слону f4.", "mistakes": []},
+          {"move": "f1d3", "san": "Bd3", "fen_after": "rnbqk2r/ppp2ppp/3bpn2/3p4/3P1B2/3BPN2/PPP2PPP/RNBQK2R b KQkq - 2 5", "why": "Парный треугольник d3+f4 — типичная Лондонская.", "mistakes": []}
+        ]
+      }
+    ]
+  }
+]
