@@ -290,6 +290,23 @@
             <span class="muted">Точки на куда можно сходить и кольцо взятия</span>
           </div>
         </div>
+        <div class="settings-row">
+          <label for="settings-piece-size">Размер фигуры (% клетки)</label>
+          <div class="settings-options settings-slider-row">
+            <input id="settings-piece-size" type="range" min="50" max="100" step="1" />
+            <input id="settings-piece-size-num" type="number" min="50" max="100" step="1" />
+            <span class="muted">от 50 до 100</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <label for="settings-piece-offset">Смещение вниз (% клетки)</label>
+          <div class="settings-options settings-slider-row">
+            <input id="settings-piece-offset" type="range" min="-10" max="20" step="1" />
+            <input id="settings-piece-offset-num" type="number" min="-10" max="20" step="1" />
+            <button type="button" id="settings-piece-reset" class="settings-color-reset">Сброс</button>
+            <span class="muted">отриц. — поднять, полож. — опустить</span>
+          </div>
+        </div>
         <div class="settings-actions">
           <button type="button" id="btn-settings-close">Готово</button>
         </div>

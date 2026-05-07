@@ -78,6 +78,27 @@ const PIECE_SETS = {
 // agree.
 const DEFAULT_LEGAL_DOT_COLOR = "#28c85a";
 
+// Piece sizing defaults. Both numbers are percentages of the cell:
+// `pieceSize` is the piece image's width/height, `pieceOffsetY`
+// shifts the piece downward inside the cell (negative values shift
+// it up). Tuned to match chess.com's resting placement.
+const DEFAULT_PIECE_SIZE = 95;
+const DEFAULT_PIECE_OFFSET_Y = 2;
+const MIN_PIECE_SIZE = 50;
+const MAX_PIECE_SIZE = 100;
+const MIN_PIECE_OFFSET_Y = -10;
+const MAX_PIECE_OFFSET_Y = 20;
+function _clampPieceSize(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_PIECE_SIZE;
+  return Math.max(MIN_PIECE_SIZE, Math.min(MAX_PIECE_SIZE, Math.round(v)));
+}
+function _clampPieceOffsetY(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_PIECE_OFFSET_Y;
+  return Math.max(MIN_PIECE_OFFSET_Y, Math.min(MAX_PIECE_OFFSET_Y, Math.round(v)));
+}
+
 const DEFAULT_PV_ARROW_COUNT = 6;
 const MAX_PV_ARROW_COUNT = 12;
 const DEFAULT_BEST_LINE_LENGTH = 10;
@@ -107,6 +128,8 @@ function loadSettings() {
     pvArrowCount: DEFAULT_PV_ARROW_COUNT,
     bestLineLength: DEFAULT_BEST_LINE_LENGTH,
     legalDotColor: DEFAULT_LEGAL_DOT_COLOR,
+    pieceSize: DEFAULT_PIECE_SIZE,
+    pieceOffsetY: DEFAULT_PIECE_OFFSET_Y,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -121,6 +144,8 @@ function loadSettings() {
       legalDotColor: _isHexColor(parsed.legalDotColor)
         ? parsed.legalDotColor
         : DEFAULT_LEGAL_DOT_COLOR,
+      pieceSize: _clampPieceSize(parsed.pieceSize ?? DEFAULT_PIECE_SIZE),
+      pieceOffsetY: _clampPieceOffsetY(parsed.pieceOffsetY ?? DEFAULT_PIECE_OFFSET_Y),
     };
   } catch { return fallback; }
 }
@@ -159,6 +184,15 @@ function applyLegalDotColor() {
     : DEFAULT_LEGAL_DOT_COLOR;
   document.documentElement.style.setProperty("--legal-dot", _hexToRgba(c, 0.55));
 }
+
+function applyPieceSizing() {
+  const size = _clampPieceSize(userSettings.pieceSize);
+  const offY = _clampPieceOffsetY(userSettings.pieceOffsetY);
+  const root = document.documentElement;
+  root.style.setProperty("--piece-size", `${size}%`);
+  root.style.setProperty("--piece-offset-y", `${offY}%`);
+}
+applyPieceSizing();
 
 function applyBoardTheme() {
   const t = BOARD_THEMES[userSettings.theme] || BOARD_THEMES[DEFAULT_BOARD_THEME];
@@ -1324,6 +1358,59 @@ function openSettingsModal() {
       saveSettings(userSettings);
       applyLegalDotColor();
       if (dotInput) dotInput.value = DEFAULT_LEGAL_DOT_COLOR;
+    });
+  }
+  const sizeInput = document.getElementById("settings-piece-size");
+  const sizeNum = document.getElementById("settings-piece-size-num");
+  const offsetInput = document.getElementById("settings-piece-offset");
+  const offsetNum = document.getElementById("settings-piece-offset-num");
+  const pieceReset = document.getElementById("settings-piece-reset");
+  function syncSizeUi(v) {
+    if (sizeInput) sizeInput.value = String(v);
+    if (sizeNum) sizeNum.value = String(v);
+  }
+  function syncOffsetUi(v) {
+    if (offsetInput) offsetInput.value = String(v);
+    if (offsetNum) offsetNum.value = String(v);
+  }
+  syncSizeUi(_clampPieceSize(userSettings.pieceSize));
+  syncOffsetUi(_clampPieceOffsetY(userSettings.pieceOffsetY));
+  function applySize(raw) {
+    const next = _clampPieceSize(raw);
+    syncSizeUi(next);
+    if (next !== userSettings.pieceSize) {
+      userSettings.pieceSize = next;
+      saveSettings(userSettings);
+      applyPieceSizing();
+    }
+  }
+  function applyOffset(raw) {
+    const next = _clampPieceOffsetY(raw);
+    syncOffsetUi(next);
+    if (next !== userSettings.pieceOffsetY) {
+      userSettings.pieceOffsetY = next;
+      saveSettings(userSettings);
+      applyPieceSizing();
+    }
+  }
+  if (sizeInput) sizeInput.addEventListener("input", () => applySize(sizeInput.value));
+  if (sizeNum) {
+    sizeNum.addEventListener("input", () => applySize(sizeNum.value));
+    sizeNum.addEventListener("change", () => applySize(sizeNum.value));
+  }
+  if (offsetInput) offsetInput.addEventListener("input", () => applyOffset(offsetInput.value));
+  if (offsetNum) {
+    offsetNum.addEventListener("input", () => applyOffset(offsetNum.value));
+    offsetNum.addEventListener("change", () => applyOffset(offsetNum.value));
+  }
+  if (pieceReset) {
+    pieceReset.addEventListener("click", () => {
+      userSettings.pieceSize = DEFAULT_PIECE_SIZE;
+      userSettings.pieceOffsetY = DEFAULT_PIECE_OFFSET_Y;
+      saveSettings(userSettings);
+      syncSizeUi(DEFAULT_PIECE_SIZE);
+      syncOffsetUi(DEFAULT_PIECE_OFFSET_Y);
+      applyPieceSizing();
     });
   }
   modal.hidden = false;

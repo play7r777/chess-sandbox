@@ -11,6 +11,10 @@
   --highlight: rgba(255, 220, 80, 0.55);
   --legal-dot: rgba(40, 200, 90, 0.55);
   --selected: rgba(80, 160, 255, 0.55);
+  /* Piece sizing — overridden at runtime by applyPieceSizing() in
+     app.js so the user can tune them from settings. */
+  --piece-size: 95%;
+  --piece-offset-y: 2%;
   --danger: #ff7676;
   --ok: #6dd58c;
 }
@@ -202,14 +206,14 @@ body.board-theme-image .board { border-color: rgba(0, 0, 0, 0.45); }
   padding-bottom: 1%;
 }
 .piece-img {
-  width: 95%;
-  height: 95%;
+  width: var(--piece-size);
+  height: var(--piece-size);
   object-fit: contain;
   pointer-events: none;
   user-select: none;
   -webkit-user-drag: none;
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
-  transform: translateY(2%);
+  transform: translateY(var(--piece-offset-y));
 }
 .piece.dragging { opacity: 0.4; }
 .palette-cell .piece-img {
@@ -1216,6 +1220,14 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   cursor: pointer;
 }
 .settings-color-reset:hover { border-color: #4a5060; }
+.settings-slider-row { gap: 12px; }
+.settings-slider-row input[type="range"] {
+  flex: 1 1 160px;
+  min-width: 140px;
+  max-width: 240px;
+  accent-color: #5eaa46;
+}
+.settings-slider-row input[type="number"] { width: 64px; }
 .theme-swatch, .piece-swatch {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   background: #11151f;
@@ -2240,11 +2252,12 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .mini-board .mb-light { background: var(--light-sq); }
 .mini-board .mb-dark  { background: var(--dark-sq); }
 .mini-board .mb-piece {
-  width: 95%; height: 95%;
+  width: var(--piece-size);
+  height: var(--piece-size);
   object-fit: contain;
   pointer-events: none;
   user-select: none;
-  transform: translateY(2%);
+  transform: translateY(var(--piece-offset-y));
 }
 /* Selected-square overlay (player has highlighted a square they're
    thinking about). Sits on top of the square via the parent's
