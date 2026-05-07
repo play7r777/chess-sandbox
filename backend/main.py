@@ -1385,50 +1385,168 @@ def _analysis_eval_swing(eval_before_cp: int, eval_after_cp: int, side: str) -> 
     )
 
 
-def _build_analysis_coach_prompt(req: AnalysisCoachRequest) -> list[dict[str, str]]:
-    """Build chat messages for the Game-Review AI coach. Russian, concise."""
-    cls_label = ANALYSIS_CLASS_RU.get(req.classification, req.classification)
-    move_no = req.ply // 2 + 1
-    swing = _analysis_eval_swing(req.eval_before_cp, req.eval_after_cp, req.side)
-    best_pv = " ".join(req.best_pv_san[:6]) if req.best_pv_san else "(нет линии)"
-    played_pv = " ".join(req.played_pv_san[:6]) if req.played_pv_san else ""
+# ---- Hybrid Analysis coach (mirrors Opening Trainer hybrid) ----
+#
+# Tone keys mirror the frontend CSS classes (`opening-ai-verdict-*`).
+# We map every Stockfish classification to one of three buckets so the
+# big bold headline visually matches the move quality without the LLM
+# touching it.
+_ANALYSIS_TONE_BY_CLASS: dict[str, str] = {
+    "brilliant": "good",
+    "great":     "good",
+    "best":      "good",
+    "excellent": "good",
+    "good":      "good",
+    "book":      "good",
+    "forced":    "info",
+    "inaccuracy":"warn",
+    "miss":      "warn",
+    "mistake":   "bad",
+    "blunder":   "bad",
+}
 
-    name_w = (req.headers.get("White") or "Белые").strip() if req.headers else "Белые"
-    name_b = (req.headers.get("Black") or "Чёрные").strip() if req.headers else "Чёрные"
-    elo_w = (req.headers.get("WhiteElo") or "").strip() if req.headers else ""
-    elo_b = (req.headers.get("BlackElo") or "").strip() if req.headers else ""
-    players = f"{name_w}{f' ({elo_w})' if elo_w else ''} vs {name_b}{f' ({elo_b})' if elo_b else ''}"
+
+def _format_eval_cp_or_mate(cp: int) -> str:
+    """Format the frontend's signed centipawn (or encoded mate) value.
+
+    Mate values are encoded as ``±(100000 - plies)`` — see
+    ``_analysis_eval_swing``. Returns short strings like ``+0.32`` or
+    ``мат за 4`` / ``мат за -3``.
+    """
+    if cp >= 99000:
+        return f"мат за {100000 - cp}"
+    if cp <= -99000:
+        return f"мат за {-(cp + 100000)}"
+    return f"{cp / 100:+.2f}"
+
+
+def _compute_analysis_verdict(req: AnalysisCoachRequest) -> dict[str, Any]:
+    """Deterministic verdict block for the Game Review coach.
+
+    The whole point: the *factual* part of the coach output never
+    depends on the LLM. We use the classification (already produced by
+    Stockfish on /api/game/analyse) and the cp swing the frontend ships
+    in to drive the bold headline + tone + best move chip. The LLM only
+    fills in the one-sentence «idea» afterwards.
+    """
+    cls_label = ANALYSIS_CLASS_RU.get(req.classification, req.classification)
+    tone = _ANALYSIS_TONE_BY_CLASS.get(req.classification, "info")
+
+    delta = req.eval_after_cp - req.eval_before_cp
+    cp_loss: int | None = None
+    # cp_loss is only meaningful for finite (non-mate) evals on both ends.
+    if abs(req.eval_before_cp) < 99000 and abs(req.eval_after_cp) < 99000:
+        cp_loss = max(0, -delta)
+
+    best_san = req.best_move_san if (req.best_move_san and req.best_move_san != req.move_san) else None
+
+    if tone == "good":
+        if cp_loss is not None and cp_loss <= 5:
+            headline = f"{cls_label}: {req.move_san}"
+        else:
+            headline = f"{cls_label}: {req.move_san}"
+    elif tone == "warn":
+        if best_san and cp_loss is not None:
+            headline = f"{cls_label} (-{cp_loss / 100:.2f}). Лучше: {best_san}"
+        elif best_san:
+            headline = f"{cls_label}. Лучше: {best_san}"
+        else:
+            headline = f"{cls_label}."
+    elif tone == "bad":
+        if best_san and cp_loss is not None:
+            headline = f"{cls_label} (-{cp_loss / 100:.2f}). Нужно: {best_san}"
+        elif best_san:
+            headline = f"{cls_label}. Нужно: {best_san}"
+        else:
+            headline = f"{cls_label}."
+    else:
+        # "forced" / unknown — neutral info tone.
+        headline = f"{cls_label}: {req.move_san}"
+
+    eval_text = (
+        f"{_format_eval_cp_or_mate(req.eval_before_cp)} → "
+        f"{_format_eval_cp_or_mate(req.eval_after_cp)}"
+    )
+    return {
+        "headline": headline,
+        "tone": tone,
+        "best_san": best_san,
+        "eval_text": eval_text,
+        "cp_loss": cp_loss,
+    }
+
+
+def _build_analysis_idea_prompt(
+    req: AnalysisCoachRequest,
+    verdict: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Build a *narrowly scoped* prompt asking the LLM for one sentence.
+
+    Mirror of :func:`_build_coach_idea_prompt` but for the Game Review.
+    The deterministic block (verdict + eval + best move) is rendered by
+    the backend before this LLM call, so we don't need the model to act
+    as a chess engine — we just need a one-line plan/idea written in
+    Russian. Same hard rules apply: no SAN, no concrete squares, no
+    piece names, exactly one sentence.
+    """
+    side_word = "белыми" if req.side == "w" else "чёрными"
+    tone = verdict.get("tone", "info")
+    if tone in ("bad", "warn"):
+        outcome_hint = (
+            "Ход неудачный или неточный. Объясни одной фразой ИДЕЮ правильного хода — "
+            "что он даёт стороне и какой план реализует."
+        )
+    elif tone == "good":
+        outcome_hint = (
+            "Ход хороший. Объясни одной фразой ИДЕЮ за этим ходом — "
+            "что именно он улучшает в позиции."
+        )
+    else:
+        outcome_hint = (
+            "Объясни одной фразой ИДЕЮ за лучшим ходом в позиции — "
+            "что он даёт и какой план реализует."
+        )
 
     system = (
-        "Ты — опытный шахматный тренер уровня chess.com Game Review. "
-        "Объясни ход на русском, коротко (4–7 предложений), но конкретно: "
-        "(1) что именно стало хуже/лучше после хода, (2) какая идея стояла за лучшим ходом, "
-        "(3) если был тактический мотив (вилка, связка, атака на короля и т.п.) — назови его. "
-        "Опирайся на оценку Stockfish и линии, которые тебе дают; не выдумывай ходов. "
-        "Не повторяй заголовок ('Это ошибка...') — пиши сразу по сути."
+        "Ты — шахматный тренер уровня chess.com Game Review. Твоя задача — "
+        "написать РОВНО ОДНО короткое предложение (10–25 слов) на русском "
+        "языке про идею/план в позиции.\n"
+        "\n"
+        "ЖЁСТКИЕ ПРАВИЛА:\n"
+        "1. Ровно одно предложение. Никаких списков, абзацев, markdown, **звёздочек**.\n"
+        "2. ЗАПРЕЩЕНО упоминать конкретные клетки (e4, d5, f7…) и конкретные фигуры "
+        "(пешка, конь, слон, ладья, ферзь, король). Не пиши «слон на b5», «конь d4», "
+        "«пешка e4», «Bb5», «Nxd4». Никаких SAN, никаких координат, никаких фигур.\n"
+        "3. Говори только про общие шахматные идеи: контроль центра, развитие лёгких "
+        "фигур, безопасность короля, давление на ферзевый/королевский фланг, размен, "
+        "пешечное напряжение, открытие линий, игра на двух флангах, инициатива, "
+        "пространство, ослабление, темпы, атака на короля, тактический мотив "
+        "(вилка/связка/двойной удар/открытое нападение/перекрытие).\n"
+        "4. Не оценивай ход цифрами и не ссылайся на Stockfish — это уже сделано "
+        "до тебя. Только идея/план.\n"
+        "5. Никаких преамбул («Идея в том, что…», «Этот ход…»). Сразу по делу.\n"
+        "\n"
+        "Если не понимаешь идею — напиши общую фразу про развитие фигур, активность "
+        "и безопасность короля. Это лучше, чем выдумать поле или фигуру."
     )
-
+    move_no = req.ply // 2 + 1
     user_lines: list[str] = [
-        f"Партия: {players}.",
-        f"Ход {move_no} {'белых' if req.side == 'w' else 'чёрных'}: сыграно {req.move_san}.",
-        f"Классификация Stockfish: {cls_label}.",
-        f"Stockfish 18: {swing}.",
+        f"Ход {move_no} {side_word}.",
+        f"Вердикт от Stockfish (уже выведен пользователю): {verdict['headline']}",
+        f"Оценка: {verdict['eval_text']}.",
     ]
-    if req.best_move_san and req.best_move_san != req.move_san:
-        user_lines.append(f"Лучший ход по движку: {req.best_move_san}.")
-        user_lines.append(f"Главная линия (после лучшего хода): {best_pv}.")
-    else:
-        user_lines.append(f"Главная линия от движка: {best_pv}.")
-    if played_pv:
-        user_lines.append(f"Что движок ожидал после {req.move_san}: {played_pv}.")
     if req.coach_hints:
-        # Local heuristic hints (hanging piece, sacrifice etc.) — a useful
-        # nudge to the LLM about *which motif* it should explain.
-        user_lines.append("Подсказки локального тренера: " + "; ".join(req.coach_hints[:4]))
-    user_lines.append(f"FEN до хода: {req.fen_before}")
+        # Pass tactical motifs as *hints*, but the system prompt forbids
+        # quoting concrete squares/pieces, so the LLM has to paraphrase.
+        user_lines.append(
+            "Подсказки локального тренера (используй как намёк на тактический мотив, "
+            "но не цитируй буквально и не упоминай поля/фигуры): "
+            + "; ".join(req.coach_hints[:4])
+        )
+    user_lines.append(outcome_hint)
     user_lines.append(
-        "Объясни ученику простыми словами, почему ход получил такую оценку, "
-        "и что было правильнее сыграть."
+        "Напиши РОВНО ОДНО короткое предложение про идею. "
+        "Без клеток, без фигур, без SAN, без markdown."
     )
     return [
         {"role": "system", "content": system},
@@ -1436,52 +1554,99 @@ def _build_analysis_coach_prompt(req: AnalysisCoachRequest) -> list[dict[str, st
     ]
 
 
-def _analysis_coach_fallback_text(req: AnalysisCoachRequest) -> str:
-    """Minimal canned explanation when Ollama is offline."""
-    cls_label = ANALYSIS_CLASS_RU.get(req.classification, req.classification)
-    parts: list[str] = [f"{cls_label}."]
-    if req.best_move_san and req.best_move_san != req.move_san:
-        parts.append(
-            f"Сыграно {req.move_san}, лучше было {req.best_move_san}."
-            + (f" Линия: {' '.join(req.best_pv_san[:6])}." if req.best_pv_san else "")
+def _analysis_idea_fallback(req: AnalysisCoachRequest, verdict: dict[str, Any]) -> str:
+    """Conservative one-liner used when Ollama is offline / errors out.
+
+    No bullet phrases (the canned ``coach_hints`` are NOT shown — they
+    use English piece names like ``queen`` and confused the user). We
+    pick a short, generic sentence keyed off the tone.
+    """
+    tone = verdict.get("tone", "info")
+    if tone == "bad":
+        return (
+            "Ход существенно ухудшил позицию — лучший ход сохранял активность "
+            "фигур и не давал сопернику тактических ресурсов."
         )
-    swing = _analysis_eval_swing(req.eval_before_cp, req.eval_after_cp, req.side)
-    parts.append("Stockfish 18: " + swing + ".")
-    if req.coach_hints:
-        parts.append("Подсказки тренера: " + " · ".join(req.coach_hints[:3]) + ".")
-    return " ".join(parts)
+    if tone == "warn":
+        return (
+            "Ход не точный — лучший ход активнее боролся за инициативу и "
+            "безопасность короля."
+        )
+    if tone == "good":
+        return (
+            "Ход поддерживает план: развитие, контроль центра и безопасность "
+            "короля."
+        )
+    return (
+        "Сосредоточься на развитии фигур, контроле центра и безопасности "
+        "короля."
+    )
 
 
 @app.post("/api/analysis/coach")
 async def analysis_coach(req: AnalysisCoachRequest) -> StreamingResponse:
     """Stream AI-coach explanation for a single move in the Game Review.
 
-    Re-uses the analysis data the client already has (eval, best move,
-    PV, classification, canned hints) so we don't re-run Stockfish per
-    click — a single coach request is just one Ollama round-trip.
+    Hybrid architecture (chess.com-style), identical to the Opening
+    Trainer coach:
+
+    1. **Deterministic block** — backend computes the verdict + tone +
+       eval text + best move chip from the data the frontend already
+       had from a previous /api/game/analyse pass. This part can never
+       hallucinate.
+
+    2. **One-sentence idea from the LLM** — Ollama is asked for a
+       single sentence about the *plan* in the position, with strict
+       rules forbidding squares/pieces/SAN. If Ollama is offline or
+       the LLM trips the terminology guard, we fall back to a generic
+       one-liner keyed off the tone.
     """
+    verdict = _compute_analysis_verdict(req)
+
     cfg = ollama_client.OllamaConfig(
         base_url=settings.ollama_base_url,
         model=settings.ollama_model,
         timeout_s=settings.ollama_timeout_s,
-        num_predict=settings.ollama_num_predict,
+        num_predict=140,  # idea is one sentence; cap hard.
     )
-    messages = _build_analysis_coach_prompt(req)
+    idea_messages = _build_analysis_idea_prompt(req, verdict)
 
     async def streamer() -> Any:
+        # 1) Deterministic block — emitted immediately so the user sees
+        # the headline and best move *before* the LLM warms up.
+        yield f"ВЕРДИКТ: {verdict['headline']}\n".encode()
+        yield f"ТОН: {verdict['tone']}\n".encode()
+        yield f"ОЦЕНКА: Stockfish 18: {verdict['eval_text']}\n".encode()
+        if verdict.get("best_san"):
+            yield f"ЛУЧШИЙ ХОД: {verdict['best_san']}\n".encode()
+        yield "\nИДЕЯ: ".encode()
+
+        # 2) LLM idea sentence. Lower temperature + small num_predict
+        # keep the model focused.
         try:
-            async for chunk in ollama_client.stream_chat(cfg, messages):
-                yield chunk.encode("utf-8")
-            return
+            raw = await ollama_client.chat_collect(
+                cfg,
+                idea_messages,
+                extra_options={"temperature": 0.2, "num_predict": 140, "top_p": 0.85},
+            )
         except ollama_client.OllamaUnavailable as exc:
-            logger.info("Ollama unavailable, analysis fallback: %s", exc)
+            logger.info("Ollama unavailable, analysis idea fallback: %s", exc)
+            yield _analysis_idea_fallback(req, verdict).encode("utf-8")
+            return
         except Exception as exc:
             logger.warning("Ollama analysis coach error: %s", exc)
-        yield (
-            "AI-тренер сейчас недоступен (запусти `ollama serve` локально). "
-            "Краткий разбор от встроенного тренера:\n\n"
-        ).encode()
-        yield _analysis_coach_fallback_text(req).encode()
+            yield _analysis_idea_fallback(req, verdict).encode("utf-8")
+            return
+
+        sentence = _scrub_idea_sentence(raw)
+        if not sentence:
+            yield _analysis_idea_fallback(req, verdict).encode("utf-8")
+            return
+        if _idea_has_bad_terminology(sentence):
+            logger.info("Analysis coach idea tripped terminology guard: %r", sentence)
+            yield _analysis_idea_fallback(req, verdict).encode("utf-8")
+            return
+        yield sentence.encode("utf-8")
 
     return StreamingResponse(streamer(), media_type="text/plain; charset=utf-8")
 

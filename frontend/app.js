@@ -4646,8 +4646,8 @@ function _renderAnalysisAiCoachPanel(m) {
     statusBadge = `<span class="opening-ai-badge opening-ai-badge-off">Ollama off</span>`;
     helpText = `
       <div class="opening-ai-help muted">
-        Запусти <code>ollama serve</code> и поставь модель
-        <code>ollama pull llama3.2:3b</code>. Можно сменить через
+        Запусти локально: <code>ollama serve</code> и поставь модель
+        <code>ollama pull qwen2.5:7b</code>. Можно сменить через
         <code>CHESS_OLLAMA_MODEL</code>.
       </div>`;
   }
@@ -4655,28 +4655,51 @@ function _renderAnalysisAiCoachPanel(m) {
     ? `<span class="opening-ai-badge opening-ai-badge-sf">Stockfish 18 on</span>`
     : `<span class="opening-ai-badge opening-ai-badge-sf-off">Stockfish off</span>`;
   // Display priority: streaming buffer → cached text → empty placeholder.
-  let bodyText = "";
-  let isError = false;
-  if (isStreaming) {
-    bodyText = ai.text || "Тренер думает…";
-  } else if (ai.error && ai.activeReqPly === ply) {
-    bodyText = ai.error;
-    isError = true;
-  } else if (cached) {
-    bodyText = cached;
-  } else if (m && m.coach && m.coach.length) {
-    // Local-tactic hints fallback (hanging piece, sacrifice etc.) so the
-    // panel is never empty — the AI button on top still works.
-    bodyText = "💡 " + m.coach.join(" · ");
-  } else {
-    bodyText = worthy
-      ? "Жми «Объяснить от тренера» — ИИ разберёт ход и скажет, что было правильнее."
-      : "Ход неплохой — спроси у тренера, если хочешь подробнее.";
-  }
+  // Hybrid coach output uses the same line-prefixed sections as the
+  // Opening Trainer: ВЕРДИКТ / ТОН / ОЦЕНКА / ЛУЧШИЙ ХОД / ИДЕЯ. We
+  // reuse `_formatCoachText` to parse it and render 3 visual sections
+  // (big bold tone-coloured headline → muted eval row → italic idea).
+  // The previous "💡 m.coach.join(' · ')" placeholder used English
+  // piece names from `chess.piece_name(...)` and confused users — it
+  // is gone. The user clicks the button to get a real verdict.
   const btnDisabled = isStreaming ? "disabled" : "";
   const btnLabel = isStreaming
     ? "Тренер думает…"
     : (cached ? "🧠 Перезапросить" : "🧠 Объяснить от тренера");
+  let textBlock;
+  if (ai.error && ai.activeReqPly === ply) {
+    textBlock = `<div class="opening-ai-text is-error">${escapeHtml(ai.error)}</div>`;
+  } else if (isStreaming || cached) {
+    const raw = isStreaming ? (ai.text || "") : (cached || "");
+    const formatted = _formatCoachText(raw);
+    const tone = _verdictTone(formatted.headline, formatted.tone);
+    const toneCls = tone ? ` opening-ai-verdict-${tone}` : "";
+    const evalLine = (formatted.evalText || formatted.bestSan)
+      ? `<div class="opening-ai-evalrow">${
+          formatted.evalText ? `<span class="opening-ai-eval">${escapeHtml(formatted.evalText)}</span>` : ""
+        }${
+          formatted.bestSan ? `<span class="opening-ai-best">Лучше: <code>${escapeHtml(formatted.bestSan)}</code></span>` : ""
+        }</div>`
+      : "";
+    const ideaLine = formatted.idea
+      ? `<div class="opening-ai-idea">${escapeHtml(formatted.idea)}</div>`
+      : (isStreaming ? `<div class="opening-ai-idea muted">…</div>` : "");
+    if (formatted.headline || formatted.evalText || formatted.idea) {
+      textBlock = `
+        <div class="opening-ai-text">
+          ${formatted.headline ? `<div class="opening-ai-verdict${toneCls}">${escapeHtml(formatted.headline)}</div>` : ""}
+          ${evalLine}
+          ${ideaLine}
+        </div>`;
+    } else {
+      textBlock = `<div class="opening-ai-text muted">${isStreaming ? "Тренер думает…" : ""}</div>`;
+    }
+  } else {
+    const placeholder = worthy
+      ? "Жми «Объяснить от тренера» — Stockfish даст вердикт, ИИ напишет идею одной фразой."
+      : "Ход неплохой — спроси у тренера, если хочешь подробнее.";
+    textBlock = `<div class="opening-ai-text muted">${escapeHtml(placeholder)}</div>`;
+  }
   return `
     <div class="opening-ai-panel review-ai-panel">
       <div class="opening-ai-header">
@@ -4688,7 +4711,7 @@ function _renderAnalysisAiCoachPanel(m) {
         <button id="btn-review-ai-coach" type="button" class="puzzle-secondary" ${btnDisabled}>${btnLabel}</button>
         <button id="btn-review-ai-recheck" type="button" class="puzzle-secondary" title="Переподключиться к Ollama">↻</button>
       </div>
-      <div class="opening-ai-text${isError ? " is-error" : ""}">${escapeHtml(bodyText)}</div>
+      ${textBlock}
       ${helpText}
     </div>
   `;
