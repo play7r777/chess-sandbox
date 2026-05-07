@@ -111,6 +111,15 @@ class Member:
     # Latest FEN we've seen the player at — pushed to spectators every
     # PLAYER_STATE_THROTTLE_SEC so they can render the live board.
     current_fen: str = ""
+    # Whether the player's local board is currently flipped
+    # (black-on-bottom). Spectators mirror this so their mini-board has
+    # the same orientation — otherwise the player solving for black
+    # sees the board one way and watchers see the inverse.
+    flipped: bool = False
+    # "e2e4"-style coords of the player's last applied move so the
+    # spectator can paint a yellow last-move highlight that matches the
+    # main board.
+    last_move: str = ""
     last_solve_ms: int = 0
     disconnected_at: float | None = None
     is_host: bool = False
@@ -233,6 +242,8 @@ class Party:
         return {
             "type": "player_state",
             "client_id": m.client_id,
+            "flipped": bool(m.flipped),
+            "last_move": m.last_move or "",
             "nickname": m.nickname,
             "avatar": m.avatar,
             "score": m.score,
@@ -283,6 +294,9 @@ class Party:
         m.current_puzzle = p
         m.current_started_at = time.time()
         m.current_fen = str(p.get("fen") or "")
+        # Drop the previous puzzle's last-move highlight so spectators
+        # don't keep painting an arrow from the puzzle that just ended.
+        m.last_move = ""
         return p
 
     async def attach(
@@ -442,10 +456,20 @@ class Party:
         s.disconnected_at = time.time()
         await self.broadcast({"type": "lobby", **self.public_state()})
 
-    async def update_position(self, client_id: str, fen: str) -> None:
+    async def update_position(
+        self,
+        client_id: str,
+        fen: str,
+        *,
+        flipped: bool | None = None,
+        last_move: str | None = None,
+    ) -> None:
         """Player reports a mid-puzzle FEN (after a move attempt).
 
         Lets spectators watch the move-by-move solve. Throttled.
+        ``flipped`` and ``last_move`` are passed through so spectators
+        can mirror the player's board orientation and paint the same
+        last-move highlight.
         """
         if self.status != "playing":
             return
@@ -453,6 +477,10 @@ class Party:
         if m is None or m.current_puzzle is None:
             return
         m.current_fen = str(fen or "")
+        if flipped is not None:
+            m.flipped = bool(flipped)
+        if last_move is not None:
+            m.last_move = str(last_move or "")
         await self.broadcast_player_state(m)
 
     async def relay_cursor(

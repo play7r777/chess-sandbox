@@ -708,8 +708,15 @@ async def _party_ws_player(
                     solve_ms=int(msg.get("solve_ms") or 0),
                 )
             elif mtype == "position":
-                # Mid-puzzle FEN update for spectators.
-                await party.update_position(client_id, str(msg.get("fen") or ""))
+                # Mid-puzzle FEN update for spectators. The player also
+                # forwards their current orientation + last applied move
+                # so watchers see the same board the player sees.
+                await party.update_position(
+                    client_id,
+                    str(msg.get("fen") or ""),
+                    flipped=bool(msg.get("flipped")) if "flipped" in msg else None,
+                    last_move=str(msg.get("last_move") or "") if "last_move" in msg else None,
+                )
             elif mtype == "cursor":
                 # Pointer / drag relay for spectators.
                 await party.relay_cursor(

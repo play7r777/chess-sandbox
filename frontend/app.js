@@ -3407,6 +3407,9 @@ function startPuzzle(puzzle) {
   state.lastMove = null;
   renderBoard();
   renderPuzzleUi();
+  // Sync spectators to the new puzzle's pre-setup FEN + flip
+  // immediately so they switch boards in lockstep with the player.
+  _partyReportPosition(puzzle.fen, { lastMove: null });
   // After a brief beat, animate the opponent's setup move (shorter
   // delay = snappier feel, fewer perceived "lag" complaints).
   state.puzzle.nextIdx = 0;
@@ -3449,6 +3452,11 @@ function _playPuzzleSetupMove() {
   state.lastMove = { from: move.from, to: move.to };
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  // Push the post-setup position to spectators so they see the same
+  // board the player sees (with the opponent's setup move already
+  // played and highlighted) — without this they kept staring at the
+  // pre-setup FEN until the player made their first solving move.
+  _partyReportPosition(c.fen(), { lastMove: state.lastMove });
   state.puzzle.nextIdx = 1;
   // Solver clock starts now (after setup move is on the board).
   state.puzzle.startedAt = Date.now();
@@ -4651,7 +4659,7 @@ async function openProfileModal(clientId) {
       <div>${user.parties.slice(-10).reverse().map((p) => `
         <div class="profile-stat" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
           <span><b>#${p.placement}</b> из ${p.participants}</span>
-          <span class="muted">${p.solved} решено · ${p.elo_gained >= 0 ? "+" : ""}${p.elo_gained} эло</span>
+          <span class="muted">${p.solved} решено · ${Number(p.score || 0)} pts</span>
         </div>
       `).join("")}</div>
     </section>` : ""}
@@ -4965,13 +4973,23 @@ function sendPartyAttempt(payload) {
 }
 
 // Broadcast the player's current FEN to spectators (no-op outside a
-// live party). Throttling is handled server-side.
-function _partyReportPosition(fen) {
+// live party). Throttling is handled server-side. We piggy-back the
+// current board orientation and the last applied move so watchers can
+// mirror the player's view exactly (same flip + same yellow last-move
+// highlight).
+function _partyReportPosition(fen, opts) {
   if (!state.party.active || state.party.status !== "playing") return;
   const ws = state.party.ws;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const lm = (opts && opts.lastMove) || state.lastMove;
+  const lastMoveStr = (lm && lm.from && lm.to) ? `${lm.from}${lm.to}` : "";
   try {
-    ws.send(JSON.stringify({ type: "position", fen: String(fen || "") }));
+    ws.send(JSON.stringify({
+      type: "position",
+      fen: String(fen || ""),
+      flipped: !!state.flipped,
+      last_move: lastMoveStr,
+    }));
   } catch (_) { /* already closed */ }
 }
 
@@ -4981,7 +4999,10 @@ function _partyReportPosition(fen) {
 // at most ~30 msgs/sec — small per-player.
 let _cursorLastSendTs = 0;
 let _cursorLastPayload = "";
-const _CURSOR_THROTTLE_MS = 33;
+// 16ms ~= 60 Hz. Doubled from the previous 33ms (~30 Hz) so spectators
+// see smoother pointer motion. Drag start/stop frames bypass the
+// throttle so state changes are never lost.
+const _CURSOR_THROTTLE_MS = 16;
 function _partyReportCursor(payload) {
   if (!state.party.active || state.party.status !== "playing") return;
   const ws = state.party.ws;
@@ -5057,6 +5078,27 @@ function _installPartyCursorTracking() {
   document.addEventListener("dragstart", onDragStart, true);
   document.addEventListener("dragend", onDragEnd, true);
   document.addEventListener("drop", onDragEnd, true);
+  // The browser stops firing `mousemove` while an HTML5 drag is in
+  // progress — pointer position then has to be sampled from the
+  // `drag` event on the source piece, or from `dragover` on the
+  // board (whichever has reliable clientX/clientY in this browser).
+  // We listen to both so the spectator's cursor keeps tracking the
+  // pointer mid-drag instead of freezing in place.
+  document.addEventListener("drag", (ev) => {
+    if (!isPartyActive()) return;
+    if (typeof ev.clientX !== "number" || typeof ev.clientY !== "number") return;
+    if (ev.clientX === 0 && ev.clientY === 0) return; // chromium "ghost" drag-end frame
+    const board = document.querySelector(".board");
+    if (!board) return;
+    onMove(ev);
+  }, { passive: true, capture: true });
+  document.addEventListener("dragover", (ev) => {
+    if (!isPartyActive()) return;
+    const board = document.querySelector(".board");
+    if (!board) return;
+    if (board !== ev.target && !board.contains(ev.target)) return;
+    onMove(ev);
+  }, { passive: true, capture: true });
 }
 _installPartyCursorTracking();
 
@@ -5218,13 +5260,12 @@ function _partyShowResults() {
       <span class="party-name">${escapeHtml(r.nickname || "Гость")}</span>
       <span class="party-score">${Number(r.score || 0)} pts</span>
       <span class="party-solved">✔ ${Number(r.solved || 0)}</span>
-      <span class="party-elo">+${Number(r.party_elo || 0)} elo (party)</span>
     </li>
   `).join("");
   body.innerHTML = `
     <header class="party-header">
       <h2>🏁 Итоги пати</h2>
-      <p class="muted">Результат сохранён в истории профиля каждого участника. На официальный рейтинг это не влияет.</p>
+      <p class="muted">Результат сохранён в истории профиля. Рейтинг за пати не начисляется.</p>
     </header>
     <ol class="party-results">${rows || `<li class="party-empty">Никто ничего не решил.</li>`}</ol>
     <div class="party-actions">
@@ -5782,18 +5823,41 @@ function _renderMiniBoardFromFen(fen, player) {
   const themeKey = (player && player.theme) || userSettings.theme;
   const themeStyle = _miniBoardThemeStyle(themeKey);
   const cid = (player && player.client_id) || "";
+  // Mirror the player's own orientation so the watcher sees the exact
+  // same board the player is staring at. Without this, a player
+  // solving for black would have their board flipped while spectators
+  // would still see white-on-bottom — left/right and top/bottom
+  // would be inverted between them.
+  const flipped = !!(player && player.flipped);
   // Cursor / selection overlay sourced from `player_state` cursor
-  // updates relayed by the server.
+  // updates relayed by the server. The player normalizes their
+  // cursor to white-on-bottom coords before sending; if the spectator
+  // is rendering flipped we re-mirror so the dot lands on the same
+  // visual square the player is hovering.
   const cursor = (player && state.spectator && state.spectator.cursors)
     ? state.spectator.cursors[cid]
     : null;
   let overlayHtml = "";
   if (cursor && typeof cursor.x === "number" && typeof cursor.y === "number") {
-    const x = Math.max(0, Math.min(1, cursor.x)) * 100;
-    const y = Math.max(0, Math.min(1, cursor.y)) * 100;
+    const cx = flipped ? 1 - cursor.x : cursor.x;
+    const cy = flipped ? 1 - cursor.y : cursor.y;
+    const x = Math.max(0, Math.min(1, cx)) * 100;
+    const y = Math.max(0, Math.min(1, cy)) * 100;
     const cls = cursor.dragging ? "mb-cursor is-drag" : "mb-cursor";
     overlayHtml += `<div class="${cls}" style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%;"></div>`;
   }
+  // Helper: convert algebraic ("e4") to row/col indices in the
+  // currently rendered orientation. Pure white-on-bottom: file 'a'
+  // is column 0, rank 8 is row 0. Flipped: invert both.
+  const sqToRC = (sq) => {
+    if (!sq || sq.length !== 2) return null;
+    const file = sq.charCodeAt(0) - "a".charCodeAt(0);
+    const rank = parseInt(sq[1], 10);
+    if (file < 0 || file > 7 || rank < 1 || rank > 8) return null;
+    const r = flipped ? rank - 1 : 8 - rank;
+    const f = flipped ? 7 - file : file;
+    return { r, f };
+  };
   if (!fen || typeof fen !== "string") {
     return `<div class="${themeStyle.cls}" style="${themeStyle.style}">
       <div class="mb-ranks"></div>
@@ -5802,21 +5866,18 @@ function _renderMiniBoardFromFen(fen, player) {
       <div class="mb-files"></div>
     </div>`;
   }
-  const rows = fen.split(" ")[0].split("/");
-  if (rows.length !== 8) return `<div class="${themeStyle.cls}" style="${themeStyle.style}"></div>`;
-  // Selected square overlay (player highlighted a square they're
-  // thinking about). 'a8' is top-left for white-at-bottom view.
-  let selectedRC = null;
-  if (cursor && cursor.selected && cursor.selected.length === 2) {
-    const file = cursor.selected.charCodeAt(0) - "a".charCodeAt(0);
-    const rank = parseInt(cursor.selected[1], 10);
-    if (file >= 0 && file < 8 && rank >= 1 && rank <= 8) {
-      selectedRC = { f: file, r: 8 - rank };
-    }
-  }
+  const rawRows = fen.split(" ")[0].split("/");
+  if (rawRows.length !== 8) return `<div class="${themeStyle.cls}" style="${themeStyle.style}"></div>`;
+  const selectedRC = (cursor && cursor.selected) ? sqToRC(cursor.selected) : null;
+  // Last applied move (e.g. "e2e4") sent in `player_state`.
+  const lm = (player && typeof player.last_move === "string") ? player.last_move : "";
+  const lmFromRC = lm.length >= 4 ? sqToRC(lm.slice(0, 2)) : null;
+  const lmToRC = lm.length >= 4 ? sqToRC(lm.slice(2, 4)) : null;
   const cells = [];
   for (let r = 0; r < 8; r++) {
-    const row = rows[r];
+    // Source row in the FEN — flipped boards walk the FEN bottom-up.
+    const fenRowIdx = flipped ? 7 - r : r;
+    const row = rawRows[fenRowIdx];
     const expanded = [];
     for (const ch of row) {
       if (/\d/.test(ch)) {
@@ -5829,20 +5890,28 @@ function _renderMiniBoardFromFen(fen, player) {
       return `<div class="${themeStyle.cls}" style="${themeStyle.style}"></div>`;
     }
     for (let f = 0; f < 8; f++) {
-      const isLight = (r + f) % 2 === 0;
-      const piece = expanded[f];
+      const fenColIdx = flipped ? 7 - f : f;
+      const isLight = (fenRowIdx + fenColIdx) % 2 === 0;
+      const piece = expanded[fenColIdx];
       const pieceHtml = piece
         ? `<img class="mb-piece" src="${pieceSvgUrl(piece, pieceSet)}" alt="${piece}" draggable="false">`
         : "";
       const isSelected = selectedRC && selectedRC.r === r && selectedRC.f === f;
-      const cls = `mb-square ${isLight ? "mb-light" : "mb-dark"}${isSelected ? " mb-selected" : ""}`;
+      const isLm = (lmFromRC && lmFromRC.r === r && lmFromRC.f === f)
+        || (lmToRC && lmToRC.r === r && lmToRC.f === f);
+      const extra = `${isSelected ? " mb-selected" : ""}${isLm ? " mb-lastmove" : ""}`;
+      const cls = `mb-square ${isLight ? "mb-light" : "mb-dark"}${extra}`;
       cells.push(`<div class="${cls}">${pieceHtml}</div>`);
     }
   }
-  const ranks = ["8", "7", "6", "5", "4", "3", "2", "1"]
-    .map((r) => `<span>${r}</span>`).join("");
-  const files = ["a", "b", "c", "d", "e", "f", "g", "h"]
-    .map((f) => `<span>${f}</span>`).join("");
+  const rankOrder = flipped
+    ? ["1", "2", "3", "4", "5", "6", "7", "8"]
+    : ["8", "7", "6", "5", "4", "3", "2", "1"];
+  const fileOrder = flipped
+    ? ["h", "g", "f", "e", "d", "c", "b", "a"]
+    : ["a", "b", "c", "d", "e", "f", "g", "h"];
+  const ranks = rankOrder.map((r) => `<span>${r}</span>`).join("");
+  const files = fileOrder.map((f) => `<span>${f}</span>`).join("");
   return `
     <div class="${themeStyle.cls}" style="${themeStyle.style}">
       <div class="mb-ranks">${ranks}</div>

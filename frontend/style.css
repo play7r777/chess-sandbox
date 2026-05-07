@@ -2273,6 +2273,16 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 235, 90, 0.45);
   pointer-events: none;
 }
+/* Last-move highlight — same yellow tint the main board uses,
+   painted on the from + to squares so spectators see the same hint
+   the player sees for the move that was just played. */
+.mini-board .mb-square.mb-lastmove::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 220, 80, 0.42);
+  pointer-events: none;
+}
 /* Live cursor dot — anchored to the .mini-board grid via percentage
    coords sent by the player. Hidden when out-of-bounds. */
 .mini-board .mb-cursor {
