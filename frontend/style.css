@@ -2038,6 +2038,223 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .party-solved { color: #6cf2a6; font-weight: 700; font-variant-numeric: tabular-nums; }
 .party-elo { color: #ffd75e; font-weight: 700; font-size: 12px; text-align: right; }
 
+/* Lobby: host-picked match length (2/3/5/10 min). */
+.party-duration-section {
+  margin: 14px 0 6px;
+  padding: 12px;
+  background: #1a2538;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+}
+.party-duration-label {
+  color: #c0cce0;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.party-duration-options {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.party-duration-opt {
+  flex: 1 1 0;
+  min-width: 84px;
+  padding: 10px 12px;
+  background: #0f1521;
+  border: 1px solid #2a3550;
+  border-radius: 10px;
+  color: #c0cce0;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.12s;
+}
+.party-duration-opt:hover:not(:disabled) {
+  border-color: #6da7ff;
+  color: #e7eef9;
+}
+.party-duration-opt.is-active {
+  background: linear-gradient(180deg, #1f3a64, #182748);
+  border-color: #6da7ff;
+  color: #ffd75e;
+  box-shadow: 0 4px 14px rgba(109, 167, 255, 0.18);
+}
+.party-duration-opt:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+/* Detailed end-of-match results. */
+.party-card.party-card-results { width: min(960px, 96vw); }
+.party-results-card {
+  margin: 12px 0;
+  padding: 14px;
+  background: #131c2c;
+  border: 1px solid #2c3950;
+  border-radius: 12px;
+}
+.party-results-meta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #c0cce0;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #2c3950;
+}
+.party-results-meta strong { color: #e7eef9; }
+.party-results-tablewrap { overflow-x: auto; }
+.party-results-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: #e7eef9;
+}
+.party-results-table thead th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #94a4be;
+  font-weight: 700;
+  border-bottom: 1px solid #2c3950;
+}
+.party-results-table tbody td {
+  padding: 9px 10px;
+  border-bottom: 1px solid #1f2a3d;
+}
+.party-results-table tbody tr:last-child td { border-bottom: none; }
+.party-results-table tbody tr:hover { background: rgba(109, 167, 255, 0.06); }
+.party-results-row.is-self { background: rgba(109, 167, 255, 0.16); }
+.party-results-row.is-self td:first-child { border-left: 3px solid #6da7ff; padding-left: 7px; }
+.party-results-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.party-results-num.ok { color: #6cf2a6; }
+.party-results-num.bad { color: #ffb1bf; }
+.party-results-num.warn { color: #ffd75e; }
+.party-results-num.muted { color: #94a4be; font-size: 12px; }
+.party-results-player { display: flex; align-items: center; gap: 8px; }
+.party-results-attempts { margin-top: 14px; }
+.party-results-attempts > summary {
+  cursor: pointer;
+  color: #c0cce0;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 6px 0;
+  list-style: revert;
+}
+.party-results-attempts > summary:hover { color: #e7eef9; }
+.party-results-attempts-table tbody td { padding: 6px 8px; font-size: 12px; }
+.party-results-attempt-id {
+  background: #0f1521;
+  border: 1px solid #2a3550;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font: 600 12px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #c0cce0;
+}
+.party-actions-results {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.party-actions-results > button { flex: 0 1 auto; }
+.party-actions-results .puzzle-primary { margin-left: auto; }
+
+/* Profile: clickable battle history row. */
+.profile-parties-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.profile-party-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 48px minmax(120px, 1fr) minmax(180px, 1.2fr) 80px 90px 16px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  background: #1a2538;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+  color: #e7eef9;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.12s;
+}
+.profile-party-row:hover:not(:disabled) {
+  background: #1f2c44;
+  border-color: #3a5188;
+}
+.profile-party-row:active:not(:disabled) { transform: scale(0.998); }
+.profile-party-row:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.profile-party-row .pp-rank {
+  font: 800 16px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #94a4be;
+}
+.profile-party-row .pp-rank.ok { color: #6cf2a6; }
+.profile-party-row .pp-rank.warn { color: #ffd75e; }
+.profile-party-row .pp-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.profile-party-row .pp-date { font-size: 13px; color: #c0cce0; }
+.profile-party-row .pp-duration { font-size: 12px; }
+.profile-party-row .pp-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  color: #c0cce0;
+}
+.profile-party-row .pp-stats .ok { color: #6cf2a6; }
+.profile-party-row .pp-stats .bad { color: #ffb1bf; }
+.profile-party-row .pp-stats .warn { color: #ffd75e; }
+.profile-party-row .pp-score {
+  font: 800 14px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #6da7ff;
+  text-align: right;
+}
+.profile-party-row .pp-elo {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffd75e;
+  text-align: right;
+}
+.profile-party-row .pp-chevron {
+  font-size: 18px;
+  font-weight: 700;
+  color: #6da7ff;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .party-card.party-card-results { width: 96vw; padding: 14px; }
+  .party-results-meta { font-size: 12px; gap: 10px; }
+  .party-results-table { font-size: 12px; }
+  .party-results-table thead th, .party-results-table tbody td { padding: 6px 8px; }
+  .profile-party-row {
+    grid-template-columns: 40px 1fr 80px 14px;
+    grid-template-areas:
+      "rank meta score chev"
+      "stats stats elo elo";
+    row-gap: 4px;
+  }
+  .profile-party-row .pp-rank { grid-area: rank; }
+  .profile-party-row .pp-meta { grid-area: meta; }
+  .profile-party-row .pp-stats { grid-area: stats; }
+  .profile-party-row .pp-score { grid-area: score; }
+  .profile-party-row .pp-elo { grid-area: elo; }
+  .profile-party-row .pp-chevron { grid-area: chev; }
+}
+
 /* Party HUD that lives next to the board during a match. */
 .party-side-panel {
   position: fixed;

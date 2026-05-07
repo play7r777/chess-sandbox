@@ -350,11 +350,18 @@ const state = {
     host_id: null,
     status: "lobby",     // lobby | playing | finished
     endsAt: 0,
+    startedAt: 0,
     members: [],
     scoreboard: [],
     finalResults: null,
+    finalMeta: null,     // { duration_sec, started_at, ended_at, party_id }
     selfScore: 0,
     countdownInterval: null,
+    // Host-picked match length (sec). Default 600 (= 10 min). Sent
+    // with the WS "start" frame; the server validates against an
+    // allow-list before honouring it.
+    durationSec: 600,
+    allowedDurations: [120, 180, 300, 600],
   },
   // Spectator session (view-only, separate from `party`).
   spectator: {
@@ -5006,12 +5013,33 @@ async function openProfileModal(clientId) {
     ${Array.isArray(user.parties) && user.parties.length ? `
     <section class="profile-section">
       <h4>История пати-матчей</h4>
-      <div>${user.parties.slice(-10).reverse().map((p) => `
-        <div class="profile-stat" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-          <span><b>#${p.placement}</b> из ${p.participants}</span>
-          <span class="muted">${p.solved} решено · ${Number(p.score || 0)} pts</span>
-        </div>
-      `).join("")}</div>
+      <div class="profile-parties-list" id="profile-parties-list">${user.parties.slice(-20).reverse().map((p, idx) => {
+        const date = p.ts ? new Date(Number(p.ts) * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+        const dur = _formatPartyDuration(p.duration_sec || 0);
+        const winrate = Number(p.winrate || 0);
+        const elo = Number(p.elo_gained || 0);
+        const eloLabel = elo > 0 ? `+${elo}` : `${elo}`;
+        const place = Number(p.placement || 0);
+        const placeCls = place === 1 ? "ok" : (place === 2 ? "warn" : "");
+        const isSelfRow = isSelf;
+        return `
+          <button type="button" class="profile-party-row" data-idx="${idx}" ${isSelfRow ? "" : "disabled"} title="${isSelfRow ? "Открыть подробный результат" : "История доступна только владельцу профиля"}">
+            <span class="pp-rank ${placeCls}">#${place}</span>
+            <span class="pp-meta">
+              <span class="pp-date">${escapeHtml(date)}</span>
+              <span class="pp-duration muted">${escapeHtml(dur || "—")}</span>
+            </span>
+            <span class="pp-stats">
+              <span class="ok">✔ ${Number(p.solved || 0)}</span>
+              <span class="bad">✘ ${Number(p.failed || 0)}</span>
+              <span class="warn">↷ ${Number(p.skipped || 0)}</span>
+              <span>${winrate.toFixed(1)}%</span>
+            </span>
+            <span class="pp-score">${Number(p.score || 0)} pts</span>
+            <span class="pp-elo">${eloLabel} Эло</span>
+            <span class="pp-chevron muted">${isSelfRow ? "›" : ""}</span>
+          </button>`;
+      }).join("")}</div>
     </section>` : ""}
   `;
   const eloHost = document.getElementById("elo-graph-host");
@@ -5028,6 +5056,24 @@ async function openProfileModal(clientId) {
     modal.hidden = true;
     showOnboarding();
   });
+  // Wire each party history row to its persisted detail modal. We
+  // index against the original `parties` array (newest-first display)
+  // so the click target reliably maps back to the saved record.
+  if (isSelf) {
+    const partiesAsc = Array.isArray(user.parties) ? user.parties : [];
+    const partiesDesc = partiesAsc.slice(-20).reverse();
+    document.querySelectorAll("#profile-parties-list .profile-party-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const idx = Number(row.dataset.idx);
+        const entry = partiesDesc[idx];
+        if (!entry) return;
+        // Hide profile modal so the party detail modal pops on top
+        // cleanly; user can re-open profile via the avatar button.
+        modal.hidden = true;
+        openPartyResultDetail(entry);
+      });
+    });
+  }
 }
 
 async function openLeaderboardModal() {
@@ -5355,8 +5401,13 @@ function partyConnect(code) {
   state.party.active = true;
   state.party.status = "lobby";
   state.party.finalResults = null;
+  state.party.finalMeta = null;
   state.party.scoreboard = [];
   state.party.members = [];
+  // Reset host-picked duration to 10 min default — the lobby selector
+  // will overwrite it as soon as the host clicks a different option.
+  state.party.durationSec = 600;
+  state.party.allowedDurations = [120, 180, 300, 600];
   const ws = new WebSocket(_partyWsUrl(code));
   state.party.ws = ws;
   ws.onmessage = (ev) => {
@@ -5385,12 +5436,26 @@ function handlePartyMessage(msg) {
       state.party.host_id = msg.host_id;
       state.party.status = msg.status;
       state.party.endsAt = msg.ends_at || 0;
+      state.party.startedAt = msg.started_at || 0;
+      // Mirror server-supplied lobby duration so non-host clients see
+      // the same selection the host picked, and so the host's UI
+      // matches the server-side authoritative value after a reconnect.
+      if (Number.isFinite(msg.duration_sec) && msg.duration_sec > 0) {
+        state.party.durationSec = Math.floor(msg.duration_sec);
+      }
+      if (Array.isArray(msg.allowed_durations_sec) && msg.allowed_durations_sec.length) {
+        state.party.allowedDurations = msg.allowed_durations_sec.map((n) => Math.floor(Number(n) || 0)).filter((n) => n > 0);
+      }
       state.party.members = Array.isArray(msg.members) ? msg.members : [];
       if (state.party.status === "lobby") renderPartyLobby();
       break;
     case "start":
       state.party.status = "playing";
       state.party.endsAt = msg.ends_at || 0;
+      state.party.startedAt = msg.started_at || 0;
+      if (Number.isFinite(msg.duration_sec) && msg.duration_sec > 0) {
+        state.party.durationSec = Math.floor(msg.duration_sec);
+      }
       state.party.selfScore = 0;
       closePartyModal();
       setView("puzzle");
@@ -5400,6 +5465,10 @@ function handlePartyMessage(msg) {
       break;
     case "match_state":
       state.party.endsAt = msg.ends_at || state.party.endsAt;
+      state.party.startedAt = msg.started_at || state.party.startedAt;
+      if (Number.isFinite(msg.duration_sec) && msg.duration_sec > 0) {
+        state.party.durationSec = Math.floor(msg.duration_sec);
+      }
       if (Array.isArray(msg.scoreboard)) state.party.scoreboard = msg.scoreboard;
       _partyMountSidePanel();
       _partyStartCountdown();
@@ -5416,6 +5485,12 @@ function handlePartyMessage(msg) {
     case "finish":
       state.party.status = "finished";
       state.party.finalResults = Array.isArray(msg.results) ? msg.results : [];
+      state.party.finalMeta = {
+        duration_sec: Number(msg.duration_sec) || state.party.durationSec || 0,
+        started_at: Number(msg.started_at) || state.party.startedAt || 0,
+        ended_at: Number(msg.ended_at) || Math.floor(Date.now() / 1000),
+        party_id: msg.party_id || state.party.party_id || "",
+      };
       state.party.active = false;
       if (state.party.countdownInterval) {
         clearInterval(state.party.countdownInterval);
@@ -5780,6 +5855,11 @@ function _installPartyCursorTracking() {
 }
 _installPartyCursorTracking();
 
+function _partyDurationLabel(sec) {
+  const n = Math.max(1, Math.round((Number(sec) || 0) / 60));
+  return `${n} мин`;
+}
+
 function renderPartyLobby() {
   const body = _partyEnsureModal();
   if (!body) return;
@@ -5793,15 +5873,30 @@ function renderPartyLobby() {
       ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
     </li>
   `).join("");
+  const allowed = (m.allowedDurations && m.allowedDurations.length)
+    ? m.allowedDurations
+    : [120, 180, 300, 600];
+  // The selector is the host's only way to set match length; non-hosts
+  // see the same value read-only so everyone agrees on what's about to
+  // happen before the start button gets pressed.
+  const durationButtons = allowed.map((sec) => {
+    const isActive = Number(m.durationSec) === Number(sec);
+    return `<button type="button" class="party-duration-opt ${isActive ? "is-active" : ""}" data-sec="${sec}" ${isHost ? "" : "disabled"}>${_partyDurationLabel(sec)}</button>`;
+  }).join("");
+  const startLabel = `Начать матч (${_partyDurationLabel(m.durationSec || 600)})`;
   body.innerHTML = `
     <header class="party-header">
       <h2>🎉 Party — лобби</h2>
       <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code></p>
     </header>
     <ul class="party-members">${memberRows || `<li class="party-empty">Пока никого…</li>`}</ul>
+    <section class="party-duration-section">
+      <div class="party-duration-label">Длительность матча${isHost ? "" : " <span class=\"muted\">(выбирает хост)</span>"}</div>
+      <div class="party-duration-options" role="radiogroup" aria-label="Длительность матча">${durationButtons}</div>
+    </section>
     <div class="party-actions">
       ${isHost
-        ? `<button id="btn-party-start" type="button" class="puzzle-primary">Начать матч (10 мин)</button>`
+        ? `<button id="btn-party-start" type="button" class="puzzle-primary">${escapeHtml(startLabel)}</button>`
         : `<div class="muted">Ждём, пока хост запустит матч…</div>`}
       <button id="btn-party-leave" type="button" class="puzzle-ghost">Выйти</button>
     </div>
@@ -5810,6 +5905,16 @@ function renderPartyLobby() {
   body.querySelector("#btn-party-leave")?.addEventListener("click", () => {
     leaveParty();
   });
+  if (isHost) {
+    body.querySelectorAll(".party-duration-opt").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const sec = Number(btn.dataset.sec) || 0;
+        if (!sec || !allowed.includes(sec)) return;
+        state.party.durationSec = sec;
+        renderPartyLobby();
+      });
+    });
+  }
   body.querySelector("#btn-party-start")?.addEventListener("click", (ev) => {
     const btn = ev.currentTarget;
     // Hard guard against the user clicking 'Start' multiple times
@@ -5822,10 +5927,13 @@ function renderPartyLobby() {
     btn.textContent = "Запускаем матч…";
     const ws = state.party.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "start" }));
+      ws.send(JSON.stringify({
+        type: "start",
+        duration_sec: Number(state.party.durationSec) || 600,
+      }));
     } else {
       btn.disabled = false;
-      btn.textContent = "Начать матч (10 мин)";
+      btn.textContent = startLabel;
     }
   });
 }
@@ -5929,36 +6037,401 @@ function _partyRenderScoreboard() {
   host.querySelector("#btn-party-leave-side")?.addEventListener("click", leaveParty);
 }
 
+function _formatPartyDuration(sec) {
+  const total = Math.max(0, Math.round(Number(sec) || 0));
+  const mm = Math.floor(total / 60);
+  const ss = total % 60;
+  if (mm <= 0 && ss <= 0) return "—";
+  if (ss === 0) return `${mm} мин`;
+  return `${mm}:${String(ss).padStart(2, "0")}`;
+}
+
+function _formatSolveMs(ms) {
+  const v = Math.max(0, Math.round(Number(ms) || 0));
+  if (!v) return "—";
+  if (v < 1000) return `${v} мс`;
+  const sec = v / 1000;
+  if (sec < 10) return `${sec.toFixed(1)} с`;
+  return `${Math.round(sec)} с`;
+}
+
+// Build the detailed end-of-match scoreboard markup. The same renderer
+// is reused by the live "Итоги пати" modal *and* by the per-battle
+// detail modal opened from the profile, so the two views can never
+// drift out of sync.
+function _renderPartyResultsHTML(results, meta, opts) {
+  const { highlightId = null, includeAttempts = false, attempts = null } = opts || {};
+  const list = Array.isArray(results) ? results : [];
+  const durationLabel = _formatPartyDuration(meta && meta.duration_sec);
+  const startedAt = meta && (meta.ended_at || meta.started_at);
+  const dateLabel = startedAt
+    ? new Date(Number(startedAt) * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
+  const totals = list.reduce((acc, r) => {
+    acc.solved += Number(r.solved || 0);
+    acc.failed += Number(r.failed || 0);
+    acc.skipped += Number(r.skipped || 0);
+    return acc;
+  }, { solved: 0, failed: 0, skipped: 0 });
+  const totalAttempts = totals.solved + totals.failed + totals.skipped;
+  const lobbyWin = totalAttempts ? (totals.solved / totalAttempts * 100) : 0;
+  const headerMeta = `
+    <div class="party-results-meta">
+      <span><strong>${escapeHtml(durationLabel)}</strong> · длительность</span>
+      <span><strong>${list.length}</strong> игроков</span>
+      <span><strong>${totals.solved}</strong> решено / <strong>${totalAttempts}</strong> попыток</span>
+      <span>Винрейт лобби: <strong>${lobbyWin.toFixed(1)}%</strong></span>
+      ${dateLabel ? `<span class="muted">${escapeHtml(dateLabel)}</span>` : ""}
+    </div>`;
+  const tableRows = list.map((r) => {
+    const isSelf = highlightId && r.client_id === highlightId;
+    const winrate = Number(r.winrate || 0);
+    const elo = Number(r.party_elo || 0);
+    const eloLabel = elo > 0 ? `+${elo}` : `${elo}`;
+    const avg = _formatSolveMs(r.avg_solve_ms);
+    const best = _formatSolveMs(r.best_solve_ms);
+    return `
+      <tr class="party-results-row ${isSelf ? "is-self" : ""}">
+        <td class="party-rank">#${Number(r.rank || 0)}</td>
+        <td class="party-results-player">
+          <span class="party-avatar">${escapeHtml(r.avatar || "♟")}</span>
+          <span class="party-name">${escapeHtml(r.nickname || "Гость")}${isSelf ? " <span class=\"muted\" style=\"font-size:11px;\">(вы)</span>" : ""}</span>
+        </td>
+        <td class="party-results-num party-score">${Number(r.score || 0)}</td>
+        <td class="party-results-num ok">${Number(r.solved || 0)}</td>
+        <td class="party-results-num bad">${Number(r.failed || 0)}</td>
+        <td class="party-results-num warn">${Number(r.skipped || 0)}</td>
+        <td class="party-results-num">${winrate.toFixed(1)}%</td>
+        <td class="party-results-num warn">🔥 ${Number(r.best_streak || 0)}</td>
+        <td class="party-results-num muted">${avg} / ${best}</td>
+        <td class="party-results-num party-elo">${eloLabel}</td>
+      </tr>`;
+  }).join("");
+  const tableHtml = `
+    <div class="party-results-tablewrap">
+      <table class="party-results-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Игрок</th>
+            <th>Очки</th>
+            <th>✔</th>
+            <th>✘</th>
+            <th>↷</th>
+            <th>Винрейт</th>
+            <th>Серия</th>
+            <th>Среднее / лучшее</th>
+            <th>Эло</th>
+          </tr>
+        </thead>
+        <tbody>${tableRows || `<tr><td colspan="10" class="party-empty">Никто ничего не решил.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+  let attemptsHtml = "";
+  if (includeAttempts && Array.isArray(attempts) && attempts.length) {
+    const attemptRows = attempts.slice(-50).reverse().map((a, idx) => {
+      const outcome = String(a.outcome || "skipped");
+      const cls = outcome === "solved" ? "ok" : (outcome === "failed" ? "bad" : "warn");
+      const sym = outcome === "solved" ? "✔" : (outcome === "failed" ? "✘" : "↷");
+      const themes = Array.isArray(a.themes) ? a.themes.slice(0, 3).join(" · ") : "";
+      const score = Number(a.score || 0);
+      return `
+        <tr>
+          <td class="party-results-num muted">${attempts.length - idx}</td>
+          <td><span class="party-results-attempt-id">#${escapeHtml(String(a.puzzle_id || ""))}</span></td>
+          <td class="party-results-num">${Number(a.rating || 0)}</td>
+          <td class="party-results-num ${cls}">${sym}</td>
+          <td class="party-results-num">${_formatSolveMs(a.solve_ms)}</td>
+          <td class="party-results-num">${score > 0 ? `+${score}` : score}</td>
+          <td class="muted">${escapeHtml(themes)}</td>
+        </tr>`;
+    }).join("");
+    attemptsHtml = `
+      <details class="party-results-attempts" open>
+        <summary>Ваши попытки (${attempts.length})</summary>
+        <div class="party-results-tablewrap">
+          <table class="party-results-table party-results-attempts-table">
+            <thead>
+              <tr>
+                <th>#</th><th>Пазл</th><th>Эло</th><th>Итог</th><th>Время</th><th>Очки</th><th>Темы</th>
+              </tr>
+            </thead>
+            <tbody>${attemptRows}</tbody>
+          </table>
+        </div>
+      </details>`;
+  }
+  return `${headerMeta}${tableHtml}${attemptsHtml}`;
+}
+
+// Render the results card to a PNG via canvas, then trigger a
+// download. We draw text manually instead of leaning on a third-party
+// html-to-image lib to keep the frontend dependency-free.
+async function _partySaveResultsAsImage(results, meta, fileName) {
+  const list = Array.isArray(results) ? results : [];
+  const W = 1100;
+  const headerH = 130;
+  const rowH = 56;
+  const footerH = 80;
+  const tableTop = headerH + 60;
+  const H = headerH + 60 + Math.max(rowH * (list.length + 1), rowH) + footerH;
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return false;
+  // Background.
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#1f2a3a");
+  grad.addColorStop(1, "#161e2c");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  // Border.
+  ctx.strokeStyle = "#2c3950";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, W - 2, H - 2);
+  // Header.
+  ctx.fillStyle = "#e7eef9";
+  ctx.font = "bold 36px system-ui, sans-serif";
+  ctx.fillText("🏁 Итоги пати", 32, 56);
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.fillStyle = "#94a4be";
+  const durationLabel = _formatPartyDuration(meta && meta.duration_sec);
+  const startedAt = meta && (meta.ended_at || meta.started_at);
+  const dateLabel = startedAt
+    ? new Date(Number(startedAt) * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
+  ctx.fillText(`Длительность: ${durationLabel}   ·   Игроков: ${list.length}${dateLabel ? `   ·   ${dateLabel}` : ""}`, 32, 90);
+  // Table headers.
+  const cols = [
+    { x: 32,  w: 60,  label: "#",       align: "left" },
+    { x: 100, w: 320, label: "Игрок",   align: "left" },
+    { x: 430, w: 90,  label: "Очки",    align: "right" },
+    { x: 530, w: 60,  label: "✔",        align: "right" },
+    { x: 600, w: 60,  label: "✘",        align: "right" },
+    { x: 670, w: 60,  label: "↷",        align: "right" },
+    { x: 740, w: 100, label: "Винрейт", align: "right" },
+    { x: 850, w: 90,  label: "Серия",   align: "right" },
+    { x: 950, w: 120, label: "Эло",     align: "right" },
+  ];
+  ctx.fillStyle = "#94a4be";
+  ctx.font = "bold 14px system-ui, sans-serif";
+  for (const c of cols) {
+    ctx.textAlign = c.align;
+    const tx = c.align === "right" ? c.x + c.w : c.x;
+    ctx.fillText(c.label, tx, tableTop - 14);
+  }
+  // Rows.
+  ctx.font = "16px system-ui, sans-serif";
+  list.forEach((r, idx) => {
+    const y = tableTop + idx * rowH;
+    if (idx % 2 === 0) {
+      ctx.fillStyle = "rgba(26, 37, 56, 0.55)";
+      ctx.fillRect(24, y - 4, W - 48, rowH);
+    }
+    const winrate = Number(r.winrate || 0);
+    const elo = Number(r.party_elo || 0);
+    const eloLabel = elo > 0 ? `+${elo}` : `${elo}`;
+    const cellY = y + 28;
+    const draws = [
+      { c: cols[0], v: `#${Number(r.rank || 0)}`,                  color: "#94a4be" },
+      { c: cols[1], v: `${(r.avatar || "♟")}  ${(r.nickname || "Гость")}`, color: "#e7eef9" },
+      { c: cols[2], v: `${Number(r.score || 0)}`,                  color: "#6da7ff" },
+      { c: cols[3], v: `${Number(r.solved || 0)}`,                 color: "#6cf2a6" },
+      { c: cols[4], v: `${Number(r.failed || 0)}`,                 color: "#ffb1bf" },
+      { c: cols[5], v: `${Number(r.skipped || 0)}`,                color: "#ffd75e" },
+      { c: cols[6], v: `${winrate.toFixed(1)}%`,                   color: "#e7eef9" },
+      { c: cols[7], v: `🔥 ${Number(r.best_streak || 0)}`,          color: "#ffd75e" },
+      { c: cols[8], v: eloLabel,                                   color: "#ffd75e" },
+    ];
+    for (const d of draws) {
+      ctx.fillStyle = d.color;
+      ctx.textAlign = d.c.align;
+      const tx = d.c.align === "right" ? d.c.x + d.c.w : d.c.x;
+      ctx.fillText(d.v, tx, cellY);
+    }
+  });
+  // Footer.
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#6da7ff";
+  ctx.font = "italic 13px system-ui, sans-serif";
+  ctx.fillText("chess-sandbox · party puzzles", 32, H - 24);
+  // Trigger download.
+  const blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/png"));
+  if (!blob) return false;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName || `party-${meta && meta.party_id ? meta.party_id : Date.now()}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  // Best-effort native share (mobile etc) so the same button drops an
+  // image into Telegram / Photos / etc when supported.
+  try {
+    const file = new File([blob], a.download, { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: "Итоги пати", text: "Мой результат в puzzle-party 🏆" });
+    }
+  } catch (_) { /* user cancelled / unsupported */ }
+  return true;
+}
+
+function _partyShareToTelegram(results, meta) {
+  const list = Array.isArray(results) ? results : [];
+  const lines = list.slice(0, 10).map((r) => {
+    const winrate = Number(r.winrate || 0).toFixed(1);
+    return `#${r.rank} ${r.avatar || "♟"} ${r.nickname || "Гость"} — ${Number(r.score || 0)} pts (${Number(r.solved || 0)} ✔ / ${winrate}%)`;
+  });
+  const durationLabel = _formatPartyDuration(meta && meta.duration_sec);
+  const text = [
+    `🏁 Итоги пати (${durationLabel})`,
+    ...lines,
+    "chess-sandbox",
+  ].join("\n");
+  const url = location.origin || "https://chess-sandbox.app";
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`;
+  // Try the Web Share API first (works inside Telegram WebView and on
+  // most mobile browsers); fall back to the t.me share URL.
+  if (navigator.share) {
+    navigator.share({ title: "Итоги пати", text, url }).catch(() => {
+      window.open(shareUrl, "_blank", "noopener");
+    });
+  } else {
+    window.open(shareUrl, "_blank", "noopener");
+  }
+}
+
 function _partyShowResults() {
   const body = _partyEnsureModal();
   if (!body) return;
   _partyUnmountSidePanel();
-  const rows = (state.party.finalResults || []).map((r) => `
-    <li class="party-result-row ${r.client_id === state.user.client_id ? "is-self" : ""}">
-      <span class="party-rank">#${r.rank}</span>
-      <span class="party-avatar">${escapeHtml(r.avatar || "♟")}</span>
-      <span class="party-name">${escapeHtml(r.nickname || "Гость")}</span>
-      <span class="party-score">${Number(r.score || 0)} pts</span>
-      <span class="party-solved">✔ ${Number(r.solved || 0)}</span>
-    </li>
-  `).join("");
+  const list = Array.isArray(state.party.finalResults) ? state.party.finalResults : [];
+  const meta = state.party.finalMeta || {
+    duration_sec: state.party.durationSec || 600,
+    started_at: state.party.startedAt || 0,
+    ended_at: Math.floor(Date.now() / 1000),
+    party_id: state.party.party_id || "",
+  };
+  state.party.finalMeta = meta;
+  const myCid = state.user.client_id;
+  const tableHtml = _renderPartyResultsHTML(list, meta, { highlightId: myCid });
   body.innerHTML = `
     <header class="party-header">
       <h2>🏁 Итоги пати</h2>
       <p class="muted">Результат сохранён в истории профиля. Рейтинг за пати не начисляется.</p>
     </header>
-    <ol class="party-results">${rows || `<li class="party-empty">Никто ничего не решил.</li>`}</ol>
-    <div class="party-actions">
+    <div class="party-results-card">${tableHtml}</div>
+    <div class="party-actions party-actions-results">
+      <button id="btn-party-save-img" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
+      <button id="btn-party-share-tg" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
       <button id="btn-party-close-results" type="button" class="puzzle-primary">Закрыть</button>
     </div>
   `;
+  body.querySelector("#btn-party-save-img")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "Сохраняю…";
+    try {
+      const ok = await _partySaveResultsAsImage(list, meta, `party-${meta.party_id || Date.now()}.png`);
+      btn.textContent = ok ? "✓ Сохранено" : "Не удалось сохранить";
+    } catch (_) {
+      btn.textContent = "Не удалось сохранить";
+    } finally {
+      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1800);
+    }
+  });
+  body.querySelector("#btn-party-share-tg")?.addEventListener("click", () => {
+    _partyShareToTelegram(list, meta);
+  });
   body.querySelector("#btn-party-close-results")?.addEventListener("click", () => {
     closePartyModal();
     state.party.ws = null;
     state.party.status = "lobby";
     state.party.finalResults = null;
+    state.party.finalMeta = null;
   });
 }
+
+// Open the persisted party-summary view from a profile history click.
+// `entry` is a single record from `user.parties[]` as written by the
+// backend in `Party.finish()`. Falls back to the per-user fields when
+// the older shape (no `results` array) is encountered, so legacy
+// matches still get a usable detail screen.
+function openPartyResultDetail(entry) {
+  if (!entry || typeof entry !== "object") return;
+  const body = _partyEnsureModal();
+  if (!body) return;
+  const meta = {
+    duration_sec: Number(entry.duration_sec) || 0,
+    started_at: Number(entry.started_at) || Number(entry.ts) || 0,
+    ended_at: Number(entry.ended_at) || Number(entry.ts) || 0,
+    party_id: String(entry.party_id || ""),
+  };
+  // Reconstruct a minimal scoreboard if the backend didn't send one
+  // (legacy entries) so the detail modal still opens with usable data.
+  const fallbackResults = [{
+    rank: Number(entry.placement || 1),
+    client_id: state.user.client_id,
+    nickname: state.user.nickname || "Гость",
+    avatar: state.user.avatar || "♟",
+    score: Number(entry.score || 0),
+    solved: Number(entry.solved || 0),
+    failed: Number(entry.failed || 0),
+    skipped: Number(entry.skipped || 0),
+    winrate: Number(entry.winrate || 0),
+    best_streak: Number(entry.best_streak || 0),
+    avg_solve_ms: Number(entry.avg_solve_ms || 0),
+    best_solve_ms: Number(entry.best_solve_ms || 0),
+    party_elo: Number(entry.elo_gained || 0),
+  }];
+  const list = Array.isArray(entry.results) && entry.results.length
+    ? entry.results
+    : fallbackResults;
+  const tableHtml = _renderPartyResultsHTML(list, meta, {
+    highlightId: state.user.client_id,
+    includeAttempts: true,
+    attempts: Array.isArray(entry.attempts) ? entry.attempts : null,
+  });
+  body.innerHTML = `
+    <header class="party-header">
+      <h2>📜 Подробный результат боя</h2>
+      <p class="muted">#${Number(entry.placement || 1)} из ${Number(entry.participants || list.length)} · ${escapeHtml(_formatPartyDuration(meta.duration_sec))}</p>
+    </header>
+    <div class="party-results-card">${tableHtml}</div>
+    <div class="party-actions party-actions-results">
+      <button id="btn-party-detail-save" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
+      <button id="btn-party-detail-share" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
+      <button id="btn-party-detail-close" type="button" class="puzzle-primary">Закрыть</button>
+    </div>
+  `;
+  document.getElementById("party-modal").hidden = false;
+  body.querySelector("#btn-party-detail-save")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "Сохраняю…";
+    try {
+      const ok = await _partySaveResultsAsImage(list, meta, `party-${meta.party_id || meta.started_at || Date.now()}.png`);
+      btn.textContent = ok ? "✓ Сохранено" : "Не удалось сохранить";
+    } catch (_) {
+      btn.textContent = "Не удалось сохранить";
+    } finally {
+      setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1800);
+    }
+  });
+  body.querySelector("#btn-party-detail-share")?.addEventListener("click", () => {
+    _partyShareToTelegram(list, meta);
+  });
+  body.querySelector("#btn-party-detail-close")?.addEventListener("click", () => {
+    closePartyModal();
+  });
+}
+
+// Expose so profile rows can call it through inline onclick fallbacks.
+window.openPartyResultDetail = openPartyResultDetail;
 
 // ---------- Notifications (SSE) + party invitations ----------
 

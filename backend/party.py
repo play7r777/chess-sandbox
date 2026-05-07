@@ -28,7 +28,12 @@ from fastapi import WebSocket
 from . import puzzles as puzzle_pack
 from . import users as users_db
 
-PARTY_DURATION_SEC = 600
+# Duration the host can pick before pressing "Start". The default
+# (10 min) matches the original behaviour; 2/3/5 min are short
+# variants for faster matches. Anything outside this set is rejected
+# server-side so a tampered WS payload can't request a 10-hour lobby.
+PARTY_ALLOWED_DURATIONS_SEC: tuple[int, ...] = (120, 180, 300, 600)
+PARTY_DURATION_SEC = 600  # default if the host doesn't pick one
 LOBBY_GRACE_SEC = 1800
 RECONNECT_GRACE_SEC = 30
 MAX_MEMBERS = 16
@@ -37,6 +42,10 @@ MAX_MEMBERS = 16
 # so 1000 leaves plenty of headroom while keeping the queue cheap to
 # build (one SQLite call) regardless of total bank size.
 PARTY_QUEUE_SIZE = 1000
+# Max attempts kept per player for the in-memory match log. A 10-min
+# match maxes out at <300 attempts even for the fastest solvers, so
+# 500 is a safe ceiling and keeps the per-room footprint bounded.
+PARTY_MAX_ATTEMPT_LOG = 500
 # Min interval between two consecutive player_state broadcasts for a
 # given player. Spectators want the live board to mirror moves as soon
 # as they happen, so we set this to 1ms — effectively no throttle.
@@ -178,6 +187,12 @@ class Member:
     #         "legal_moves": ["e3","e4"], "legal_captures": ["d3"]}
     selection: dict[str, Any] | None = None
     last_solve_ms: int = 0
+    # Per-puzzle attempts log for the post-match summary. Each entry
+    # is `{puzzle_id, rating, outcome, solve_ms, themes}`. Capped at
+    # PARTY_MAX_ATTEMPT_LOG so a runaway match can't blow up memory.
+    # Replicated into the player's profile by `Party.finish()` so the
+    # detailed breakdown survives the room shutdown.
+    attempts_log: list[dict[str, Any]] = field(default_factory=list)
     disconnected_at: float | None = None
     is_host: bool = False
     # Wallclock of the last spectator broadcast for this member; used
@@ -203,6 +218,10 @@ class Party:
     status: str = "lobby"  # lobby | playing | finished
     started_at: float = 0.0
     ends_at: float = 0.0
+    # Match length picked by the host before pressing "Start". Bound
+    # to PARTY_ALLOWED_DURATIONS_SEC so a tampered WS payload can't
+    # request something absurd. Defaults to 10 min.
+    duration_sec: int = PARTY_DURATION_SEC
     members: dict[str, Member] = field(default_factory=dict)
     spectators: dict[str, Spectator] = field(default_factory=dict)
     finish_task: asyncio.Task[None] | None = None
@@ -236,7 +255,8 @@ class Party:
             "status": self.status,
             "started_at": int(self.started_at),
             "ends_at": int(self.ends_at),
-            "duration_sec": PARTY_DURATION_SEC,
+            "duration_sec": int(self.duration_sec),
+            "allowed_durations_sec": list(PARTY_ALLOWED_DURATIONS_SEC),
             "members": [self.public_member(m) for m in self.members.values()],
             "spectator_count": sum(1 for s in self.spectators.values() if s.ws is not None),
         }
@@ -639,7 +659,7 @@ class Party:
             }
         )
 
-    async def start(self, by_client_id: str) -> None:
+    async def start(self, by_client_id: str, duration_sec: int | None = None) -> None:
         if by_client_id != self.host_id:
             raise PartyError("not_host", "Only the host can start")
         # Idempotent: if the host clicks the start button several times
@@ -652,10 +672,21 @@ class Party:
             return
         if not self.members:
             raise PartyError("empty", "No members")
+        # Validate the host-picked duration. Anything not in the allow-list
+        # silently falls back to the current value (set via lobby radio
+        # earlier or the 10-min default) — this way a missing/garbled
+        # field on a reconnect-and-replay doesn't change the deal.
+        if duration_sec is not None:
+            try:
+                requested = int(duration_sec)
+            except (TypeError, ValueError):
+                requested = self.duration_sec
+            if requested in PARTY_ALLOWED_DURATIONS_SEC:
+                self.duration_sec = requested
         now = time.time()
         self.status = "playing"
         self.started_at = now
-        self.ends_at = now + PARTY_DURATION_SEC
+        self.ends_at = now + self.duration_sec
         # Sample a fresh queue from the puzzle bank for each match. Every
         # member walks through that same ordered list, so the comparison
         # is fair (same puzzles, same order); a different sample per match
@@ -691,7 +722,7 @@ class Party:
 
     async def _finish_after(self) -> None:
         try:
-            await asyncio.sleep(PARTY_DURATION_SEC)
+            await asyncio.sleep(self.duration_sec)
         except asyncio.CancelledError:
             return
         await self.finish()
@@ -712,10 +743,22 @@ class Party:
         if str(m.current_puzzle.get("id") or "") != puzzle_id:
             # Stale attempt (server already rotated puzzle); ignore.
             return
+        # Snapshot puzzle metadata before we rotate to the next one,
+        # otherwise the attempts_log entry would point at whatever
+        # came after.
+        prev_puzzle = m.current_puzzle
+        prev_rating = int(prev_puzzle.get("rating") or 1200)
+        prev_themes_raw = prev_puzzle.get("themes") or []
+        if isinstance(prev_themes_raw, str):
+            prev_themes = [t for t in prev_themes_raw.split() if t][:8]
+        else:
+            prev_themes = [str(t) for t in prev_themes_raw][:8]
+        score_delta = 0
         if outcome == "solved":
             m.solved += 1
             m.last_solve_ms = int(solve_ms)
-            m.score += _score_for(int(m.current_puzzle.get("rating") or 1200), int(solve_ms))
+            score_delta = _score_for(prev_rating, int(solve_ms))
+            m.score += score_delta
             m.streak += 1
             if m.streak > m.best_streak:
                 m.best_streak = m.streak
@@ -725,6 +768,17 @@ class Party:
         else:
             m.skipped += 1
             m.streak = 0
+        if len(m.attempts_log) < PARTY_MAX_ATTEMPT_LOG:
+            m.attempts_log.append(
+                {
+                    "puzzle_id": str(prev_puzzle.get("id") or ""),
+                    "rating": prev_rating,
+                    "outcome": outcome if outcome in ("solved", "failed", "skipped") else "skipped",
+                    "solve_ms": int(solve_ms) if outcome == "solved" else 0,
+                    "score": score_delta,
+                    "themes": prev_themes,
+                }
+            )
         nxt = self._next_puzzle_for(m)
         if nxt is not None:
             await self._send(
@@ -745,43 +799,92 @@ class Party:
             return
         self.status = "finished"
         rows = self.scoreboard()
+        # First pass: build the per-row entry that goes into the
+        # broadcast & profile history. The frontend renders this dict
+        # verbatim, so any new field added here also shows up in the
+        # detailed end-of-match table and the clickable battle history
+        # in the profile.
         results: list[dict[str, Any]] = []
         for rank, row in enumerate(rows, start=1):
             placement = rank
             participants = len(rows)
             party_elo = _party_elo_award(placement, participants, row["solved"], row["score"])
+            cid = row["client_id"]
+            m = self.members.get(cid)
+            attempts_total = row["solved"] + row["failed"] + row["skipped"]
+            winrate = (row["solved"] / attempts_total * 100.0) if attempts_total else 0.0
+            solve_ms_list = [int(a.get("solve_ms") or 0) for a in (m.attempts_log if m else []) if a.get("outcome") == "solved" and int(a.get("solve_ms") or 0) > 0]
+            avg_solve_ms = int(sum(solve_ms_list) / len(solve_ms_list)) if solve_ms_list else 0
+            best_solve_ms = min(solve_ms_list) if solve_ms_list else 0
             entry = {
                 "rank": rank,
-                "client_id": row["client_id"],
+                "client_id": cid,
                 "nickname": row["nickname"],
                 "avatar": row["avatar"],
                 "score": row["score"],
                 "solved": row["solved"],
                 "failed": row["failed"],
                 "skipped": row["skipped"],
+                "attempts": attempts_total,
+                "winrate": round(winrate, 1),
+                "best_streak": row.get("best_streak", 0) if isinstance(row, dict) else (m.best_streak if m else 0),
+                "avg_solve_ms": avg_solve_ms,
+                "best_solve_ms": best_solve_ms,
                 "party_elo": party_elo,
             }
             results.append(entry)
+        # Second pass: write per-player profile history. We pass the
+        # *full* scoreboard alongside each player's own attempts log so
+        # opening a single battle from the profile re-renders the same
+        # detailed stats table everyone sees right after finish.
+        finished_at = int(time.time())
+        for entry in results:
+            cid = entry["client_id"]
+            m = self.members.get(cid)
+            attempts_log = list(m.attempts_log) if m else []
             try:
                 users_db.record_party_result(
-                    row["client_id"],
+                    cid,
                     {
                         "party_id": self.party_id,
-                        "placement": placement,
-                        "participants": participants,
-                        "solved": row["solved"],
-                        "failed": row["failed"],
-                        "skipped": row["skipped"],
-                        "score": row["score"],
-                        "elo_gained": party_elo,
-                        "duration_sec": PARTY_DURATION_SEC,
+                        "placement": entry["rank"],
+                        "participants": len(results),
+                        "solved": entry["solved"],
+                        "failed": entry["failed"],
+                        "skipped": entry["skipped"],
+                        "score": entry["score"],
+                        "winrate": entry["winrate"],
+                        "best_streak": entry["best_streak"],
+                        "avg_solve_ms": entry["avg_solve_ms"],
+                        "best_solve_ms": entry["best_solve_ms"],
+                        "elo_gained": entry["party_elo"],
+                        "duration_sec": int(self.duration_sec),
+                        "started_at": int(self.started_at),
+                        "ended_at": finished_at,
+                        # Full scoreboard so the profile detail modal
+                        # can show every opponent's row, not just the
+                        # owner's stats.
+                        "results": results,
+                        # The owner's own per-puzzle log. Capped server-
+                        # side (see PARTY_MAX_ATTEMPT_LOG) so we never
+                        # bloat users.json.
+                        "attempts": attempts_log,
                     },
                 )
             except Exception:
                 # Profile write failures shouldn't take the room down.
                 pass
         self.finished_results = results
-        await self.broadcast({"type": "finish", "results": results})
+        await self.broadcast(
+            {
+                "type": "finish",
+                "results": results,
+                "duration_sec": int(self.duration_sec),
+                "party_id": self.party_id,
+                "started_at": int(self.started_at),
+                "ended_at": finished_at,
+            }
+        )
 
 
 def _party_elo_award(placement: int, participants: int, solved: int, score: int) -> int:

@@ -707,8 +707,13 @@ async def _party_ws_player(
                 continue
             mtype = msg.get("type")
             if mtype == "start":
+                # The host can pick a 2/3/5/10-min match length in the
+                # lobby; the value rides along on the start frame so we
+                # don't need a separate REST hop. party.start() validates
+                # against the allowlist, so passing through msg.get is safe.
+                duration_sec = msg.get("duration_sec")
                 try:
-                    await party.start(client_id)
+                    await party.start(client_id, duration_sec=duration_sec)
                 except party_room.PartyError as e:
                     await ws.send_json({"type": "error", "code": e.code, "message": e.message})
             elif mtype == "attempt":
