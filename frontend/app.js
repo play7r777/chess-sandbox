@@ -49,6 +49,7 @@ const BOARD_THEMES = {
   newspaper:  { name: "Newspaper",  light: "#ffffff", dark: "#9b9b9b", highlight: "rgba(255, 230, 90, 0.45)" },
   set1:       { name: "#1",         image: "/static/board-themes/set1.png", highlight: "rgba(255, 220, 90, 0.45)" },
   set2:       { name: "#2",         image: "/static/board-themes/set2.png", highlight: "rgba(255, 220, 90, 0.45)" },
+  set3:       { name: "#3",         image: "/static/board-themes/set3.png", highlight: "rgba(255, 240, 90, 0.45)" },
 };
 
 // Available piece sets. Files live under /static/pieces/<key>/ and are
@@ -68,6 +69,7 @@ const PIECE_SETS = {
   pirouetti:  { name: "Wood" },
   set1:       { name: "#1", ext: "png" },
   set2:       { name: "#2", ext: "png" },
+  set3:       { name: "#3", ext: "png" },
 };
 
 // Default colour for the legal-move dots / capture rings. Users can
