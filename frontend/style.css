@@ -3250,6 +3250,30 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   margin-bottom: 8px;
 }
 .opening-ai-actions button { font-size: 12px; }
+.opening-ai-tuning {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: #b9c5d8;
+}
+.opening-ai-tuning label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.opening-ai-tuning input[type="number"] {
+  width: 56px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(120, 180, 255, 0.25);
+  background: rgba(0, 0, 0, 0.25);
+  color: #e8eef9;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
 .opening-ai-text {
   white-space: pre-wrap;
   line-height: 1.5;

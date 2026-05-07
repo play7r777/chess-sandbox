@@ -8279,12 +8279,24 @@ function _renderOpeningAiCoachPanel() {
   const textBlock = (ai.text || ai.error)
     ? `<div class="opening-ai-text${ai.error ? " is-error" : ""}">${escapeHtml(ai.error || ai.text)}</div>`
     : `<div class="opening-ai-text muted">Нажми «Подробнее от тренера» — ИИ объяснит ход и план дебюта на основании Stockfish.</div>`;
+  const depth = _readCoachDepth();
+  const multipv = _readCoachMultipv();
   return `
     <div class="opening-ai-panel">
       <div class="opening-ai-header">
         <strong>AI-тренер</strong>
         ${statusBadge}
         ${sfBadge}
+      </div>
+      <div class="opening-ai-tuning">
+        <label title="Stockfish depth — глубина расчёта. chess.com Game Review ≈ 22. Больше = точнее, но медленнее.">
+          Глубина:
+          <input id="opening-ai-depth" type="number" min="6" max="40" value="${depth}" />
+        </label>
+        <label title="Сколько лучших линий показать тренеру (multipv). 1 = только лучшая, 2-3 = с альтернативами.">
+          Линий:
+          <input id="opening-ai-multipv" type="number" min="1" max="4" value="${multipv}" />
+        </label>
       </div>
       <div class="opening-ai-actions">
         <button id="btn-opening-ai-coach" type="button" class="puzzle-secondary" ${btnDisabled}>${btnLabel}</button>
@@ -8296,11 +8308,40 @@ function _renderOpeningAiCoachPanel() {
   `;
 }
 
+// Persisted coach knobs — depth/multipv default to chess.com-ish values
+// (depth 18 + 2 PVs) and survive reloads via localStorage.
+function _readCoachDepth() {
+  const raw = parseInt(localStorage.getItem("chess.coachDepth") || "18", 10);
+  if (!Number.isFinite(raw)) return 18;
+  return Math.max(6, Math.min(40, raw));
+}
+function _readCoachMultipv() {
+  const raw = parseInt(localStorage.getItem("chess.coachMultipv") || "2", 10);
+  if (!Number.isFinite(raw)) return 2;
+  return Math.max(1, Math.min(4, raw));
+}
+function _saveCoachDepthFromInput(el) {
+  if (!el) return;
+  const v = Math.max(6, Math.min(40, parseInt(el.value, 10) || 18));
+  el.value = String(v);
+  localStorage.setItem("chess.coachDepth", String(v));
+}
+function _saveCoachMultipvFromInput(el) {
+  if (!el) return;
+  const v = Math.max(1, Math.min(4, parseInt(el.value, 10) || 2));
+  el.value = String(v);
+  localStorage.setItem("chess.coachMultipv", String(v));
+}
+
 function _attachOpeningAiCoachHandlers() {
   const askBtn = document.getElementById("btn-opening-ai-coach");
   if (askBtn) askBtn.onclick = () => requestOpeningCoach();
   const recheck = document.getElementById("btn-opening-ai-recheck");
   if (recheck) recheck.onclick = () => _probeOpeningCoach();
+  const depthInput = document.getElementById("opening-ai-depth");
+  if (depthInput) depthInput.onchange = () => _saveCoachDepthFromInput(depthInput);
+  const mpvInput = document.getElementById("opening-ai-multipv");
+  if (mpvInput) mpvInput.onchange = () => _saveCoachMultipvFromInput(mpvInput);
 }
 
 async function _probeOpeningCoach() {
@@ -8354,6 +8395,8 @@ async function requestOpeningCoach() {
         last_san: lastSan || null,
         correct,
         locale: "ru",
+        depth: _readCoachDepth(),
+        multipv: _readCoachMultipv(),
       }),
     });
     if (!resp.ok || !resp.body) {

@@ -147,6 +147,10 @@ class OpeningCoachRequest(BaseModel):
     last_san: str | None = Field(default=None, max_length=12, description="The user's actual last move in SAN, if any")
     correct: bool | None = Field(default=None, description="Whether the user's last move matched the trained line")
     locale: str = Field(default="ru", min_length=2, max_length=8)
+    # Stockfish knobs (front-end picker on the AI panel). Defaults match
+    # the previous hardcoded values so old clients keep working.
+    depth: int = Field(default=18, ge=6, le=40)
+    multipv: int = Field(default=2, ge=1, le=4)
 
 
 class AnalysisCoachRequest(BaseModel):
@@ -976,8 +980,10 @@ async def opening_trainer_coach(req: OpeningCoachRequest) -> StreamingResponse:
             break
     fen = board.fen()
 
-    # Stockfish snapshot — best-effort, never blocks fallback path.
-    sf_lines = await _stockfish_top_lines(fen, multipv=2, depth=18)
+    # Stockfish snapshot — best-effort, never blocks fallback path. Depth
+    # and multipv come from the AI-panel picker so the user can dial in
+    # the speed/quality trade-off (chess.com Game Review uses ~22).
+    sf_lines = await _stockfish_top_lines(fen, multipv=req.multipv, depth=req.depth)
 
     cfg = ollama_client.OllamaConfig(
         base_url=settings.ollama_base_url,
