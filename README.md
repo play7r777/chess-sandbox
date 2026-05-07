@@ -307,7 +307,7 @@ API:
 | `CHESS_HOST`                        | 127.0.0.1    | bind хост                          |
 | `CHESS_PORT`                        | 8001         | bind порт                          |
 | `CHESS_OLLAMA_BASE_URL`             | `http://127.0.0.1:11434` | URL локального Ollama-демона |
-| `CHESS_OLLAMA_MODEL`                | `llama3.2:3b` | модель для AI-тренера дебютов     |
+| `CHESS_OLLAMA_MODEL`                | `qwen2.5:7b` | модель для AI-тренера дебютов (стоит понимать шахматную нотацию) |
 | `CHESS_OLLAMA_TIMEOUT_S`            | 60           | таймаут на ответ модели (сек)      |
 | `CHESS_OLLAMA_NUM_PREDICT`          | 320          | максимум токенов в ответе         |
 
@@ -330,19 +330,17 @@ API:
    ```powershell
    curl http://127.0.0.1:11434/api/tags
    ```
-3. Поставь одну из рекомендованных моделей (одной хватает):
+3. Поставь рекомендованную модель (одной хватает):
    ```powershell
-   # Самая быстрая (~2 GB), нормально объясняет идеи дебюта
-   ollama pull llama3.2:3b
-
-   # Лучше понимает шахматную нотацию, ~4.5 GB
+   # По умолчанию — лучше всего понимает шахматную нотацию (~4.5 GB)
    ollama pull qwen2.5:7b
 
-   # Компромисс между качеством и скоростью, ~5 GB
-   ollama pull llama3.1:8b-instruct-q4_K_M
+   # Альтернативы (нужно явно прописать в CHESS_OLLAMA_MODEL):
+   ollama pull llama3.2:3b                       # ~2 GB, быстрее, но проще
+   ollama pull llama3.1:8b-instruct-q4_K_M       # ~5 GB, баланс
    ```
 4. Запусти Chess Sandbox обычным способом (`uvicorn backend.main:app …`).
-   В таб Opening появится бейдж **«Ollama on · llama3.2:3b»** — значит
+   В таб Opening появится бейдж **«Ollama on · qwen2.5:7b»** — значит
    AI-тренер подключён.
 
 ### Как сменить модель

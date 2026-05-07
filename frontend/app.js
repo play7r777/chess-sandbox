@@ -8254,6 +8254,45 @@ function renderOpeningUi() {
 
 // ---------- AI coach (Ollama + Stockfish 18) ----------
 
+// Parse the chess.com-style coach output into a big headline (verdict)
+// + smaller body. The backend prompts the LLM to emit:
+//
+//   ВЕРДИКТ: <one short line>
+//   <blank line>
+//   <2-4 sentences>
+//
+// We're permissive: if the model forgets the prefix, we still treat the
+// first non-empty line as the headline so the UI never looks broken.
+function _formatCoachText(raw) {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return { headline: "", body: "" };
+  const lines = trimmed.split(/\n/);
+  let headline = "";
+  let bodyStartIdx = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i].trim();
+    if (!ln) continue;
+    const m = ln.match(/^(?:\*+\s*)?(?:ВЕРДИКТ|VERDICT|ЗАКЛЮЧЕНИЕ|ОЦЕНКА)\s*[::\-—]?\s*(.+?)\s*\**$/i);
+    headline = m ? m[1].trim() : ln.replace(/^\*+\s*/, "").replace(/\s*\*+$/, "");
+    bodyStartIdx = i + 1;
+    break;
+  }
+  const body = lines.slice(bodyStartIdx).join("\n").replace(/^\s*\n+/, "").trim();
+  return { headline, body };
+}
+
+// Map a verdict string to a CSS modifier for colour-coding (good/bad).
+// Used to colour the big headline so the user sees the gist at a glance,
+// the same way chess.com paints a green "Best!" or red "Mistake".
+function _verdictTone(headline) {
+  const h = (headline || "").toLowerCase();
+  if (!h) return "";
+  if (/(грубая ошибка|зевок|зевнул|blunder)/.test(h)) return "bad";
+  if (/(не лучший|неточн|inaccur|mistake)/.test(h)) return "warn";
+  if (/(точно по теории|по теории|лучший ход|best|brilliant|хороший ход|сильный ход|good)/.test(h)) return "good";
+  return "";
+}
+
 function _renderOpeningAiCoachPanel() {
   const ai = state.opening.aiCoach;
   let statusBadge = "";
@@ -8267,7 +8306,7 @@ function _renderOpeningAiCoachPanel() {
     helpText = `
       <div class="opening-ai-help muted">
         Запусти локально: <code>ollama serve</code> и поставь модель
-        <code>ollama pull llama3.2:3b</code>. Можно сменить через
+        <code>ollama pull qwen2.5:7b</code>. Можно сменить через
         <code>CHESS_OLLAMA_MODEL</code>.
       </div>`;
   }
@@ -8276,9 +8315,21 @@ function _renderOpeningAiCoachPanel() {
     : `<span class="opening-ai-badge opening-ai-badge-sf-off">Stockfish off</span>`;
   const btnDisabled = ai.streaming ? "disabled" : "";
   const btnLabel = ai.streaming ? "Тренер думает…" : "🧠 Подробнее от тренера";
-  const textBlock = (ai.text || ai.error)
-    ? `<div class="opening-ai-text${ai.error ? " is-error" : ""}">${escapeHtml(ai.error || ai.text)}</div>`
-    : `<div class="opening-ai-text muted">Нажми «Подробнее от тренера» — ИИ объяснит ход и план дебюта на основании Stockfish.</div>`;
+  const formatted = _formatCoachText(ai.text);
+  const tone = _verdictTone(formatted.headline);
+  const toneCls = tone ? ` opening-ai-verdict-${tone}` : "";
+  let textBlock;
+  if (ai.error) {
+    textBlock = `<div class="opening-ai-text is-error">${escapeHtml(ai.error)}</div>`;
+  } else if (ai.text || ai.streaming) {
+    textBlock = `
+      <div class="opening-ai-text">
+        <div class="opening-ai-verdict${toneCls}">${escapeHtml(formatted.headline)}</div>
+        <div class="opening-ai-body">${escapeHtml(formatted.body)}</div>
+      </div>`;
+  } else {
+    textBlock = `<div class="opening-ai-text muted">Нажми «Подробнее от тренера» — ИИ объяснит ход и план дебюта на основании Stockfish.</div>`;
+  }
   const depth = _readCoachDepth();
   const multipv = _readCoachMultipv();
   return `
