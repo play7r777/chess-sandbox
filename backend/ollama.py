@@ -6,8 +6,8 @@ Russian-language explanation streamed to the browser.
 
 The client is intentionally minimal — we only need /api/chat with
 streaming enabled. Failures (Ollama not running, model missing,
-network blip) raise `OllamaUnavailable` so callers can fall back to
-canned coach feedback.
+network blip, httpx not installed) raise `OllamaUnavailable` so
+callers can fall back to canned coach feedback.
 """
 from __future__ import annotations
 
@@ -17,7 +17,16 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
+# httpx is a hard dep in pyproject.toml, but we import defensively so an
+# older venv that hasn't run `pip install -e .` since httpx was promoted
+# from [dev] to main dependencies still boots — the AI-coach paths just
+# fall back to canned feedback in that case.
+try:
+    import httpx
+    _HTTPX_AVAILABLE = True
+except ImportError:  # pragma: no cover — defensive import
+    httpx = None  # type: ignore[assignment]
+    _HTTPX_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +49,8 @@ def _normalize_base_url(url: str) -> str:
 
 async def is_alive(config: OllamaConfig) -> bool:
     """Return True if the Ollama daemon answers the /api/tags probe."""
+    if not _HTTPX_AVAILABLE:
+        return False
     base = _normalize_base_url(config.base_url)
     if not base:
         return False
@@ -53,6 +64,8 @@ async def is_alive(config: OllamaConfig) -> bool:
 
 async def list_models(config: OllamaConfig) -> list[str]:
     """Return locally installed model names (best-effort)."""
+    if not _HTTPX_AVAILABLE:
+        return []
     base = _normalize_base_url(config.base_url)
     if not base:
         return []

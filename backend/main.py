@@ -149,6 +149,29 @@ class OpeningCoachRequest(BaseModel):
     locale: str = Field(default="ru", min_length=2, max_length=8)
 
 
+class AnalysisCoachRequest(BaseModel):
+    """Request payload for the AI coach in the Analysis (Game Review) view.
+
+    The frontend already has every field below from a previous
+    /api/game/analyse pass — we re-use that data to avoid burning
+    Stockfish time on each coach click.
+    """
+    fen_before: str = Field(..., min_length=10, max_length=128)
+    fen_after: str = Field(..., min_length=10, max_length=128)
+    move_san: str = Field(..., min_length=1, max_length=12)
+    best_move_san: str | None = Field(default=None, max_length=12)
+    classification: str = Field(..., min_length=1, max_length=24)
+    eval_before_cp: int = Field(..., ge=-200000, le=200000)
+    eval_after_cp: int = Field(..., ge=-200000, le=200000)
+    side: str = Field(..., min_length=1, max_length=1)
+    ply: int = Field(..., ge=0, le=2048)
+    best_pv_san: list[str] = Field(default_factory=list, max_length=16)
+    played_pv_san: list[str] = Field(default_factory=list, max_length=16)
+    coach_hints: list[str] = Field(default_factory=list, max_length=8)
+    headers: dict[str, str] = Field(default_factory=dict)
+    locale: str = Field(default="ru", min_length=2, max_length=8)
+
+
 def _print_puzzle_banner() -> None:
     """Print a one-line summary of the puzzle bank at startup.
 
@@ -992,6 +1015,176 @@ async def opening_trainer_coach(req: OpeningCoachRequest) -> StreamingResponse:
         yield text.encode()
 
     return StreamingResponse(streamer(), media_type="text/plain; charset=utf-8")
+
+
+# ---- Analysis (Game Review) AI coach ----
+
+ANALYSIS_CLASS_RU: dict[str, str] = {
+    "brilliant": "Бриллиантовый ход",
+    "great":     "Великолепный ход",
+    "best":      "Лучший ход",
+    "excellent": "Превосходный ход",
+    "good":      "Хороший ход",
+    "book":      "Теоретический ход",
+    "forced":    "Вынужденный ход",
+    "inaccuracy":"Неточность",
+    "mistake":   "Ошибка",
+    "blunder":   "Грубая ошибка",
+    "miss":      "Упущенная победа",
+}
+
+
+def _analysis_eval_swing(eval_before_cp: int, eval_after_cp: int, side: str) -> str:
+    """Describe the swing in centipawns from the mover's POV.
+
+    The frontend ships eval-before/-after already from the mover's POV
+    (see `MoveAnalysis.eval_before_cp` doc), so we can compare directly.
+    """
+
+    def _is_mate(cp: int) -> int | None:
+        if cp >= 99000:
+            return 100000 - cp
+        if cp <= -99000:
+            return -(cp + 100000)
+        return None
+
+    mate_before = _is_mate(eval_before_cp)
+    mate_after = _is_mate(eval_after_cp)
+    side_word = "белых" if side == "w" else "чёрных"
+    if mate_before is not None or mate_after is not None:
+        return (
+            f"оценка с точки зрения {side_word} изменилась с "
+            f"{('мат '+str(mate_before)) if mate_before is not None else f'{eval_before_cp/100:+.2f}'} на "
+            f"{('мат '+str(mate_after)) if mate_after is not None else f'{eval_after_cp/100:+.2f}'}"
+        )
+    delta = eval_after_cp - eval_before_cp
+    return (
+        f"оценка с точки зрения {side_word}: до хода {eval_before_cp/100:+.2f}, "
+        f"после хода {eval_after_cp/100:+.2f} (изменение {delta/100:+.2f})"
+    )
+
+
+def _build_analysis_coach_prompt(req: AnalysisCoachRequest) -> list[dict[str, str]]:
+    """Build chat messages for the Game-Review AI coach. Russian, concise."""
+    cls_label = ANALYSIS_CLASS_RU.get(req.classification, req.classification)
+    move_no = req.ply // 2 + 1
+    swing = _analysis_eval_swing(req.eval_before_cp, req.eval_after_cp, req.side)
+    best_pv = " ".join(req.best_pv_san[:6]) if req.best_pv_san else "(нет линии)"
+    played_pv = " ".join(req.played_pv_san[:6]) if req.played_pv_san else ""
+
+    name_w = (req.headers.get("White") or "Белые").strip() if req.headers else "Белые"
+    name_b = (req.headers.get("Black") or "Чёрные").strip() if req.headers else "Чёрные"
+    elo_w = (req.headers.get("WhiteElo") or "").strip() if req.headers else ""
+    elo_b = (req.headers.get("BlackElo") or "").strip() if req.headers else ""
+    players = f"{name_w}{f' ({elo_w})' if elo_w else ''} vs {name_b}{f' ({elo_b})' if elo_b else ''}"
+
+    system = (
+        "Ты — опытный шахматный тренер уровня chess.com Game Review. "
+        "Объясни ход на русском, коротко (4–7 предложений), но конкретно: "
+        "(1) что именно стало хуже/лучше после хода, (2) какая идея стояла за лучшим ходом, "
+        "(3) если был тактический мотив (вилка, связка, атака на короля и т.п.) — назови его. "
+        "Опирайся на оценку Stockfish и линии, которые тебе дают; не выдумывай ходов. "
+        "Не повторяй заголовок ('Это ошибка...') — пиши сразу по сути."
+    )
+
+    user_lines: list[str] = [
+        f"Партия: {players}.",
+        f"Ход {move_no} {'белых' if req.side == 'w' else 'чёрных'}: сыграно {req.move_san}.",
+        f"Классификация Stockfish: {cls_label}.",
+        f"Stockfish 18: {swing}.",
+    ]
+    if req.best_move_san and req.best_move_san != req.move_san:
+        user_lines.append(f"Лучший ход по движку: {req.best_move_san}.")
+        user_lines.append(f"Главная линия (после лучшего хода): {best_pv}.")
+    else:
+        user_lines.append(f"Главная линия от движка: {best_pv}.")
+    if played_pv:
+        user_lines.append(f"Что движок ожидал после {req.move_san}: {played_pv}.")
+    if req.coach_hints:
+        # Local heuristic hints (hanging piece, sacrifice etc.) — a useful
+        # nudge to the LLM about *which motif* it should explain.
+        user_lines.append("Подсказки локального тренера: " + "; ".join(req.coach_hints[:4]))
+    user_lines.append(f"FEN до хода: {req.fen_before}")
+    user_lines.append(
+        "Объясни ученику простыми словами, почему ход получил такую оценку, "
+        "и что было правильнее сыграть."
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "\n".join(user_lines)},
+    ]
+
+
+def _analysis_coach_fallback_text(req: AnalysisCoachRequest) -> str:
+    """Minimal canned explanation when Ollama is offline."""
+    cls_label = ANALYSIS_CLASS_RU.get(req.classification, req.classification)
+    parts: list[str] = [f"{cls_label}."]
+    if req.best_move_san and req.best_move_san != req.move_san:
+        parts.append(
+            f"Сыграно {req.move_san}, лучше было {req.best_move_san}."
+            + (f" Линия: {' '.join(req.best_pv_san[:6])}." if req.best_pv_san else "")
+        )
+    swing = _analysis_eval_swing(req.eval_before_cp, req.eval_after_cp, req.side)
+    parts.append("Stockfish 18: " + swing + ".")
+    if req.coach_hints:
+        parts.append("Подсказки тренера: " + " · ".join(req.coach_hints[:3]) + ".")
+    return " ".join(parts)
+
+
+@app.post("/api/analysis/coach")
+async def analysis_coach(req: AnalysisCoachRequest) -> StreamingResponse:
+    """Stream AI-coach explanation for a single move in the Game Review.
+
+    Re-uses the analysis data the client already has (eval, best move,
+    PV, classification, canned hints) so we don't re-run Stockfish per
+    click — a single coach request is just one Ollama round-trip.
+    """
+    cfg = ollama_client.OllamaConfig(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_model,
+        timeout_s=settings.ollama_timeout_s,
+        num_predict=settings.ollama_num_predict,
+    )
+    messages = _build_analysis_coach_prompt(req)
+
+    async def streamer() -> Any:
+        try:
+            async for chunk in ollama_client.stream_chat(cfg, messages):
+                yield chunk.encode("utf-8")
+            return
+        except ollama_client.OllamaUnavailable as exc:
+            logger.info("Ollama unavailable, analysis fallback: %s", exc)
+        except Exception as exc:
+            logger.warning("Ollama analysis coach error: %s", exc)
+        yield (
+            "AI-тренер сейчас недоступен (запусти `ollama serve` локально). "
+            "Краткий разбор от встроенного тренера:\n\n"
+        ).encode()
+        yield _analysis_coach_fallback_text(req).encode()
+
+    return StreamingResponse(streamer(), media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/analysis/coach/status")
+async def analysis_coach_status() -> dict[str, Any]:
+    """Same shape as /api/opening_trainer/coach/status — re-used by the
+    Analysis tab so it can show an Ollama on/off badge independent of
+    the Opening Trainer one (separate state in the UI)."""
+    cfg = ollama_client.OllamaConfig(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_model,
+        timeout_s=settings.ollama_timeout_s,
+        num_predict=settings.ollama_num_predict,
+    )
+    alive = await ollama_client.is_alive(cfg)
+    models = await ollama_client.list_models(cfg) if alive else []
+    return {
+        "available": alive,
+        "model": settings.ollama_model,
+        "base_url": settings.ollama_base_url,
+        "installed_models": models,
+        "stockfish_running": engine.is_running,
+    }
 
 
 # ---- Party / Co-op puzzles ----

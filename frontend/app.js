@@ -2546,7 +2546,29 @@ const review = {
   sideAsked: false,   // have we already shown the side-pick modal this session
   clocks: [],         // per-ply remaining-time in seconds, parallel to moves_uci
   autoplayId: null,   // setInterval id when auto-stepping next moves
+  // AI coach (Ollama + Stockfish 18) for the Game-Review board hint.
+  // Replaces the old hardcoded `💡 coach` blurb with a streamed,
+  // chess.com-style explanation of why the move got its classification.
+  aiCoach: {
+    status: null,            // null | "checking" | true | false
+    model: "",
+    baseUrl: "",
+    installedModels: [],
+    stockfishRunning: false,
+    streaming: false,
+    text: "",
+    error: "",
+    cache: {},               // { [ply]: rendered text } — avoid re-streaming on revisit
+    activeReqPly: -1,        // ply currently being streamed (cancel guard for stale renders)
+  },
 };
+
+// Classifications worth burning a coach call on. Anything else (best,
+// good, book, forced) is uncontroversial and the local hint suffices.
+const REVIEW_AI_WORTHY = new Set([
+  "brilliant", "great",
+  "inaccuracy", "mistake", "blunder", "miss",
+]);
 
 function fmtCp(cp) {
   if (cp >= 99000) {
@@ -4576,8 +4598,6 @@ function renderBoardHint() {
     const playedTail = showPlayedEval ? ` (${playedEval})` : "";
     main = `<span class="label">${sideLabel} сыграли ${playedSan}${playedTail}. Лучше было:</span><span class="san">${bestSan}</span>${showBestEval ? `<span class="eval">${bestEval}</span>` : ""}`;
   }
-  const coachLine = (m.coach && m.coach.length)
-    ? `<div class="coach-line">💡 ${m.coach.map(escapeHtml).join(" · ")}</div>` : "";
   // Show the engine's PV line (first ≤5 SAN moves) when we didn't play
   // the top move — gives the user a glimpse of "what was right and why".
   let pvLine = "";
@@ -4597,7 +4617,192 @@ function renderBoardHint() {
       }).join("");
     pvLine = `<div class="pv-line"><span class="pv-label">Лучшая линия:</span>${sansHtml}</div>`;
   }
-  host.innerHTML = main + coachLine + pvLine;
+  // AI coach (Ollama + Stockfish 18) — replaces the previous hardcoded
+  // "💡 coach" blurb. Streams a chess.com-style explanation of why the
+  // move got its classification, falling back to a canned summary when
+  // Ollama is offline.
+  const aiPanel = _renderAnalysisAiCoachPanel(m);
+  host.innerHTML = main + pvLine + aiPanel;
+  _attachAnalysisAiCoachHandlers();
+  if (review.aiCoach.status === null) _probeAnalysisCoach();
+}
+
+// ---------- Analysis AI coach (Ollama + Stockfish 18) ----------
+
+function _renderAnalysisAiCoachPanel(m) {
+  const ai = review.aiCoach;
+  const ply = review.activeIdx;
+  const cls = m && m.classification;
+  const worthy = cls && REVIEW_AI_WORTHY.has(cls);
+  const cached = ply >= 0 ? ai.cache[ply] : "";
+  const isStreaming = ai.streaming && ai.activeReqPly === ply;
+  let statusBadge = "";
+  let helpText = "";
+  if (ai.status === null || ai.status === "checking") {
+    statusBadge = `<span class="opening-ai-badge opening-ai-badge-checking">проверяем Ollama…</span>`;
+  } else if (ai.status === true) {
+    statusBadge = `<span class="opening-ai-badge opening-ai-badge-ok">Ollama on · ${escapeHtml(ai.model || "")}</span>`;
+  } else {
+    statusBadge = `<span class="opening-ai-badge opening-ai-badge-off">Ollama off</span>`;
+    helpText = `
+      <div class="opening-ai-help muted">
+        Запусти <code>ollama serve</code> и поставь модель
+        <code>ollama pull llama3.2:3b</code>. Можно сменить через
+        <code>CHESS_OLLAMA_MODEL</code>.
+      </div>`;
+  }
+  const sfBadge = ai.stockfishRunning
+    ? `<span class="opening-ai-badge opening-ai-badge-sf">Stockfish 18 on</span>`
+    : `<span class="opening-ai-badge opening-ai-badge-sf-off">Stockfish off</span>`;
+  // Display priority: streaming buffer → cached text → empty placeholder.
+  let bodyText = "";
+  let isError = false;
+  if (isStreaming) {
+    bodyText = ai.text || "Тренер думает…";
+  } else if (ai.error && ai.activeReqPly === ply) {
+    bodyText = ai.error;
+    isError = true;
+  } else if (cached) {
+    bodyText = cached;
+  } else if (m && m.coach && m.coach.length) {
+    // Local-tactic hints fallback (hanging piece, sacrifice etc.) so the
+    // panel is never empty — the AI button on top still works.
+    bodyText = "💡 " + m.coach.join(" · ");
+  } else {
+    bodyText = worthy
+      ? "Жми «Объяснить от тренера» — ИИ разберёт ход и скажет, что было правильнее."
+      : "Ход неплохой — спроси у тренера, если хочешь подробнее.";
+  }
+  const btnDisabled = isStreaming ? "disabled" : "";
+  const btnLabel = isStreaming
+    ? "Тренер думает…"
+    : (cached ? "🧠 Перезапросить" : "🧠 Объяснить от тренера");
+  return `
+    <div class="opening-ai-panel review-ai-panel">
+      <div class="opening-ai-header">
+        <strong>AI-тренер</strong>
+        ${statusBadge}
+        ${sfBadge}
+      </div>
+      <div class="opening-ai-actions">
+        <button id="btn-review-ai-coach" type="button" class="puzzle-secondary" ${btnDisabled}>${btnLabel}</button>
+        <button id="btn-review-ai-recheck" type="button" class="puzzle-secondary" title="Переподключиться к Ollama">↻</button>
+      </div>
+      <div class="opening-ai-text${isError ? " is-error" : ""}">${escapeHtml(bodyText)}</div>
+      ${helpText}
+    </div>
+  `;
+}
+
+function _attachAnalysisAiCoachHandlers() {
+  const askBtn = document.getElementById("btn-review-ai-coach");
+  if (askBtn) askBtn.onclick = () => requestAnalysisCoach();
+  const recheck = document.getElementById("btn-review-ai-recheck");
+  if (recheck) recheck.onclick = () => _probeAnalysisCoach();
+}
+
+async function _probeAnalysisCoach() {
+  review.aiCoach.status = "checking";
+  try {
+    const r = await api(`/api/analysis/coach/status`);
+    review.aiCoach.status = !!(r && r.available);
+    review.aiCoach.model = (r && r.model) || "";
+    review.aiCoach.baseUrl = (r && r.base_url) || "";
+    review.aiCoach.installedModels = (r && r.installed_models) || [];
+    review.aiCoach.stockfishRunning = !!(r && r.stockfish_running);
+  } catch (_e) {
+    review.aiCoach.status = false;
+  }
+  // Re-render only the board hint to refresh the badge — avoid resetting
+  // anything else in the Game Review pane while the user is reading it.
+  renderBoardHint();
+}
+
+async function requestAnalysisCoach() {
+  const moves = review.analysis ? review.analysis.moves : null;
+  const idx = review.activeIdx;
+  if (!moves || idx < 0) return;
+  const m = moves[idx];
+  if (!m) return;
+  const ai = review.aiCoach;
+  if (ai.streaming) return;
+  ai.streaming = true;
+  ai.text = "";
+  ai.error = "";
+  ai.activeReqPly = idx;
+  // Drop any previous cached answer for this ply so "Перезапросить" works.
+  delete ai.cache[idx];
+  renderBoardHint();
+  const headers = (review.game && review.game.headers) || {};
+  const safeHeaders = {};
+  for (const k of ["White", "Black", "WhiteElo", "BlackElo", "Event", "Date"]) {
+    if (headers[k]) safeHeaders[k] = String(headers[k]);
+  }
+  try {
+    const resp = await fetch(`/api/analysis/coach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fen_before: m.fen_before,
+        fen_after: m.fen_after,
+        move_san: m.move_san,
+        best_move_san: m.best_move_san || null,
+        classification: m.classification,
+        eval_before_cp: m.eval_before_cp,
+        eval_after_cp: m.eval_after_cp,
+        side: m.side,
+        ply: m.ply,
+        best_pv_san: (m.best_pv_san || []).slice(0, 12),
+        played_pv_san: [],
+        coach_hints: (m.coach || []).slice(0, 6),
+        headers: safeHeaders,
+        locale: "ru",
+      }),
+    });
+    if (!resp.ok || !resp.body) {
+      ai.error = `Ошибка тренера: HTTP ${resp.status}`;
+      ai.streaming = false;
+      ai.activeReqPly = -1;
+      renderBoardHint();
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let pendingRaf = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // Bail out if the user already navigated away from this ply — we
+      // don't want to scribble the late chunks over a different move.
+      if (review.activeIdx !== idx) {
+        try { await reader.cancel(); } catch (_e) { /* ignore */ }
+        break;
+      }
+      if (value && value.length) {
+        ai.text += decoder.decode(value, { stream: true });
+        if (!pendingRaf) {
+          pendingRaf = true;
+          requestAnimationFrame(() => {
+            pendingRaf = false;
+            const host = document.querySelector(".review-ai-panel .opening-ai-text");
+            if (host) host.textContent = ai.text;
+          });
+        }
+      }
+    }
+    ai.text += decoder.decode();
+    ai.streaming = false;
+    if (review.activeIdx === idx) {
+      ai.cache[idx] = ai.text;
+    }
+    ai.activeReqPly = -1;
+    renderBoardHint();
+  } catch (e) {
+    ai.streaming = false;
+    ai.activeReqPly = -1;
+    ai.error = `Сеть/тренер: ${(e && e.message) || e}`;
+    renderBoardHint();
+  }
 }
 
 function refreshNavButtons() {
