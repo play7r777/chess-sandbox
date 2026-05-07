@@ -5017,13 +5017,10 @@ async function openProfileModal(clientId) {
         const date = p.ts ? new Date(Number(p.ts) * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
         const dur = _formatPartyDuration(p.duration_sec || 0);
         const winrate = Number(p.winrate || 0);
-        const elo = Number(p.elo_gained || 0);
-        const eloLabel = elo > 0 ? `+${elo}` : `${elo}`;
         const place = Number(p.placement || 0);
         const placeCls = place === 1 ? "ok" : (place === 2 ? "warn" : "");
-        const isSelfRow = isSelf;
         return `
-          <button type="button" class="profile-party-row" data-idx="${idx}" ${isSelfRow ? "" : "disabled"} title="${isSelfRow ? "Открыть подробный результат" : "История доступна только владельцу профиля"}">
+          <button type="button" class="profile-party-row" data-idx="${idx}" title="Открыть подробный результат">
             <span class="pp-rank ${placeCls}">#${place}</span>
             <span class="pp-meta">
               <span class="pp-date">${escapeHtml(date)}</span>
@@ -5036,8 +5033,7 @@ async function openProfileModal(clientId) {
               <span>${winrate.toFixed(1)}%</span>
             </span>
             <span class="pp-score">${Number(p.score || 0)} pts</span>
-            <span class="pp-elo">${eloLabel} Эло</span>
-            <span class="pp-chevron muted">${isSelfRow ? "›" : ""}</span>
+            <span class="pp-chevron muted">›</span>
           </button>`;
       }).join("")}</div>
     </section>` : ""}
@@ -5059,21 +5055,21 @@ async function openProfileModal(clientId) {
   // Wire each party history row to its persisted detail modal. We
   // index against the original `parties` array (newest-first display)
   // so the click target reliably maps back to the saved record.
-  if (isSelf) {
-    const partiesAsc = Array.isArray(user.parties) ? user.parties : [];
-    const partiesDesc = partiesAsc.slice(-20).reverse();
-    document.querySelectorAll("#profile-parties-list .profile-party-row").forEach((row) => {
-      row.addEventListener("click", () => {
-        const idx = Number(row.dataset.idx);
-        const entry = partiesDesc[idx];
-        if (!entry) return;
-        // Hide profile modal so the party detail modal pops on top
-        // cleanly; user can re-open profile via the avatar button.
-        modal.hidden = true;
-        openPartyResultDetail(entry);
-      });
+  // History is open for any user — leaderboard click on a friend
+  // also lets you browse their detailed match logs.
+  const partiesAsc = Array.isArray(user.parties) ? user.parties : [];
+  const partiesDesc = partiesAsc.slice(-20).reverse();
+  document.querySelectorAll("#profile-parties-list .profile-party-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const idx = Number(row.dataset.idx);
+      const entry = partiesDesc[idx];
+      if (!entry) return;
+      // Hide profile modal so the party detail modal pops on top
+      // cleanly; user can re-open profile via the avatar button.
+      modal.hidden = true;
+      openPartyResultDetail(entry, { ownerId: user.client_id, ownerNickname: user.nickname, ownerAvatar: user.avatar });
     });
-  }
+  });
 }
 
 async function openLeaderboardModal() {
@@ -5174,9 +5170,16 @@ function _partyWsUrl(code) {
   return u.toString();
 }
 
-function _partyEnsureModal() {
+function _partyEnsureModal(opts) {
   const m = document.getElementById("party-modal");
   if (m) m.hidden = false;
+  const card = m && m.querySelector(".modal-card");
+  if (card) {
+    // Toggle the wide-results modifier on the modal card so the
+    // detailed scoreboard table doesn't get clipped / horizontally
+    // scrolled inside the default 560px party card.
+    card.classList.toggle("party-card-results", !!(opts && opts.results));
+  }
   return document.getElementById("party-body");
 }
 
@@ -5281,18 +5284,16 @@ function openPartyModal() {
     </div>
 
     <section class="party-tab-panel" data-panel="online">
-      <div class="party-section-title">Открытые пати</div>
+      <div class="party-section-title">
+        Открытые пати
+        <button id="btn-party-open-refresh" type="button" class="puzzle-ghost party-refresh-btn" title="Обновить">⟳</button>
+      </div>
       <div id="party-open-list" class="party-open-list">
         <div class="party-open-empty">Загружаю…</div>
       </div>
 
-      <div class="party-section-title">Пригласить друзей</div>
-      <div id="party-friend-picker" class="party-friends">
-        <div class="party-friend-empty">Загружаю список игроков…</div>
-      </div>
-      <div class="party-actions">
+      <div class="party-actions" style="margin-top: 14px;">
         <button id="btn-party-create" type="button" class="puzzle-primary">Создать комнату и пригласить</button>
-        <button id="btn-party-create-empty" type="button" class="puzzle-secondary">Создать пустую (без приглашений)</button>
       </div>
 
       <details class="party-fallback" style="margin-top: 14px;">
@@ -5322,8 +5323,8 @@ function openPartyModal() {
   body.querySelector("#btn-party-create").addEventListener("click", () => {
     partyCreateAndInvite().catch((e) => _partyShowError(e));
   });
-  body.querySelector("#btn-party-create-empty").addEventListener("click", () => {
-    partyCreate().catch((e) => _partyShowError(e));
+  body.querySelector("#btn-party-open-refresh")?.addEventListener("click", () => {
+    _renderOpenPartiesList().catch(() => {});
   });
   body.querySelector("#btn-party-join").addEventListener("click", () => {
     const code = (body.querySelector("#party-join-code").value || "").trim().toUpperCase();
@@ -5352,7 +5353,6 @@ function openPartyModal() {
     _renderPresenceList().catch(() => {});
   });
   // Async fills.
-  _renderFriendPicker().catch(() => {});
   _renderOpenPartiesList().catch(() => {});
 }
 
@@ -5894,6 +5894,16 @@ function renderPartyLobby() {
       <div class="party-duration-label">Длительность матча${isHost ? "" : " <span class=\"muted\">(выбирает хост)</span>"}</div>
       <div class="party-duration-options" role="radiogroup" aria-label="Длительность матча">${durationButtons}</div>
     </section>
+    ${isHost ? `
+    <section class="party-invite-section">
+      <div class="party-section-title">
+        Пригласить друзей
+        <button id="btn-party-invite-refresh" type="button" class="puzzle-ghost party-refresh-btn" title="Обновить">⟳</button>
+      </div>
+      <div id="party-friend-picker" class="party-friends">
+        <div class="party-friend-empty">Загружаю список игроков…</div>
+      </div>
+    </section>` : ""}
     <div class="party-actions">
       ${isHost
         ? `<button id="btn-party-start" type="button" class="puzzle-primary">${escapeHtml(startLabel)}</button>`
@@ -5905,6 +5915,12 @@ function renderPartyLobby() {
   body.querySelector("#btn-party-leave")?.addEventListener("click", () => {
     leaveParty();
   });
+  if (isHost) {
+    _renderFriendPicker(m.code).catch(() => {});
+    body.querySelector("#btn-party-invite-refresh")?.addEventListener("click", () => {
+      _renderFriendPicker(m.code).catch(() => {});
+    });
+  }
   if (isHost) {
     body.querySelectorAll(".party-duration-opt").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -6086,8 +6102,6 @@ function _renderPartyResultsHTML(results, meta, opts) {
   const tableRows = list.map((r) => {
     const isSelf = highlightId && r.client_id === highlightId;
     const winrate = Number(r.winrate || 0);
-    const elo = Number(r.party_elo || 0);
-    const eloLabel = elo > 0 ? `+${elo}` : `${elo}`;
     const avg = _formatSolveMs(r.avg_solve_ms);
     const best = _formatSolveMs(r.best_solve_ms);
     return `
@@ -6104,7 +6118,6 @@ function _renderPartyResultsHTML(results, meta, opts) {
         <td class="party-results-num">${winrate.toFixed(1)}%</td>
         <td class="party-results-num warn">🔥 ${Number(r.best_streak || 0)}</td>
         <td class="party-results-num muted">${avg} / ${best}</td>
-        <td class="party-results-num party-elo">${eloLabel}</td>
       </tr>`;
   }).join("");
   const tableHtml = `
@@ -6121,10 +6134,9 @@ function _renderPartyResultsHTML(results, meta, opts) {
             <th>Винрейт</th>
             <th>Серия</th>
             <th>Среднее / лучшее</th>
-            <th>Эло</th>
           </tr>
         </thead>
-        <tbody>${tableRows || `<tr><td colspan="10" class="party-empty">Никто ничего не решил.</td></tr>`}</tbody>
+        <tbody>${tableRows || `<tr><td colspan="9" class="party-empty">Никто ничего не решил.</td></tr>`}</tbody>
       </table>
     </div>`;
   let attemptsHtml = "";
@@ -6278,18 +6290,22 @@ async function _partySaveResultsAsImage(results, meta, fileName) {
   return true;
 }
 
-function _partyShareToTelegram(results, meta) {
+function _formatPartyShareText(results, meta) {
   const list = Array.isArray(results) ? results : [];
   const lines = list.slice(0, 10).map((r) => {
     const winrate = Number(r.winrate || 0).toFixed(1);
     return `#${r.rank} ${r.avatar || "♟"} ${r.nickname || "Гость"} — ${Number(r.score || 0)} pts (${Number(r.solved || 0)} ✔ / ${winrate}%)`;
   });
   const durationLabel = _formatPartyDuration(meta && meta.duration_sec);
-  const text = [
+  return [
     `🏁 Итоги пати (${durationLabel})`,
     ...lines,
     "chess-sandbox",
   ].join("\n");
+}
+
+function _partyShareToTelegram(results, meta) {
+  const text = _formatPartyShareText(results, meta);
   const url = location.origin || "https://chess-sandbox.app";
   const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`;
   // Try the Web Share API first (works inside Telegram WebView and on
@@ -6303,8 +6319,54 @@ function _partyShareToTelegram(results, meta) {
   }
 }
 
+// Discord doesn't expose a public "share to Discord" intent the way
+// Telegram does (no t.me/share equivalent), so the most reliable
+// cross-platform path is: copy a formatted snippet to clipboard and
+// open Discord (web or desktop via the discord:// scheme) so the user
+// can paste straight into the channel of their choice.
+async function _partyShareToDiscord(results, meta, btn) {
+  const text = _formatPartyShareText(results, meta);
+  const url = location.origin || "https://chess-sandbox.app";
+  const payload = `${text}\n${url}`;
+  let copied = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(payload);
+      copied = true;
+    }
+  } catch (_) { /* clipboard blocked — fall through to manual */ }
+  if (!copied) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = payload;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      copied = document.execCommand("copy");
+      ta.remove();
+    } catch (_) { /* ignore */ }
+  }
+  // Open Discord so the user can paste. Fire the desktop URL scheme
+  // first (no-op on machines without Discord installed), then fall
+  // back to the web client in a new tab.
+  try { window.open("https://discord.com/channels/@me", "_blank", "noopener"); } catch (_) {}
+  if (btn) {
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = copied ? "✔ Скопировано — вставь в Discord" : "Не удалось скопировать";
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.disabled = false;
+    }, 2400);
+  } else {
+    _showInfoToast(copied ? "Скопировано — вставь в Discord" : "Не удалось скопировать");
+  }
+  return copied;
+}
+
 function _partyShowResults() {
-  const body = _partyEnsureModal();
+  const body = _partyEnsureModal({ results: true });
   if (!body) return;
   _partyUnmountSidePanel();
   const list = Array.isArray(state.party.finalResults) ? state.party.finalResults : [];
@@ -6326,6 +6388,7 @@ function _partyShowResults() {
     <div class="party-actions party-actions-results">
       <button id="btn-party-save-img" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
       <button id="btn-party-share-tg" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
+      <button id="btn-party-share-discord" type="button" class="puzzle-secondary">💬 Поделиться в Discord</button>
       <button id="btn-party-close-results" type="button" class="puzzle-primary">Закрыть</button>
     </div>
   `;
@@ -6346,6 +6409,9 @@ function _partyShowResults() {
   body.querySelector("#btn-party-share-tg")?.addEventListener("click", () => {
     _partyShareToTelegram(list, meta);
   });
+  body.querySelector("#btn-party-share-discord")?.addEventListener("click", (ev) => {
+    _partyShareToDiscord(list, meta, ev.currentTarget);
+  });
   body.querySelector("#btn-party-close-results")?.addEventListener("click", () => {
     closePartyModal();
     state.party.ws = null;
@@ -6360,10 +6426,16 @@ function _partyShowResults() {
 // backend in `Party.finish()`. Falls back to the per-user fields when
 // the older shape (no `results` array) is encountered, so legacy
 // matches still get a usable detail screen.
-function openPartyResultDetail(entry) {
+// `opts.ownerId/Nickname/Avatar` are passed when opening the log of
+// another user (leaderboard → friend's profile → history row), so the
+// fallback row identifies the actual owner instead of the viewer.
+function openPartyResultDetail(entry, opts) {
   if (!entry || typeof entry !== "object") return;
-  const body = _partyEnsureModal();
+  const body = _partyEnsureModal({ results: true });
   if (!body) return;
+  const ownerId = (opts && opts.ownerId) || state.user.client_id;
+  const ownerNickname = (opts && opts.ownerNickname) || state.user.nickname || "Гость";
+  const ownerAvatar = (opts && opts.ownerAvatar) || state.user.avatar || "♟";
   const meta = {
     duration_sec: Number(entry.duration_sec) || 0,
     started_at: Number(entry.started_at) || Number(entry.ts) || 0,
@@ -6374,9 +6446,9 @@ function openPartyResultDetail(entry) {
   // (legacy entries) so the detail modal still opens with usable data.
   const fallbackResults = [{
     rank: Number(entry.placement || 1),
-    client_id: state.user.client_id,
-    nickname: state.user.nickname || "Гость",
-    avatar: state.user.avatar || "♟",
+    client_id: ownerId,
+    nickname: ownerNickname,
+    avatar: ownerAvatar,
     score: Number(entry.score || 0),
     solved: Number(entry.solved || 0),
     failed: Number(entry.failed || 0),
@@ -6385,25 +6457,28 @@ function openPartyResultDetail(entry) {
     best_streak: Number(entry.best_streak || 0),
     avg_solve_ms: Number(entry.avg_solve_ms || 0),
     best_solve_ms: Number(entry.best_solve_ms || 0),
-    party_elo: Number(entry.elo_gained || 0),
   }];
   const list = Array.isArray(entry.results) && entry.results.length
     ? entry.results
     : fallbackResults;
+  // Only include the per-attempt log when viewing your own history;
+  // other users' attempts aren't persisted for them server-side.
+  const isOwnHistory = ownerId === state.user.client_id;
   const tableHtml = _renderPartyResultsHTML(list, meta, {
-    highlightId: state.user.client_id,
-    includeAttempts: true,
-    attempts: Array.isArray(entry.attempts) ? entry.attempts : null,
+    highlightId: ownerId,
+    includeAttempts: isOwnHistory,
+    attempts: isOwnHistory && Array.isArray(entry.attempts) ? entry.attempts : null,
   });
   body.innerHTML = `
     <header class="party-header">
       <h2>📜 Подробный результат боя</h2>
-      <p class="muted">#${Number(entry.placement || 1)} из ${Number(entry.participants || list.length)} · ${escapeHtml(_formatPartyDuration(meta.duration_sec))}</p>
+      <p class="muted">#${Number(entry.placement || 1)} из ${Number(entry.participants || list.length)} · ${escapeHtml(_formatPartyDuration(meta.duration_sec))}${isOwnHistory ? "" : ` · ${escapeHtml(ownerNickname)}`}</p>
     </header>
     <div class="party-results-card">${tableHtml}</div>
     <div class="party-actions party-actions-results">
       <button id="btn-party-detail-save" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
       <button id="btn-party-detail-share" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
+      <button id="btn-party-detail-share-discord" type="button" class="puzzle-secondary">💬 Поделиться в Discord</button>
       <button id="btn-party-detail-close" type="button" class="puzzle-primary">Закрыть</button>
     </div>
   `;
@@ -6424,6 +6499,9 @@ function openPartyResultDetail(entry) {
   });
   body.querySelector("#btn-party-detail-share")?.addEventListener("click", () => {
     _partyShareToTelegram(list, meta);
+  });
+  body.querySelector("#btn-party-detail-share-discord")?.addEventListener("click", (ev) => {
+    _partyShareToDiscord(list, meta, ev.currentTarget);
   });
   body.querySelector("#btn-party-detail-close")?.addEventListener("click", () => {
     closePartyModal();
@@ -6484,12 +6562,12 @@ function handleNotificationEvent(msg) {
       break;
     case "invitation_accepted":
       if (msg.invitation) {
-        _showInfoToast(`✔ ${msg.invitation.host_id === state.user.client_id ? "Кент принял твоё приглашение" : "Принято"}`);
+        _showInfoToast(`✔ ${msg.invitation.host_id === state.user.client_id ? "Друг принял приглашение" : "Принято"}`);
       }
       break;
     case "invitation_declined":
       if (msg.invitation && msg.invitation.host_id === state.user.client_id) {
-        _showInfoToast(`Кент отклонил приглашение`);
+        _showInfoToast(`Друг отклонил приглашение`);
       }
       break;
   }
@@ -6576,9 +6654,13 @@ async function _declineInvitation(invId) {
 
 // ---------- Friend picker + open-parties list (party-create modal) ----------
 
-async function _renderFriendPicker() {
+// Renders the lobby's friend invite list: one blue "Пригласить" button
+// per registered player, no checkboxes. Each click fires an invite to
+// the active room (`partyCode` falls back to `state.party.code`).
+async function _renderFriendPicker(partyCode) {
   const host = document.getElementById("party-friend-picker");
   if (!host) return;
+  const code = partyCode || state.party.code || "";
   let users = [];
   try {
     const res = await fetch("/api/users");
@@ -6598,14 +6680,43 @@ async function _renderFriendPicker() {
   host.innerHTML = users.map((u) => {
     const recent = (now - Number(u.last_seen || 0)) < 300;
     return `
-      <label class="party-friend-row">
-        <input type="checkbox" class="party-friend-cb" value="${escapeHtml(u.client_id)}" />
+      <div class="party-friend-row" data-cid="${escapeHtml(u.client_id)}">
         <span class="toast-avatar">${escapeHtml(u.avatar || "♟")}</span>
         <span class="party-friend-name">${escapeHtml(u.nickname || "Гость")}</span>
-        <span class="party-friend-meta">${recent ? "● онлайн" : ""} ${Number(u.rating || 1500)} elo</span>
-      </label>
+        <span class="party-friend-meta">${recent ? "<span class=\"party-friend-online\">● онлайн</span>" : ""} ${Number(u.rating || 1500)} elo</span>
+        <button type="button" class="party-friend-invite-btn" data-cid="${escapeHtml(u.client_id)}">Пригласить</button>
+      </div>
     `;
   }).join("");
+  host.querySelectorAll(".party-friend-invite-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const targetId = btn.dataset.cid;
+      if (!targetId || !code) return;
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = "Отправляю…";
+      try {
+        const res = await fetch("/api/party/invite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client_id: state.user.client_id,
+            target_id: targetId,
+            code,
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        btn.textContent = "✔ Отправлено";
+        btn.classList.add("is-sent");
+      } catch (_) {
+        btn.textContent = "Ошибка";
+        setTimeout(() => {
+          btn.textContent = original;
+          btn.disabled = false;
+        }, 1800);
+      }
+    });
+  });
 }
 
 async function _renderOpenPartiesList() {
@@ -6707,11 +6818,10 @@ async function _renderPresenceList() {
 }
 
 async function partyCreateAndInvite() {
-  // Gather selected friend IDs first; we'll fire one invite per checkbox.
-  const checked = Array.from(
-    document.querySelectorAll("#party-friend-picker .party-friend-cb:checked")
-  ).map((cb) => cb.value).filter(Boolean);
-  // Create the party (returns code) then invite each.
+  // Just create the party — the lobby renders an invite list with
+  // per-friend blue "Пригласить" buttons (renderPartyLobby →
+  // _renderFriendPicker), so the user picks who to ping after the
+  // room exists rather than ahead of time via checkboxes.
   const res = await fetch("/api/party/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -6724,19 +6834,6 @@ async function partyCreateAndInvite() {
   if (!res.ok) throw new Error(`Не удалось создать (HTTP ${res.status})`);
   const data = await res.json();
   partyConnect(data.code);
-  if (checked.length) {
-    await Promise.allSettled(
-      checked.map((targetId) => fetch("/api/party/invite", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          client_id: state.user.client_id,
-          target_id: targetId,
-          code: data.code,
-        }),
-      }))
-    );
-  }
 }
 
 // ---------- Spectator (binoculars) mode ----------

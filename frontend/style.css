@@ -2086,7 +2086,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 
 /* Detailed end-of-match results. */
-.party-card.party-card-results { width: min(960px, 96vw); }
+.party-card.party-card-results { width: min(1200px, 98vw); padding: 24px 22px; }
 .party-results-card {
   margin: 12px 0;
   padding: 14px;
@@ -2111,6 +2111,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border-collapse: collapse;
   font-size: 13px;
   color: #e7eef9;
+  table-layout: auto;
 }
 .party-results-table thead th {
   text-align: left;
@@ -2173,7 +2174,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .profile-party-row {
   width: 100%;
   display: grid;
-  grid-template-columns: 48px minmax(120px, 1fr) minmax(180px, 1.2fr) 80px 90px 16px;
+  grid-template-columns: 48px minmax(120px, 1fr) minmax(180px, 1.2fr) 80px 16px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -2222,12 +2223,6 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   color: #6da7ff;
   text-align: right;
 }
-.profile-party-row .pp-elo {
-  font-size: 12px;
-  font-weight: 700;
-  color: #ffd75e;
-  text-align: right;
-}
 .profile-party-row .pp-chevron {
   font-size: 18px;
   font-weight: 700;
@@ -2236,7 +2231,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 
 @media (max-width: 720px) {
-  .party-card.party-card-results { width: 96vw; padding: 14px; }
+  .party-card.party-card-results { width: 98vw; padding: 14px; }
   .party-results-meta { font-size: 12px; gap: 10px; }
   .party-results-table { font-size: 12px; }
   .party-results-table thead th, .party-results-table tbody td { padding: 6px 8px; }
@@ -2244,7 +2239,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
     grid-template-columns: 40px 1fr 80px 14px;
     grid-template-areas:
       "rank meta score chev"
-      "stats stats elo elo";
+      "stats stats stats stats";
     row-gap: 4px;
   }
   .profile-party-row .pp-rank { grid-area: rank; }
@@ -2351,7 +2346,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .toast-btn-decline { background: transparent; color: #94a4be; border: 1px solid #2a3a52; }
 .toast-btn-decline:hover { background: rgba(255,255,255,0.05); color: #e7eef9; }
 
-/* ---------- Friend picker inside party-create ---------- */
+/* ---------- Friend picker inside party lobby ---------- */
 .party-friends {
   max-height: 260px;
   overflow-y: auto;
@@ -2364,14 +2359,29 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   display: flex; align-items: center; gap: 10px;
   padding: 6px 8px;
   border-radius: 8px;
-  cursor: pointer;
   user-select: none;
 }
 .party-friend-row:hover { background: rgba(255,255,255,0.03); }
-.party-friend-row input[type="checkbox"] { accent-color: #6da7ff; width: 16px; height: 16px; }
-.party-friend-name { flex: 1; }
+.party-friend-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .party-friend-meta { font-size: 11px; color: #7c8da9; }
+.party-friend-online { color: #6cf2a6; }
 .party-friend-empty { padding: 12px; color: #7c8da9; text-align: center; }
+.party-friend-invite-btn {
+  background: #2d6cdf;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font: 600 12px/1 inherit;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.06s;
+  white-space: nowrap;
+}
+.party-friend-invite-btn:hover:not(:disabled) { background: #2557b8; }
+.party-friend-invite-btn:active:not(:disabled) { transform: scale(0.97); }
+.party-friend-invite-btn:disabled { opacity: 0.7; cursor: default; }
+.party-friend-invite-btn.is-sent { background: #1f7a4a; }
+.party-invite-section { margin-top: 4px; }
 
 .party-open-list {
   max-height: 200px;
