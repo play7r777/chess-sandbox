@@ -107,38 +107,43 @@ input:focus, select:focus, button:focus-visible {
 }
 .view-tab.view-tab-icon .view-tab-svg { width: 18px; height: 18px; flex: none; }
 
-/* When a view is active we hide every sidebar section that doesn't
-   belong to it. The board area itself is always visible. */
-body.view-main     [data-view="analysis"],
-body.view-main     [data-view="puzzle"],
-body.view-main     [data-view="daily"],
-body.view-main     [data-view="rush"],
-body.view-main     [data-view="opening"] { display: none !important; }
-body.view-analysis [data-view="main"],
-body.view-analysis [data-view="puzzle"],
-body.view-analysis [data-view="daily"],
-body.view-analysis [data-view="rush"],
-body.view-analysis [data-view="opening"] { display: none !important; }
-body.view-puzzle   [data-view="main"],
-body.view-puzzle   [data-view="analysis"],
-body.view-puzzle   [data-view="daily"],
-body.view-puzzle   [data-view="rush"],
-body.view-puzzle   [data-view="opening"] { display: none !important; }
-body.view-daily    [data-view="main"],
-body.view-daily    [data-view="analysis"],
-body.view-daily    [data-view="puzzle"],
-body.view-daily    [data-view="rush"],
-body.view-daily    [data-view="opening"] { display: none !important; }
-body.view-rush     [data-view="main"],
-body.view-rush     [data-view="analysis"],
-body.view-rush     [data-view="puzzle"],
-body.view-rush     [data-view="daily"],
-body.view-rush     [data-view="opening"] { display: none !important; }
-body.view-opening  [data-view="main"],
-body.view-opening  [data-view="analysis"],
-body.view-opening  [data-view="puzzle"],
-body.view-opening  [data-view="daily"],
-body.view-opening  [data-view="rush"] { display: none !important; }
+/* When a view is active we hide every sidebar / board-area section that
+   doesn't belong to it. The board area itself is always visible.
+
+   IMPORTANT: scope to `main [data-view=...]` so the topbar tab buttons
+   (which also carry data-view to highlight the active tab) stay visible.
+   Without this scope the tabs themselves would get display:none and the
+   navigation would collapse to "only the active tab". */
+body.view-main     main [data-view="analysis"],
+body.view-main     main [data-view="puzzle"],
+body.view-main     main [data-view="daily"],
+body.view-main     main [data-view="rush"],
+body.view-main     main [data-view="opening"] { display: none !important; }
+body.view-analysis main [data-view="main"],
+body.view-analysis main [data-view="puzzle"],
+body.view-analysis main [data-view="daily"],
+body.view-analysis main [data-view="rush"],
+body.view-analysis main [data-view="opening"] { display: none !important; }
+body.view-puzzle   main [data-view="main"],
+body.view-puzzle   main [data-view="analysis"],
+body.view-puzzle   main [data-view="daily"],
+body.view-puzzle   main [data-view="rush"],
+body.view-puzzle   main [data-view="opening"] { display: none !important; }
+body.view-daily    main [data-view="main"],
+body.view-daily    main [data-view="analysis"],
+body.view-daily    main [data-view="puzzle"],
+body.view-daily    main [data-view="rush"],
+body.view-daily    main [data-view="opening"] { display: none !important; }
+body.view-rush     main [data-view="main"],
+body.view-rush     main [data-view="analysis"],
+body.view-rush     main [data-view="puzzle"],
+body.view-rush     main [data-view="daily"],
+body.view-rush     main [data-view="opening"] { display: none !important; }
+body.view-opening  main [data-view="main"],
+body.view-opening  main [data-view="analysis"],
+body.view-opening  main [data-view="puzzle"],
+body.view-opening  main [data-view="daily"],
+body.view-opening  main [data-view="rush"] { display: none !important; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
 .mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }
