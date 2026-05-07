@@ -654,6 +654,8 @@ async def party_ws(ws: WebSocket, code: str) -> None:
     client_id = ws.query_params.get("client_id") or ""
     nickname = ws.query_params.get("nickname") or ""
     avatar = ws.query_params.get("avatar") or ""
+    theme = ws.query_params.get("theme") or ""
+    pieces = ws.query_params.get("pieces") or ""
     role = (ws.query_params.get("role") or "player").lower()
     if not client_id or len(client_id) < 4:
         await ws.close(code=4400)
@@ -666,7 +668,7 @@ async def party_ws(ws: WebSocket, code: str) -> None:
     if role == "spectator":
         await _party_ws_spectator(ws, party, client_id, nickname, avatar)
     else:
-        await _party_ws_player(ws, party, client_id, nickname, avatar)
+        await _party_ws_player(ws, party, client_id, nickname, avatar, theme, pieces)
 
 
 async def _party_ws_player(
@@ -675,13 +677,18 @@ async def _party_ws_player(
     client_id: str,
     nickname: str,
     avatar: str,
+    theme: str,
+    pieces: str,
 ) -> None:
     try:
-        await party.attach(client_id, nickname, avatar, ws)
+        await party.attach(
+            client_id, nickname, avatar, ws, theme=theme, pieces=pieces,
+        )
     except party_room.PartyError as e:
         await ws.send_json({"type": "error", "code": e.code, "message": e.message})
         await ws.close(code=4400)
         return
+    explicit_leave = False
     try:
         while True:
             msg = await ws.receive_json()
@@ -703,9 +710,23 @@ async def _party_ws_player(
             elif mtype == "position":
                 # Mid-puzzle FEN update for spectators.
                 await party.update_position(client_id, str(msg.get("fen") or ""))
+            elif mtype == "cursor":
+                # Pointer / drag relay for spectators.
+                await party.relay_cursor(
+                    client_id,
+                    msg.get("x", 0),
+                    msg.get("y", 0),
+                    flipped=bool(msg.get("flipped")),
+                    selected=str(msg.get("selected") or "") or None,
+                    dragging=bool(msg.get("dragging")),
+                )
             elif mtype == "ping":
                 await ws.send_json({"type": "pong"})
             elif mtype == "leave":
+                explicit_leave = True
+                # Hard-remove if still in lobby; mid-match calls fall
+                # through to detach in the finally block.
+                await party.leave(client_id)
                 await ws.close()
                 break
     except WebSocketDisconnect:
@@ -713,7 +734,8 @@ async def _party_ws_player(
     except Exception as exc:
         logger.warning("party ws error: %s", exc)
     finally:
-        await party.detach(client_id)
+        if not explicit_leave:
+            await party.detach(client_id)
 
 
 async def _party_ws_spectator(

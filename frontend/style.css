@@ -2197,6 +2197,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   grid-template-rows: repeat(8, 1fr);
   aspect-ratio: 1 / 1;
   width: 100%;
+  position: relative;
   background-image: var(--board-image, none);
   background-size: 100% 100%;
   background-repeat: no-repeat;
@@ -2215,6 +2216,35 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   object-fit: contain;
   pointer-events: none;
   user-select: none;
+}
+/* Selected-square overlay (player has highlighted a square they're
+   thinking about). Sits on top of the square via the parent's
+   `position: relative`. */
+.mini-board .mb-square.mb-selected::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 235, 90, 0.45);
+  pointer-events: none;
+}
+/* Live cursor dot — anchored to the .mini-board grid via percentage
+   coords sent by the player. Hidden when out-of-bounds. */
+.mini-board .mb-cursor {
+  position: absolute;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: rgba(64, 156, 255, 0.85);
+  border: 2px solid #fff;
+  box-shadow: 0 0 6px rgba(64, 156, 255, 0.7);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  transition: left 0.05s linear, top 0.05s linear;
+  z-index: 5;
+}
+.mini-board .mb-cursor.is-drag {
+  background: rgba(255, 145, 76, 0.9);
+  width: 18px; height: 18px;
+  box-shadow: 0 0 10px rgba(255, 145, 76, 0.8);
 }
 .spectator-grid .grid-streak {
   font-size: 11px; color: #b3c2d8;

@@ -223,9 +223,14 @@ function escapeHtml(s) {
   })[ch]);
 }
 
-function pieceSvgUrl(piece) {
+function pieceSvgUrl(piece, overrideSet) {
+  // overrideSet lets the spectator render a different player's pieces
+  // without touching the local user's settings.
+  const setKey = overrideSet || getPieceSet();
+  const set = PIECE_SETS[setKey] || PIECE_SETS[getPieceSet()];
+  const ext = (set && set.ext) || "svg";
   const color = piece === piece.toUpperCase() ? "w" : "b";
-  return `/static/pieces/${getPieceSet()}/${color}${piece.toUpperCase()}.${getPieceExt()}`;
+  return `/static/pieces/${setKey}/${color}${piece.toUpperCase()}.${ext}`;
 }
 
 function makePieceImg(piece, options = {}) {
@@ -4584,6 +4589,10 @@ function _partyWsUrl(code) {
   u.searchParams.set("client_id", state.user.client_id || "");
   u.searchParams.set("nickname", state.user.nickname || "");
   u.searchParams.set("avatar", state.user.avatar || "");
+  // Send the player's local UI prefs so spectators can render this
+  // player's mini-board in *their* theme + pieces, not the watcher's.
+  u.searchParams.set("theme", userSettings.theme || "");
+  u.searchParams.set("pieces", userSettings.pieces || "");
   return u.toString();
 }
 
@@ -4807,6 +4816,91 @@ function _partyReportPosition(fen) {
     ws.send(JSON.stringify({ type: "position", fen: String(fen || "") }));
   } catch (_) { /* already closed */ }
 }
+
+// Pointer relay so spectators can see what the player is doing
+// between moves (cursor over a square, dragging a piece). Bandwidth:
+// one JSON message every ~33ms while the cursor is over the board, so
+// at most ~30 msgs/sec — small per-player.
+let _cursorLastSendTs = 0;
+let _cursorLastPayload = "";
+const _CURSOR_THROTTLE_MS = 33;
+function _partyReportCursor(payload) {
+  if (!state.party.active || state.party.status !== "playing") return;
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const now = Date.now();
+  // Always send drag start/stop and explicit "leave" frames so we
+  // don't get stuck with a stale dragging-flag on the spectator side.
+  const isStateChange = payload.dragging || payload.x === null;
+  if (!isStateChange && now - _cursorLastSendTs < _CURSOR_THROTTLE_MS) return;
+  const serialized = JSON.stringify(payload);
+  if (!isStateChange && serialized === _cursorLastPayload) return;
+  _cursorLastSendTs = now;
+  _cursorLastPayload = serialized;
+  try {
+    ws.send(JSON.stringify({ type: "cursor", ...payload }));
+  } catch (_) { /* already closed */ }
+}
+
+function _installPartyCursorTracking() {
+  if (window.__partyCursorInstalled) return;
+  window.__partyCursorInstalled = true;
+  const isPartyActive = () => (
+    state.party && state.party.active && state.party.status === "playing"
+  );
+  const sample = (el, ev) => {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const rawX = (ev.clientX - rect.left) / rect.width;
+    const rawY = (ev.clientY - rect.top) / rect.height;
+    // The local board may be flipped (black-on-bottom); spectators
+    // always view from white-on-bottom, so undo the flip here.
+    const flipped = !!state.flipped;
+    const sx = flipped ? 1 - rawX : rawX;
+    const sy = flipped ? 1 - rawY : rawY;
+    return { x: sx, y: sy, flipped };
+  };
+  const onMove = (ev) => {
+    if (!isPartyActive()) return;
+    const board = document.querySelector(".board");
+    if (!board) return;
+    const s = sample(board, ev);
+    if (!s) return;
+    const sel = (typeof state.selectedSquare === "string") ? state.selectedSquare : "";
+    _partyReportCursor({
+      x: s.x,
+      y: s.y,
+      flipped: s.flipped,
+      selected: sel,
+      dragging: !!window.__partyCursorDragging,
+    });
+  };
+  const onLeave = () => {
+    if (!isPartyActive()) return;
+    // Clear the cursor on spectator side by sending an out-of-bounds
+    // position; the server clamps to [-0.05, 1.05] and the spectator
+    // CSS hides the dot when outside the board.
+    _partyReportCursor({ x: -1, y: -1, flipped: false, selected: "", dragging: false });
+  };
+  const onDragStart = () => {
+    if (!isPartyActive()) return;
+    window.__partyCursorDragging = true;
+  };
+  const onDragEnd = () => {
+    if (!isPartyActive()) return;
+    window.__partyCursorDragging = false;
+  };
+  document.addEventListener("mousemove", (ev) => {
+    const board = document.querySelector(".board");
+    if (!board) return;
+    if (board === ev.target || board.contains(ev.target)) onMove(ev);
+  }, { passive: true });
+  document.addEventListener("mouseleave", onLeave, true);
+  document.addEventListener("dragstart", onDragStart, true);
+  document.addEventListener("dragend", onDragEnd, true);
+  document.addEventListener("drop", onDragEnd, true);
+}
+_installPartyCursorTracking();
 
 function renderPartyLobby() {
   const body = _partyEnsureModal();
@@ -5254,6 +5348,7 @@ function spectatorConnect(code) {
     status: "lobby",
     endsAt: 0,
     players: {},
+    cursors: {},
     scoreboard: [],
     selectedId: null,
     mode: "single",
@@ -5327,6 +5422,20 @@ function handleSpectatorMessage(msg) {
       if (!cid) break;
       const prev = state.spectator.players[cid] || {};
       state.spectator.players[cid] = { ...prev, ...msg };
+      _spectatorRender();
+      break;
+    }
+    case "player_cursor": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      state.spectator.cursors[cid] = {
+        x: Number(msg.x) || 0,
+        y: Number(msg.y) || 0,
+        flipped: !!msg.flipped,
+        selected: typeof msg.selected === "string" ? msg.selected : "",
+        dragging: !!msg.dragging,
+        ts: Date.now(),
+      };
       _spectatorRender();
       break;
     }
@@ -5436,7 +5545,7 @@ function _spectatorRenderSingle(p) {
     : `<span class="ps-val">🔥 ${streak}</span>`;
   return `
     <div class="spectator-single">
-      <div class="board-host">${_renderMiniBoardFromFen(fen)}</div>
+      <div class="board-host">${_renderMiniBoardFromFen(fen, p)}</div>
       <div class="meta-host">
         <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
         <div class="row">Очки: <b>${Number(p.score || 0)}</b></div>
@@ -5461,7 +5570,7 @@ function _spectatorRenderGrid(players) {
               <span class="gscore">${Number(p.score || 0)}</span>
             </div>
             <div class="grid-streak">Серия: 🔥 ${streak}</div>
-            <div class="board-host">${_renderMiniBoardFromFen(p.fen || "")}</div>
+            <div class="board-host">${_renderMiniBoardFromFen(p.fen || "", p)}</div>
           </div>
         `;
       }).join("")}
@@ -5469,16 +5578,65 @@ function _spectatorRenderGrid(players) {
   `;
 }
 
-// FEN -> read-only mini-board with the user's selected piece set and
-// board theme. Mirrors the main board (real piece SVGs, a-h/1-8 strip
-// labels, theme-driven square colours) so spectators see exactly what
-// they'd see if they were the one solving.
-function _renderMiniBoardFromFen(fen) {
+function _miniBoardThemeStyle(themeKey) {
+  const t = BOARD_THEMES[themeKey] || BOARD_THEMES[DEFAULT_BOARD_THEME];
+  if (!t) return "";
+  // Scope the theme variables to this wrapper only — spectators
+  // viewing player A and player B at the same time may see two
+  // different themes side by side, so we cannot mutate :root.
+  const lightSq = t.image ? "transparent" : t.light;
+  const darkSq = t.image ? "transparent" : t.dark;
+  const boardImage = t.image ? `url("${t.image}")` : "none";
+  const cls = t.image ? "mini-board-wrap board-theme-image" : "mini-board-wrap";
+  return {
+    cls,
+    style: (
+      `--light-sq:${lightSq};--dark-sq:${darkSq};--board-image:${boardImage};`
+    ),
+  };
+}
+
+// FEN -> read-only mini-board rendered in the *watched* player's
+// chosen piece set and board theme (so the spectator always sees the
+// same board the player is looking at, regardless of the spectator's
+// own settings). Mirrors the main board's a-h/1-8 strip labels.
+function _renderMiniBoardFromFen(fen, player) {
+  const pieceSet = (player && player.pieces) || getPieceSet();
+  const themeKey = (player && player.theme) || userSettings.theme;
+  const themeStyle = _miniBoardThemeStyle(themeKey);
+  const cid = (player && player.client_id) || "";
+  // Cursor / selection overlay sourced from `player_state` cursor
+  // updates relayed by the server.
+  const cursor = (player && state.spectator && state.spectator.cursors)
+    ? state.spectator.cursors[cid]
+    : null;
+  let overlayHtml = "";
+  if (cursor && typeof cursor.x === "number" && typeof cursor.y === "number") {
+    const x = Math.max(0, Math.min(1, cursor.x)) * 100;
+    const y = Math.max(0, Math.min(1, cursor.y)) * 100;
+    const cls = cursor.dragging ? "mb-cursor is-drag" : "mb-cursor";
+    overlayHtml += `<div class="${cls}" style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%;"></div>`;
+  }
   if (!fen || typeof fen !== "string") {
-    return `<div class="mini-board-wrap"></div>`;
+    return `<div class="${themeStyle.cls}" style="${themeStyle.style}">
+      <div class="mb-ranks"></div>
+      <div class="mini-board" data-cid="${escapeHtml(cid)}">${overlayHtml}</div>
+      <div class="mb-corner"></div>
+      <div class="mb-files"></div>
+    </div>`;
   }
   const rows = fen.split(" ")[0].split("/");
-  if (rows.length !== 8) return `<div class="mini-board-wrap"></div>`;
+  if (rows.length !== 8) return `<div class="${themeStyle.cls}" style="${themeStyle.style}"></div>`;
+  // Selected square overlay (player highlighted a square they're
+  // thinking about). 'a8' is top-left for white-at-bottom view.
+  let selectedRC = null;
+  if (cursor && cursor.selected && cursor.selected.length === 2) {
+    const file = cursor.selected.charCodeAt(0) - "a".charCodeAt(0);
+    const rank = parseInt(cursor.selected[1], 10);
+    if (file >= 0 && file < 8 && rank >= 1 && rank <= 8) {
+      selectedRC = { f: file, r: 8 - rank };
+    }
+  }
   const cells = [];
   for (let r = 0; r < 8; r++) {
     const row = rows[r];
@@ -5491,29 +5649,27 @@ function _renderMiniBoardFromFen(fen) {
       }
     }
     if (expanded.length !== 8) {
-      // malformed — bail
-      return `<div class="mini-board-wrap"></div>`;
+      return `<div class="${themeStyle.cls}" style="${themeStyle.style}"></div>`;
     }
     for (let f = 0; f < 8; f++) {
       const isLight = (r + f) % 2 === 0;
       const piece = expanded[f];
       const pieceHtml = piece
-        ? `<img class="mb-piece" src="${pieceSvgUrl(piece)}" alt="${piece}" draggable="false">`
+        ? `<img class="mb-piece" src="${pieceSvgUrl(piece, pieceSet)}" alt="${piece}" draggable="false">`
         : "";
-      cells.push(`<div class="mb-square ${isLight ? "mb-light" : "mb-dark"}">${pieceHtml}</div>`);
+      const isSelected = selectedRC && selectedRC.r === r && selectedRC.f === f;
+      const cls = `mb-square ${isLight ? "mb-light" : "mb-dark"}${isSelected ? " mb-selected" : ""}`;
+      cells.push(`<div class="${cls}">${pieceHtml}</div>`);
     }
   }
-  // Coords match the main board (white-at-bottom orientation): rank
-  // labels read 8→1 down the left edge, file labels a→h along the
-  // bottom. Spectator view never flips the board so this is fixed.
   const ranks = ["8", "7", "6", "5", "4", "3", "2", "1"]
     .map((r) => `<span>${r}</span>`).join("");
   const files = ["a", "b", "c", "d", "e", "f", "g", "h"]
     .map((f) => `<span>${f}</span>`).join("");
   return `
-    <div class="mini-board-wrap">
+    <div class="${themeStyle.cls}" style="${themeStyle.style}">
       <div class="mb-ranks">${ranks}</div>
-      <div class="mini-board">${cells.join("")}</div>
+      <div class="mini-board" data-cid="${escapeHtml(cid)}">${cells.join("")}${overlayHtml}</div>
       <div class="mb-corner"></div>
       <div class="mb-files">${files}</div>
     </div>

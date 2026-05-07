@@ -90,6 +90,13 @@ class Member:
     solved: int = 0
     failed: int = 0
     skipped: int = 0
+    # Per-player UI prefs. Spectators render each player's mini-board
+    # in *that* player's chosen board theme + piece set, so e.g. a
+    # player who picked the green board with merida pieces is shown
+    # exactly like that on every watcher's screen, regardless of what
+    # the watcher picked locally.
+    theme: str = ""
+    pieces: str = ""
     # Live "current consecutive solves" counter shown to spectators as
     # the player's "Серия" badge. Resets on a fail or skip.
     streak: int = 0
@@ -150,6 +157,8 @@ class Party:
             "skipped": m.skipped,
             "streak": m.streak,
             "best_streak": m.best_streak,
+            "theme": m.theme,
+            "pieces": m.pieces,
             "online": m.ws is not None,
         }
 
@@ -232,6 +241,8 @@ class Party:
             "skipped": m.skipped,
             "streak": m.streak,
             "best_streak": m.best_streak,
+            "theme": m.theme,
+            "pieces": m.pieces,
             "puzzle_id": cur.get("id"),
             "fen": m.current_fen or str(cur.get("fen") or ""),
             "puzzle_rating": int(cur.get("rating") or 0),
@@ -280,10 +291,13 @@ class Party:
         nickname: str,
         avatar: str,
         ws: WebSocket,
+        *,
+        theme: str = "",
+        pieces: str = "",
     ) -> Member:
         existing = self.members.get(client_id)
         if existing is None:
-            if len(self.members) >= MAX_MEMBERS:
+            if len([m for m in self.members.values() if m.ws is not None]) >= MAX_MEMBERS:
                 raise PartyError("party_full", "Party is full")
             if self.status != "lobby":
                 raise PartyError("in_progress", "Party already started")
@@ -293,6 +307,8 @@ class Party:
                 avatar=avatar[:8] or "♟",
                 ws=ws,
                 is_host=(client_id == self.host_id),
+                theme=(theme or "")[:32],
+                pieces=(pieces or "")[:32],
             )
             self.members[client_id] = existing
         else:
@@ -302,6 +318,10 @@ class Party:
                 existing.nickname = nickname[:32]
             if avatar:
                 existing.avatar = avatar[:8]
+            if theme:
+                existing.theme = theme[:32]
+            if pieces:
+                existing.pieces = pieces[:32]
         await self._send(client_id, {"type": "lobby", **self.public_state()})
         await self.broadcast({"type": "lobby", **self.public_state()})
         if self.status == "playing":
@@ -330,7 +350,47 @@ class Party:
         return existing
 
     async def detach(self, client_id: str) -> None:
+        # Lobby parties are fluid — if a member's WS dies before the
+        # match starts, drop them entirely so the lobby count and the
+        # "Открытые пати" listing reflect reality. During a live match
+        # we keep their slot so a brief reconnect doesn't lose their
+        # score.
+        if self.status == "lobby":
+            await self.leave(client_id)
+            return
         await self._mark_disconnect(client_id)
+        await self.broadcast({"type": "lobby", **self.public_state()})
+
+    async def leave(self, client_id: str) -> None:
+        """Hard-remove a member (lobby exit / explicit leave).
+
+        For lobby status this drops the slot entirely so other clients
+        see the count go down; if the host leaves we transfer host to
+        the next live member or close the party. During a live match
+        we keep the slot — leaving mid-match should still preserve the
+        score for the final scoreboard, just like a network drop.
+        """
+        m = self.members.pop(client_id, None) if self.status == "lobby" else None
+        if m is None:
+            await self._mark_disconnect(client_id)
+            await self.broadcast({"type": "lobby", **self.public_state()})
+            return
+        if m.ws is not None:
+            try:
+                await m.ws.close()
+            except Exception:
+                pass
+        # Host transfer / party close.
+        if client_id == self.host_id:
+            new_host = next(
+                (cid for cid, x in self.members.items() if x.ws is not None),
+                None,
+            )
+            if new_host is None:
+                _PARTIES.pop(self.code, None)
+                return
+            self.host_id = new_host
+            self.members[new_host].is_host = True
         await self.broadcast({"type": "lobby", **self.public_state()})
 
     async def attach_spectator(
@@ -394,6 +454,52 @@ class Party:
             return
         m.current_fen = str(fen or "")
         await self.broadcast_player_state(m)
+
+    async def relay_cursor(
+        self,
+        client_id: str,
+        x: float,
+        y: float,
+        *,
+        flipped: bool = False,
+        selected: str | None = None,
+        dragging: bool = False,
+    ) -> None:
+        """Pure relay of a player's pointer position to spectators.
+
+        Coords are normalized to the player's board (``0..1`` from
+        top-left of the *rendered* board, so a flipped board is in
+        screen-space already). ``selected`` is an algebraic square
+        ("e4") if the player has a square highlighted, ``dragging``
+        marks an active drag — both let spectators show "thinking"
+        state on top of the live FEN.
+        """
+        if not self.spectators:
+            return
+        m = self.members.get(client_id)
+        if m is None:
+            return
+        # Stay safe on garbage input; the JS layer normalizes but the
+        # server is the trust boundary.
+        try:
+            xv = max(-0.05, min(1.05, float(x)))
+            yv = max(-0.05, min(1.05, float(y)))
+        except (TypeError, ValueError):
+            return
+        sel = (selected or "").strip().lower()
+        if len(sel) != 2 or sel[0] not in "abcdefgh" or sel[1] not in "12345678":
+            sel = ""
+        await self.broadcast_spectators(
+            {
+                "type": "player_cursor",
+                "client_id": m.client_id,
+                "x": xv,
+                "y": yv,
+                "flipped": bool(flipped),
+                "selected": sel,
+                "dragging": bool(dragging),
+            }
+        )
 
     async def start(self, by_client_id: str) -> None:
         if by_client_id != self.host_id:
@@ -583,10 +689,20 @@ def list_open() -> list[dict[str, Any]]:
 
     Used by the frontend "backup-join" path: if a friend dismissed the
     invitation toast they can still find the party here and click join.
+    Parties with no live (connected) members are filtered out — without
+    that we'd show ghost rooms forever after everyone left, and the
+    member counter would stay at the peak headcount even after the
+    last person ливнул.
     """
+    # Self-cleaning: drop stale rooms before computing the listing so
+    # callers can't see a finished/empty party.
+    _drop_stale()
     rows: list[dict[str, Any]] = []
     for p in _PARTIES.values():
         if p.status == "finished":
+            continue
+        live = [m for m in p.members.values() if m.ws is not None]
+        if not live:
             continue
         host = p.members.get(p.host_id)
         rows.append(
@@ -597,7 +713,7 @@ def list_open() -> list[dict[str, Any]]:
                 "host_id": p.host_id,
                 "host_nickname": host.nickname if host else "Гость",
                 "host_avatar": host.avatar if host else "♟",
-                "members": len(p.members),
+                "members": len(live),
                 "spectator_count": sum(1 for s in p.spectators.values() if s.ws is not None),
                 "ends_at": int(p.ends_at) if p.status == "playing" else 0,
                 "created_at": int(p.created_at),
@@ -607,19 +723,40 @@ def list_open() -> list[dict[str, Any]]:
     return rows
 
 
-def reap_idle() -> None:
-    """Drop parties that have been finished or empty for too long."""
+def _drop_stale() -> None:
+    """Remove parties no one is in (lobby) or that have been finished long ago.
+
+    Conservative on ``status == "playing"`` so a brief network blip
+    doesn't kill an active match — we only drop those if they've also
+    timed out (``ends_at`` in the past) AND have no live members.
+    """
     now = time.time()
     drop: list[str] = []
     for code, p in _PARTIES.items():
         if p.status == "finished" and now - p.ends_at > 1800:
             drop.append(code)
-        elif p.status == "lobby" and now - p.created_at > LOBBY_GRACE_SEC and all(
-            m.ws is None for m in p.members.values()
-        ):
-            drop.append(code)
+            continue
+        if any(m.ws is not None for m in p.members.values()):
+            continue
+        # No live members.
+        if p.status == "lobby":
+            if now - p.created_at >= LOBBY_GRACE_SEC:
+                drop.append(code)
+        elif p.status == "playing":
+            # Match clock expired and the room is empty — safe to drop.
+            if p.ends_at and now > p.ends_at:
+                drop.append(code)
     for code in drop:
         _PARTIES.pop(code, None)
+
+
+def reap_idle() -> None:
+    """Drop parties that have been finished or empty for too long.
+
+    Thin wrapper around :func:`_drop_stale` kept for backwards
+    compatibility with the HTTP endpoints that still call it.
+    """
+    _drop_stale()
 
 
 def reset_for_tests() -> None:
