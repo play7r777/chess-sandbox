@@ -36,6 +36,27 @@
           <button id="btn-mode-sandbox" type="button" class="mode-btn" title="Свободная расстановка, любые ходы">🧪 Песочница</button>
         </div>
         <button id="btn-settings" type="button" class="settings-btn" title="Настройки доски">⚙</button>
+        <div class="user-menu" id="user-menu">
+          <button id="btn-user-menu" type="button" class="settings-btn user-menu-btn" title="Profile / Leaderboard" aria-haspopup="true" aria-expanded="false">
+            <span class="user-menu-burger" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+          </button>
+          <div id="user-menu-dropdown" class="user-menu-dropdown" hidden role="menu">
+            <button type="button" class="user-menu-item" data-action="profile" role="menuitem">
+              <span class="user-menu-glyph">👤</span>
+              <span>Profile</span>
+            </button>
+            <button type="button" class="user-menu-item" data-action="leaderboard" role="menuitem">
+              <span class="user-menu-glyph">🏆</span>
+              <span>Leaderboard</span>
+            </button>
+            <button type="button" class="user-menu-item" data-action="party" role="menuitem">
+              <span class="user-menu-glyph">🎉</span>
+              <span>Party</span>
+            </button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -261,6 +282,31 @@
             <span class="muted" style="margin-left:8px;">от 1 до 24</span>
           </div>
         </div>
+        <div class="settings-row">
+          <label for="settings-legal-dot">Цвет подсказок ходов</label>
+          <div class="settings-options settings-color-row">
+            <input id="settings-legal-dot" type="color" />
+            <button type="button" id="settings-legal-dot-reset" class="settings-color-reset">Сброс</button>
+            <span class="muted">Точки на куда можно сходить и кольцо взятия</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <label for="settings-piece-size">Размер фигуры (% клетки)</label>
+          <div class="settings-options settings-slider-row">
+            <input id="settings-piece-size" type="range" min="50" max="100" step="1" />
+            <input id="settings-piece-size-num" type="number" min="50" max="100" step="1" />
+            <span class="muted">от 50 до 100</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <label for="settings-piece-offset">Смещение вниз (% клетки)</label>
+          <div class="settings-options settings-slider-row">
+            <input id="settings-piece-offset" type="range" min="-10" max="20" step="1" />
+            <input id="settings-piece-offset-num" type="number" min="-10" max="20" step="1" />
+            <button type="button" id="settings-piece-reset" class="settings-color-reset">Сброс</button>
+            <span class="muted">отриц. — поднять, полож. — опустить</span>
+          </div>
+        </div>
         <div class="settings-actions">
           <button type="button" id="btn-settings-close">Готово</button>
         </div>
@@ -278,6 +324,56 @@
         </div>
       </div>
     </div>
+
+    <div id="onboarding-modal" class="modal-overlay" hidden>
+      <div class="modal-card onboarding-card">
+        <div class="onboarding-hero">
+          <div class="onboarding-piece">♛</div>
+          <h2>Добро пожаловать!</h2>
+          <p class="muted">Придумай ник и выбери аватар — он будет виден в лидерборде и профиле.</p>
+        </div>
+        <label class="onboarding-field">
+          <span>Ник</span>
+          <input id="onboarding-nick" type="text" maxlength="32" placeholder="Например, Tactician42" />
+        </label>
+        <div class="onboarding-field">
+          <span>Аватар</span>
+          <div id="onboarding-avatars" class="onboarding-avatars"></div>
+        </div>
+        <div class="onboarding-actions">
+          <button id="btn-onboarding-save" type="button" class="puzzle-primary">Сохранить</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="profile-modal" class="modal-overlay" hidden>
+      <div class="modal-card profile-card">
+        <button class="modal-close" data-close="profile-modal" type="button" aria-label="Закрыть">×</button>
+        <div id="profile-body" class="profile-body"></div>
+      </div>
+    </div>
+
+    <div id="leaderboard-modal" class="modal-overlay" hidden>
+      <div class="modal-card leaderboard-card">
+        <button class="modal-close" data-close="leaderboard-modal" type="button" aria-label="Закрыть">×</button>
+        <header class="leaderboard-header">
+          <h2>🏆 Лидерборд</h2>
+          <p class="muted">Игроки этого сервера. Нажми на игрока, чтобы открыть профиль.</p>
+        </header>
+        <div id="leaderboard-body" class="leaderboard-body"></div>
+      </div>
+    </div>
+
+    <div id="party-modal" class="modal-overlay" hidden>
+      <div class="modal-card party-card">
+        <button class="modal-close" data-close="party-modal" type="button" aria-label="Закрыть">×</button>
+        <div id="party-body" class="party-body"></div>
+      </div>
+    </div>
+
+    <!-- Toasts: bottom-right stack for party invitations and similar nudges. -->
+    <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
     <script type="module" src="/static/app.js"></script>
   </body>
 </html>

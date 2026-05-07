@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     frontend_dir: Path = Path(__file__).resolve().parent.parent / "frontend"
     backend_root: Path = Path(__file__).resolve().parent
 
+    # Where mutable state lives (users / leaderboard / party history /
+    # puzzle SQLite). Sits next to the bundled puzzle pack so the app
+    # is fully self-contained for a local install.
+    data_dir: Path = Path(__file__).resolve().parent / "data"
+
     def resolve_stockfish_path(self) -> str | None:
         """Return the Stockfish binary path, falling back to PATH lookup."""
         if self.stockfish_path:

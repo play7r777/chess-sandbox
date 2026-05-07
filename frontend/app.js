@@ -10,6 +10,23 @@
 
 import { Chess } from "/static/lib/chess.js";
 
+// When the page is opened through a Basic-Auth-protected tunnel
+// (e.g. `https://user:pass@host/`), Chrome strips the credentials
+// from the address bar but `document.baseURI` may still keep them,
+// which makes `fetch("/api/...")` and the WebSocket constructor throw
+// `Request cannot be constructed from a URL that includes credentials`.
+// Resolve every relative request against an explicitly clean origin
+// (`location.protocol + location.host`) so the wrapper is a no-op on
+// normal hosting and only kicks in for credentialed tunnels.
+const _CLEAN_ORIGIN = `${location.protocol}//${location.host}`;
+const _origFetch = window.fetch.bind(window);
+window.fetch = function patchedFetch(input, init) {
+  if (typeof input === "string" && input.startsWith("/")) {
+    return _origFetch(_CLEAN_ORIGIN + input, init);
+  }
+  return _origFetch(input, init);
+};
+
 // Persistent UI settings (localStorage). Falls back to defaults if unset.
 const SETTINGS_KEY = "chess-sandbox/settings/v1";
 const DEFAULT_PIECE_SET = "merida";
@@ -31,6 +48,8 @@ const BOARD_THEMES = {
   tournament: { name: "Tournament", light: "#c9c9c9", dark: "#5d6470", highlight: "rgba(180, 200, 255, 0.40)" },
   newspaper:  { name: "Newspaper",  light: "#ffffff", dark: "#9b9b9b", highlight: "rgba(255, 230, 90, 0.45)" },
   set1:       { name: "#1",         image: "/static/board-themes/set1.png", highlight: "rgba(255, 220, 90, 0.45)" },
+  set2:       { name: "#2",         image: "/static/board-themes/set2.png", highlight: "rgba(255, 220, 90, 0.45)" },
+  set3:       { name: "#3",         image: "/static/board-themes/set3.png", highlight: "rgba(255, 240, 90, 0.45)" },
 };
 
 // Available piece sets. Files live under /static/pieces/<key>/ and are
@@ -49,7 +68,36 @@ const PIECE_SETS = {
   fantasy:    { name: "Fantasy" },
   pirouetti:  { name: "Wood" },
   set1:       { name: "#1", ext: "png" },
+  set2:       { name: "#2", ext: "png" },
+  set3:       { name: "#3", ext: "png" },
 };
+
+// Default colour for the legal-move dots / capture rings. Users can
+// override this from the settings modal; we keep a single source of
+// truth so the CSS variable, the picker, and the saved settings all
+// agree.
+const DEFAULT_LEGAL_DOT_COLOR = "#28c85a";
+
+// Piece sizing defaults. Both numbers are percentages of the cell:
+// `pieceSize` is the piece image's width/height, `pieceOffsetY`
+// shifts the piece downward inside the cell (negative values shift
+// it up). Tuned to match chess.com's resting placement.
+const DEFAULT_PIECE_SIZE = 95;
+const DEFAULT_PIECE_OFFSET_Y = 2;
+const MIN_PIECE_SIZE = 50;
+const MAX_PIECE_SIZE = 100;
+const MIN_PIECE_OFFSET_Y = -10;
+const MAX_PIECE_OFFSET_Y = 20;
+function _clampPieceSize(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_PIECE_SIZE;
+  return Math.max(MIN_PIECE_SIZE, Math.min(MAX_PIECE_SIZE, Math.round(v)));
+}
+function _clampPieceOffsetY(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_PIECE_OFFSET_Y;
+  return Math.max(MIN_PIECE_OFFSET_Y, Math.min(MAX_PIECE_OFFSET_Y, Math.round(v)));
+}
 
 const DEFAULT_PV_ARROW_COUNT = 6;
 const MAX_PV_ARROW_COUNT = 12;
@@ -65,6 +113,13 @@ function _clampBestLine(n) {
   if (!Number.isFinite(v)) return DEFAULT_BEST_LINE_LENGTH;
   return Math.max(1, Math.min(MAX_BEST_LINE_LENGTH, Math.round(v)));
 }
+// Validates a CSS colour string the user typed/picked. We restrict to
+// `#rgb` / `#rrggbb` because the colour input emits those, and a hex
+// value drops trivially into rgba() expressions for the dot/ring fill.
+function _isHexColor(s) {
+  return typeof s === "string" && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s);
+}
+
 function loadSettings() {
   const fallback = {
     theme: DEFAULT_BOARD_THEME,
@@ -72,6 +127,9 @@ function loadSettings() {
     soundOn: true,
     pvArrowCount: DEFAULT_PV_ARROW_COUNT,
     bestLineLength: DEFAULT_BEST_LINE_LENGTH,
+    legalDotColor: DEFAULT_LEGAL_DOT_COLOR,
+    pieceSize: DEFAULT_PIECE_SIZE,
+    pieceOffsetY: DEFAULT_PIECE_OFFSET_Y,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -83,6 +141,11 @@ function loadSettings() {
       soundOn: parsed.soundOn !== false,
       pvArrowCount: _clampArrows(parsed.pvArrowCount ?? DEFAULT_PV_ARROW_COUNT),
       bestLineLength: _clampBestLine(parsed.bestLineLength ?? DEFAULT_BEST_LINE_LENGTH),
+      legalDotColor: _isHexColor(parsed.legalDotColor)
+        ? parsed.legalDotColor
+        : DEFAULT_LEGAL_DOT_COLOR,
+      pieceSize: _clampPieceSize(parsed.pieceSize ?? DEFAULT_PIECE_SIZE),
+      pieceOffsetY: _clampPieceOffsetY(parsed.pieceOffsetY ?? DEFAULT_PIECE_OFFSET_Y),
     };
   } catch { return fallback; }
 }
@@ -97,6 +160,40 @@ function getPieceExt() {
   const set = PIECE_SETS[getPieceSet()];
   return (set && set.ext) || "svg";
 }
+// Convert "#rrggbb" / "#rgb" -> rgba() with the requested alpha. Used
+// to fade the legal-dot picker colour into the board overlay.
+function _hexToRgba(hex, alpha) {
+  const m = String(hex || "").trim();
+  let r = 40, g = 200, b = 90;
+  if (/^#[0-9a-f]{3}$/i.test(m)) {
+    r = parseInt(m[1] + m[1], 16);
+    g = parseInt(m[2] + m[2], 16);
+    b = parseInt(m[3] + m[3], 16);
+  } else if (/^#[0-9a-f]{6}$/i.test(m)) {
+    r = parseInt(m.slice(1, 3), 16);
+    g = parseInt(m.slice(3, 5), 16);
+    b = parseInt(m.slice(5, 7), 16);
+  }
+  const a = Math.max(0, Math.min(1, Number(alpha)));
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
+function applyLegalDotColor() {
+  const c = _isHexColor(userSettings.legalDotColor)
+    ? userSettings.legalDotColor
+    : DEFAULT_LEGAL_DOT_COLOR;
+  document.documentElement.style.setProperty("--legal-dot", _hexToRgba(c, 0.55));
+}
+
+function applyPieceSizing() {
+  const size = _clampPieceSize(userSettings.pieceSize);
+  const offY = _clampPieceOffsetY(userSettings.pieceOffsetY);
+  const root = document.documentElement;
+  root.style.setProperty("--piece-size", `${size}%`);
+  root.style.setProperty("--piece-offset-y", `${offY}%`);
+}
+applyPieceSizing();
+
 function applyBoardTheme() {
   const t = BOARD_THEMES[userSettings.theme] || BOARD_THEMES[DEFAULT_BOARD_THEME];
   const root = document.documentElement;
@@ -116,6 +213,7 @@ function applyBoardTheme() {
     root.style.setProperty("--dark-sq", t.dark);
     document.body.classList.remove("board-theme-image");
   }
+  applyLegalDotColor();
 }
 applyBoardTheme();
 
@@ -206,9 +304,14 @@ function escapeHtml(s) {
   })[ch]);
 }
 
-function pieceSvgUrl(piece) {
+function pieceSvgUrl(piece, overrideSet) {
+  // overrideSet lets the spectator render a different player's pieces
+  // without touching the local user's settings.
+  const setKey = overrideSet || getPieceSet();
+  const set = PIECE_SETS[setKey] || PIECE_SETS[getPieceSet()];
+  const ext = (set && set.ext) || "svg";
   const color = piece === piece.toUpperCase() ? "w" : "b";
-  return `/static/pieces/${getPieceSet()}/${color}${piece.toUpperCase()}.${getPieceExt()}`;
+  return `/static/pieces/${setKey}/${color}${piece.toUpperCase()}.${ext}`;
 }
 
 function makePieceImg(piece, options = {}) {
@@ -231,6 +334,71 @@ const STARTPOS_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const EMPTY_FEN = "8/8/8/8/8/8/8/8 w - - 0 1";
 
 const state = {
+  // Active high-level view ('main' | 'analysis' | 'puzzle'). Mirrored
+  // by `document.body.classList`; tracked here so callers don't have to
+  // poke the DOM to gate behaviour like puzzle move dispatch.
+  view: "main",
+  // Local user identity (nickname/avatar) loaded from localStorage and
+  // synced to the backend so the leaderboard sees this client.
+  user: { client_id: null, nickname: "", avatar: "♟", elo_history: null },
+  // Active party / co-op puzzle session, if any.
+  party: {
+    active: false,       // true between WS open and "finish" message
+    ws: null,
+    code: null,
+    party_id: null,
+    host_id: null,
+    status: "lobby",     // lobby | playing | finished
+    endsAt: 0,
+    startedAt: 0,
+    members: [],
+    scoreboard: [],
+    finalResults: null,
+    finalMeta: null,     // { duration_sec, started_at, ended_at, party_id }
+    selfScore: 0,
+    countdownInterval: null,
+    // Host-picked match length (sec). Default 600 (= 10 min). Sent
+    // with the WS "start" frame; the server validates against an
+    // allow-list before honouring it.
+    durationSec: 600,
+    allowedDurations: [120, 180, 300, 600],
+  },
+  // Spectator session (view-only, separate from `party`).
+  spectator: {
+    active: false,
+    ws: null,
+    code: null,
+    party_id: null,
+    status: "lobby",
+    endsAt: 0,
+    players: {},        // client_id -> { fen, score, solved, ... }
+    cursors: {},        // client_id -> { x, y, flipped, selected, dragging, ... }
+    scoreboard: [],
+    selectedId: null,
+    mode: "single",     // single | grid
+    // When true, this spectator session is following a *solo* player
+    // (presence WS), not a party. The renderer treats both kinds the
+    // same once the data is in `players[cid]` / `cursors[cid]`, but
+    // we need to know which WS to route lifecycle messages through.
+    kind: "party",      // "party" | "presence"
+  },
+  // Solo-broadcast session — open whenever the user is solving puzzles
+  // outside a party. Lets other users watch them via the "Оффлайн"
+  // tab. Single connection; closed when the user enters a party or
+  // leaves the puzzle view.
+  presence: {
+    active: false,
+    ws: null,
+    // Last known dedupe key for selection broadcasts so we don't spam
+    // the wire on every renderBoard().
+    lastSelectionKey: undefined,
+  },
+  // Inbound notifications (party invites etc.) from SSE.
+  notifications: {
+    es: null,           // EventSource
+    invitations: {},    // invite_id -> invitation payload
+    reconnectTimer: null,
+  },
   // 64-cell array indexed 0..63 where 0 = a8, 7 = h8, 56 = a1, 63 = h1.
   // Each cell is a piece char (e.g. 'P','k') or null.
   board: new Array(64).fill(null),
@@ -309,7 +477,9 @@ const state = {
     startedAt: 0,             // ms when solver-state began (after setup move)
     solveMs: 0,               // ms to solve last puzzle (for display)
     pendingNext: null,        // setTimeout handle for auto-next after fail
+    needsNextOnReturn: false, // user left mid-pendingNext; advance when they come back
     timerHandle: null,        // setInterval handle for live timer display
+    idle: true,               // gate auto-load behind a "Начать игру" click
   },
 };
 
@@ -750,6 +920,14 @@ function renderBoard() {
   renderBoardCoords();
   syncMetaInputs();
   document.getElementById("fen-input").value = buildFen();
+  // After every full board re-render, push the current selection (or
+  // its absence) to spectators so their hint dots / source-square
+  // overlay stay in sync with what the player sees. The helper is a
+  // no-op outside an active party and dedupes against the last
+  // payload, so it's cheap to call here.
+  if (typeof _partySyncSelectionFromState === "function") {
+    _partySyncSelectionFromState();
+  }
 }
 
 // Render rank numbers (left strip) and file letters (bottom strip)
@@ -789,6 +967,155 @@ function setStatus(msg, kind = "") {
 }
 
 // ---------- Drag-drop ----------
+
+// HTML5 drag-and-drop is desktop-only — touchstart never fires
+// dragstart on phones. To make the board playable on mobile we run a
+// parallel touch-drag layer at document level (one listener, no
+// per-piece bookkeeping). Tap-to-select-tap-to-move still works via
+// the .square click handler; this is purely the drag affordance.
+const _touchDrag = {
+  active: false,
+  source: null,        // the .piece DOM element being dragged
+  fromSquare: null,    // algebraic source square
+  piece: null,         // FEN char of the piece
+  startX: 0,
+  startY: 0,
+  ghost: null,         // floating piece image following the finger
+  threshold: 8,        // px before we commit to a drag
+  primed: false,       // touch is down on a piece, waiting for movement
+};
+
+function _touchEnsureGhost(srcImg, x, y) {
+  if (_touchDrag.ghost) return _touchDrag.ghost;
+  const g = document.createElement("img");
+  g.src = srcImg ? srcImg.src : "";
+  g.alt = "";
+  g.className = "touch-drag-ghost";
+  g.style.position = "fixed";
+  g.style.left = "0";
+  g.style.top = "0";
+  g.style.width = "56px";
+  g.style.height = "56px";
+  g.style.pointerEvents = "none";
+  g.style.zIndex = "9999";
+  g.style.transform = `translate(${(x - 28).toFixed(1)}px, ${(y - 28).toFixed(1)}px) scale(1.05)`;
+  g.style.filter = "drop-shadow(0 4px 8px rgba(0,0,0,0.5))";
+  document.body.appendChild(g);
+  _touchDrag.ghost = g;
+  return g;
+}
+
+function _touchClearDrag() {
+  if (_touchDrag.source) _touchDrag.source.classList.remove("dragging");
+  if (_touchDrag.ghost) {
+    try { _touchDrag.ghost.remove(); } catch (_) { /* ignore */ }
+  }
+  document.querySelectorAll(".square.drop-target")
+    .forEach((c) => c.classList.remove("drop-target"));
+  clearDragLegalTargets();
+  _touchDrag.active = false;
+  _touchDrag.primed = false;
+  _touchDrag.source = null;
+  _touchDrag.fromSquare = null;
+  _touchDrag.piece = null;
+  _touchDrag.ghost = null;
+}
+
+document.addEventListener("touchstart", (ev) => {
+  // Only react to a single finger on a board piece. Multi-touch
+  // (pinch-zoom etc.) is left to the browser.
+  if (ev.touches.length !== 1) return;
+  const t = ev.touches[0];
+  const pieceEl = t.target.closest && t.target.closest(".piece");
+  if (!pieceEl) return;
+  // Skip palette pieces — they have draggable=true but no fromSquare;
+  // we don't support placing pieces from the palette via touch (rare
+  // use case + tap-to-select doesn't have an obvious target). Users
+  // can still drag from the palette on a desktop.
+  const cell = pieceEl.closest(".square");
+  if (!cell || !cell.dataset.square) return;
+  _touchDrag.primed = true;
+  _touchDrag.source = pieceEl;
+  _touchDrag.fromSquare = cell.dataset.square;
+  _touchDrag.piece = pieceEl.dataset.piece || "";
+  _touchDrag.startX = t.clientX;
+  _touchDrag.startY = t.clientY;
+}, { passive: true });
+
+document.addEventListener("touchmove", (ev) => {
+  if (!_touchDrag.primed && !_touchDrag.active) return;
+  if (ev.touches.length !== 1) { _touchClearDrag(); return; }
+  const t = ev.touches[0];
+  if (!_touchDrag.active) {
+    // Promote primed -> active once the user has moved past the
+    // threshold. Below it we leave the touch alone so tap-to-select
+    // still bubbles into the cell click handler.
+    const dx = t.clientX - _touchDrag.startX;
+    const dy = t.clientY - _touchDrag.startY;
+    if ((dx * dx + dy * dy) < _touchDrag.threshold * _touchDrag.threshold) return;
+    _touchDrag.active = true;
+    if (_touchDrag.source) _touchDrag.source.classList.add("dragging");
+    paintDragLegalTargets(_touchDrag.fromSquare);
+    const srcImg = _touchDrag.source && _touchDrag.source.querySelector("img");
+    _touchEnsureGhost(srcImg, t.clientX, t.clientY);
+  }
+  // Now in active drag — block scroll and follow finger.
+  if (ev.cancelable) ev.preventDefault();
+  if (_touchDrag.ghost) {
+    _touchDrag.ghost.style.transform = `translate(${(t.clientX - 28).toFixed(1)}px, ${(t.clientY - 28).toFixed(1)}px) scale(1.05)`;
+  }
+  // Highlight the cell currently under the finger.
+  const under = document.elementFromPoint(t.clientX, t.clientY);
+  const overCell = under && under.closest && under.closest(".square");
+  document.querySelectorAll(".square.drop-target")
+    .forEach((c) => { if (c !== overCell) c.classList.remove("drop-target"); });
+  if (overCell) overCell.classList.add("drop-target");
+}, { passive: false });
+
+document.addEventListener("touchend", (ev) => {
+  if (!_touchDrag.active) {
+    // Touch ended without moving past threshold — let it become a
+    // click; just reset bookkeeping.
+    _touchClearDrag();
+    return;
+  }
+  const t = (ev.changedTouches && ev.changedTouches[0]) || null;
+  if (!t) { _touchClearDrag(); return; }
+  // Briefly hide the ghost so elementFromPoint doesn't pick *it* up.
+  if (_touchDrag.ghost) _touchDrag.ghost.style.display = "none";
+  const under = document.elementFromPoint(t.clientX, t.clientY);
+  const dropCell = under && under.closest && under.closest(".square");
+  const fromSquare = _touchDrag.fromSquare;
+  const piece = _touchDrag.piece;
+  _touchClearDrag();
+  if (!dropCell || !dropCell.dataset.square) return;
+  const targetSquare = dropCell.dataset.square;
+  if (targetSquare === fromSquare) return;
+  // Mirror handleDrop's branching: game / legal-mode / sandbox.
+  if (state.game.active) {
+    if (!fromSquare) return;
+    tryMakePlayerMove(fromSquare, targetSquare);
+    return;
+  }
+  if (state.legalMode) {
+    if (!fromSquare) return;
+    tryFreeplayMove(fromSquare, targetSquare);
+    return;
+  }
+  if (!fromSquare) return;
+  const fromIdx = idxFromSquareName(fromSquare);
+  const targetIdx = idxFromSquareName(targetSquare);
+  if (fromIdx === targetIdx) return;
+  snapshotForUndo();
+  state.board[targetIdx] = piece || state.board[fromIdx];
+  state.board[fromIdx] = null;
+  state.lastMove = null;
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  renderBoard();
+}, { passive: true });
+
+document.addEventListener("touchcancel", () => _touchClearDrag(), { passive: true });
 
 function attachSquareHandlers(cell) {
   cell.addEventListener("dragover", (e) => {
@@ -882,7 +1209,7 @@ function tryFreeplayMove(from, to) {
     tryDrillMove(from, to);
     return;
   }
-  if (state.puzzle && state.puzzle.active) {
+  if (state.puzzle && state.puzzle.active && state.view === "puzzle") {
     tryPuzzleMove(from, to);
     return;
   }
@@ -1040,12 +1367,34 @@ function paintDragLegalTargets(squareName) {
     fromCell.classList.add("selected");
     _dragHighlightedSquares.add(squareName);
   }
+  const captures = [];
   for (const sq of r.targets) {
     const cell = boardEl.querySelector(`.square[data-square="${sq}"]`);
     if (!cell) continue;
     const piece = r.chess.get(sq);
     cell.classList.add(piece ? "legal-capture" : "legal-move");
+    if (piece) captures.push(sq);
     _dragHighlightedSquares.add(sq);
+  }
+  // Drag bypasses renderBoard() (rebuilding the DOM mid-drag would
+  // cancel the drag), so we still need to push the same hint info to
+  // spectators directly here.
+  if (typeof _liveIsActive === "function" && _liveIsActive()) {
+    let pieceTag = null;
+    try {
+      const p = r.chess.get(squareName);
+      if (p) pieceTag = (p.color || "w") + (p.type || "p").toUpperCase();
+    } catch (_) { /* ignore */ }
+    const key = `${squareName}|${r.targets.join(",")}|${pieceTag}|${captures.join(",")}`;
+    if (window.__partyLastSelectionSent !== key) {
+      window.__partyLastSelectionSent = key;
+      _partyReportSelection({
+        from: squareName,
+        piece: pieceTag,
+        legalMoves: r.targets,
+        legalCaptures: captures,
+      });
+    }
   }
 }
 
@@ -1059,6 +1408,11 @@ function clearDragLegalTargets() {
     cell.classList.remove("legal-move", "legal-capture", "selected");
   }
   _dragHighlightedSquares.clear();
+  if (typeof _liveIsActive === "function" && _liveIsActive()
+      && window.__partyLastSelectionSent !== null) {
+    window.__partyLastSelectionSent = null;
+    _partyReportSelection({ from: null, piece: null, legalMoves: [], legalCaptures: [] });
+  }
 }
 
 function selectFreeplaySquare(squareName) {
@@ -1190,6 +1544,83 @@ function openSettingsModal() {
     };
     blInput.addEventListener("change", apply);
     blInput.addEventListener("blur", apply);
+  }
+  const dotInput = document.getElementById("settings-legal-dot");
+  const dotReset = document.getElementById("settings-legal-dot-reset");
+  if (dotInput) {
+    dotInput.value = _isHexColor(userSettings.legalDotColor)
+      ? userSettings.legalDotColor
+      : DEFAULT_LEGAL_DOT_COLOR;
+    const apply = () => {
+      const v = dotInput.value;
+      if (!_isHexColor(v)) return;
+      userSettings.legalDotColor = v;
+      saveSettings(userSettings);
+      applyLegalDotColor();
+    };
+    dotInput.addEventListener("input", apply);
+    dotInput.addEventListener("change", apply);
+  }
+  if (dotReset) {
+    dotReset.addEventListener("click", () => {
+      userSettings.legalDotColor = DEFAULT_LEGAL_DOT_COLOR;
+      saveSettings(userSettings);
+      applyLegalDotColor();
+      if (dotInput) dotInput.value = DEFAULT_LEGAL_DOT_COLOR;
+    });
+  }
+  const sizeInput = document.getElementById("settings-piece-size");
+  const sizeNum = document.getElementById("settings-piece-size-num");
+  const offsetInput = document.getElementById("settings-piece-offset");
+  const offsetNum = document.getElementById("settings-piece-offset-num");
+  const pieceReset = document.getElementById("settings-piece-reset");
+  function syncSizeUi(v) {
+    if (sizeInput) sizeInput.value = String(v);
+    if (sizeNum) sizeNum.value = String(v);
+  }
+  function syncOffsetUi(v) {
+    if (offsetInput) offsetInput.value = String(v);
+    if (offsetNum) offsetNum.value = String(v);
+  }
+  syncSizeUi(_clampPieceSize(userSettings.pieceSize));
+  syncOffsetUi(_clampPieceOffsetY(userSettings.pieceOffsetY));
+  function applySize(raw) {
+    const next = _clampPieceSize(raw);
+    syncSizeUi(next);
+    if (next !== userSettings.pieceSize) {
+      userSettings.pieceSize = next;
+      saveSettings(userSettings);
+      applyPieceSizing();
+    }
+  }
+  function applyOffset(raw) {
+    const next = _clampPieceOffsetY(raw);
+    syncOffsetUi(next);
+    if (next !== userSettings.pieceOffsetY) {
+      userSettings.pieceOffsetY = next;
+      saveSettings(userSettings);
+      applyPieceSizing();
+    }
+  }
+  if (sizeInput) sizeInput.addEventListener("input", () => applySize(sizeInput.value));
+  if (sizeNum) {
+    sizeNum.addEventListener("input", () => applySize(sizeNum.value));
+    sizeNum.addEventListener("change", () => applySize(sizeNum.value));
+  }
+  if (offsetInput) offsetInput.addEventListener("input", () => applyOffset(offsetInput.value));
+  if (offsetNum) {
+    offsetNum.addEventListener("input", () => applyOffset(offsetNum.value));
+    offsetNum.addEventListener("change", () => applyOffset(offsetNum.value));
+  }
+  if (pieceReset) {
+    pieceReset.addEventListener("click", () => {
+      userSettings.pieceSize = DEFAULT_PIECE_SIZE;
+      userSettings.pieceOffsetY = DEFAULT_PIECE_OFFSET_Y;
+      saveSettings(userSettings);
+      syncSizeUi(DEFAULT_PIECE_SIZE);
+      syncOffsetUi(DEFAULT_PIECE_OFFSET_Y);
+      applyPieceSizing();
+    });
   }
   modal.hidden = false;
 }
@@ -1910,6 +2341,8 @@ function setView(view) {
   if (view === "analysis")    v = "analysis";
   else if (view === "puzzle") v = "puzzle";
   else                        v = "main";
+  const prev = state.view;
+  state.view = v;
   document.body.classList.toggle("view-main",     v === "main");
   document.body.classList.toggle("view-analysis", v === "analysis");
   document.body.classList.toggle("view-puzzle",   v === "puzzle");
@@ -1924,7 +2357,7 @@ function setView(view) {
   // the board back the way the user found it.
   if (v === "puzzle") {
     enterPuzzleView();
-  } else if (state.puzzle && state.puzzle.active) {
+  } else if (prev === "puzzle" && state.puzzle && state.puzzle.current) {
     leavePuzzleView();
   }
 }
@@ -3034,29 +3467,65 @@ function enterPuzzleView() {
   if (state.puzzle.flippedSnapshot === null) {
     state.puzzle.flippedSnapshot = state.flipped;
   }
+  // We deliberately do *not* open the solo-broadcast WS here — that
+  // happens lazily in loadNextPuzzle(), the first moment a puzzle is
+  // actually on the board. Otherwise an idle user sitting on the
+  // start screen would show up in the Оффлайн tab with the empty
+  // starting position, and spectators could "watch" before the
+  // player has clicked anything.
   // Puzzle mode requires legal-move dispatch — force legal mode on so
   // drag/click attempts are routed through `tryFreeplayMove`.
   if (!state.legalMode) setBoardMode(true);
   _loadPuzzleSession();
-  // Auto-load a puzzle when entering an empty view.
+  // If we deferred an auto-next while the user was on Main, load it now.
+  if (state.puzzle.needsNextOnReturn) {
+    state.puzzle.needsNextOnReturn = false;
+    loadNextPuzzle();
+    return;
+  }
+  // Auto-load a puzzle when entering an empty view — but only if the
+  // user has explicitly clicked "Начать игру". Idle entry shows the
+  // start screen instead so we don't ambush anyone with a puzzle they
+  // didn't ask for.
   if (!state.puzzle.current) {
+    if (state.puzzle.idle) {
+      renderPuzzleUi();
+      return;
+    }
     loadNextPuzzle();
   } else {
     // Replay the current puzzle's start position (in case the user
     // bounced between tabs).
     _restorePuzzleBoard();
+    // Re-flip board to the solver's side if user changed orientation
+    // on another view.
+    const wantFlipped = state.puzzle.side === "b";
+    if (state.flipped !== wantFlipped) {
+      state.flipped = wantFlipped;
+      renderBoard();
+    }
     renderPuzzleUi();
     if (state.puzzle.active) _startPuzzleTimer();
   }
 }
 
 function leavePuzzleView() {
-  // Stop accepting board input as a puzzle attempt.
-  state.puzzle.active = false;
+  // The puzzle stays live (timer keeps counting via wall-clock against
+  // `state.puzzle.startedAt`) so users can't dodge a hard puzzle by
+  // bouncing tabs and hitting "Следующая" without penalty. Board input
+  // is gated on `state.view === "puzzle"` instead of the active flag.
   _stopPuzzleTimer();
+  // Drop the solo-broadcast connection — outside puzzle view there's
+  // nothing meaningful to broadcast and we don't want to clutter the
+  // "Оффлайн" list with idle entries.
+  try { presenceDisconnect(); } catch (_) { /* ignore */ }
+  // If an auto-next was pending (after a fail), defer it until the
+  // user actually returns to the puzzle tab — otherwise loadNextPuzzle
+  // would slap a puzzle FEN onto the Main / Analysis board.
   if (state.puzzle.pendingNext) {
     clearTimeout(state.puzzle.pendingNext);
     state.puzzle.pendingNext = null;
+    state.puzzle.needsNextOnReturn = true;
   }
   // Restore orientation only if we were the one that flipped it.
   if (state.puzzle.flippedSnapshot !== null
@@ -3087,6 +3556,19 @@ function _puzzleRatingWindow() {
 }
 
 async function loadNextPuzzle() {
+  // In party mode the server pushes the next puzzle over the WebSocket;
+  // never reach into the solo /api/puzzle endpoint while a match is live.
+  if (state.party.active && state.party.status === "playing") {
+    renderPuzzleStatsBar();
+    return;
+  }
+  // Any active puzzle load implicitly leaves the idle "Start" screen
+  // — once the user has any puzzle on the board they're committed.
+  state.puzzle.idle = false;
+  // Now that a real puzzle is being loaded, register in the solo
+  // presence registry so the Оффлайн tab can find this player. We
+  // skip this in party mode (returned earlier above).
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   const card = document.getElementById("puzzle-card");
   const actions = document.getElementById("puzzle-actions");
   if (card)    card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
@@ -3158,6 +3640,9 @@ function startPuzzle(puzzle) {
   state.lastMove = null;
   renderBoard();
   renderPuzzleUi();
+  // Sync spectators to the new puzzle's pre-setup FEN + flip
+  // immediately so they switch boards in lockstep with the player.
+  _partyReportPosition(puzzle.fen, { lastMove: null });
   // After a brief beat, animate the opponent's setup move (shorter
   // delay = snappier feel, fewer perceived "lag" complaints).
   state.puzzle.nextIdx = 0;
@@ -3200,6 +3685,11 @@ function _playPuzzleSetupMove() {
   state.lastMove = { from: move.from, to: move.to };
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  // Push the post-setup position to spectators so they see the same
+  // board the player sees (with the opponent's setup move already
+  // played and highlighted) — without this they kept staring at the
+  // pre-setup FEN until the player made their first solving move.
+  _partyReportPosition(c.fen(), { lastMove: state.lastMove });
   state.puzzle.nextIdx = 1;
   // Solver clock starts now (after setup move is on the board).
   state.puzzle.startedAt = Date.now();
@@ -3278,6 +3768,7 @@ function tryPuzzleMove(from, to) {
   }
   // Correct! Apply the user's move visually.
   loadFen(c.fen());
+  _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
   state.reviewBadge = { square: move.to, classification: "best" };
   state.bestArrow = null;
@@ -3314,6 +3805,7 @@ function _playPuzzleOpponentReply() {
   } catch { move = null; }
   if (!move) return;
   loadFen(c.fen());
+  _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
   state.reviewBadge = null;
   renderBoard();
@@ -3419,6 +3911,44 @@ function finalizePuzzle(result) {
   if (state.puzzle.history.length > 30) state.puzzle.history.length = 30;
   _savePuzzleSession();
   spawnPuzzleCelebration(outcome === "failed" || outcome === "skipped" ? "bad" : "ok");
+  // In a live party match the official rating is frozen — we just push
+  // the attempt over the WebSocket and let the server push the next
+  // puzzle. Solo mode keeps the existing leaderboard sync.
+  if (state.party.active && state.party.status === "playing") {
+    sendPartyAttempt({
+      puzzle_id: state.puzzle.current ? String(state.puzzle.current.id || "") : "",
+      outcome: (outcome === "solved-hint") ? "solved" : outcome,
+      solve_ms: state.puzzle.solveMs,
+    });
+  } else {
+    // Server is authoritative for rating — it computes Δ and the new
+    // rating from the canonical puzzle rating in its bank. We don't
+    // send `delta` / `new_rating` any more (those used to be trusted,
+    // which let anyone hand-edit users.json over the network). Sync
+    // back from the server's response so localStorage stays in step.
+    recordPuzzleAttemptOnServer({
+      outcome,
+      puzzle_id: state.puzzle.current ? String(state.puzzle.current.id || "") : null,
+      solve_ms: state.puzzle.solveMs,
+    }).then((u) => {
+      if (u && typeof u === "object" && typeof u.rating === "number") {
+        state.puzzle.sessionRating = u.rating;
+        if (u.stats && typeof u.stats === "object") {
+          if (typeof u.stats.current_streak === "number") {
+            state.puzzle.sessionStats.streak = u.stats.current_streak;
+          }
+          if (typeof u.stats.best_streak === "number") {
+            state.puzzle.sessionStats.bestStreak = Math.max(
+              state.puzzle.sessionStats.bestStreak,
+              u.stats.best_streak,
+            );
+          }
+        }
+        _savePuzzleSession();
+        renderPuzzleStatsBar();
+      }
+    });
+  }
   renderPuzzleUi();
   renderPuzzleStatsBar();
   renderPuzzleHistory();
@@ -3440,14 +3970,7 @@ function renderPuzzleStatsBar() {
   const host = document.getElementById("puzzle-stats-bar");
   if (!host) return;
   const ss = state.puzzle.sessionStats;
-  const last = state.puzzle.history[0];
-  let pillCls = "";
-  let pillDelta = "";
-  if (last && typeof last.delta === "number" && last.delta !== 0) {
-    pillCls = last.delta > 0 ? "is-up" : "is-down";
-    pillDelta = (last.delta > 0 ? "▲ +" : "▼ ") + last.delta;
-  }
-  // Live timer for active puzzle, frozen solveMs for finished.
+  // Live timer for the running puzzle, frozen solveMs once finished.
   const ms = state.puzzle.startedAt
     ? (state.puzzle.solveMs || (Date.now() - state.puzzle.startedAt))
     : 0;
@@ -3455,20 +3978,17 @@ function renderPuzzleStatsBar() {
   const tm = Math.floor(sec / 60);
   const ts = sec % 60;
   const timer = `${tm}:${String(ts).padStart(2, "0")}`;
+  // Per spec: главный экран пазлов оставляет только серию + время
+  // текущего пазла. Решено/Ошибки/Пропуски/Рейтинг переехали в профиль.
   host.innerHTML = `
-    <div class="ps-block"><span class="ps-label">Решено</span><span class="ps-val ok">${ss.solved}</span></div>
+    <div class="ps-block ps-streak">
+      <span class="ps-label">Серия</span>
+      <span class="ps-val ${ss.streak >= 3 ? "ok" : ""}">🔥 ${ss.streak}</span>
+    </div>
     <div class="ps-divider"></div>
-    <div class="ps-block"><span class="ps-label">Ошиб.</span><span class="ps-val bad">${ss.wrong}</span></div>
-    <div class="ps-divider"></div>
-    <div class="ps-block"><span class="ps-label">Пропуск</span><span class="ps-val">${ss.skipped}</span></div>
-    <div class="ps-divider"></div>
-    <div class="ps-block"><span class="ps-label">Серия</span><span class="ps-val ${ss.streak >= 3 ? "ok" : ""}">🔥 ${ss.streak}</span></div>
-    <div class="ps-divider"></div>
-    <div class="ps-block ps-timer"><span class="ps-label">⏱</span><span class="ps-val" id="puzzle-timer-val">${timer}</span></div>
-    <div class="ps-rating-pill ${pillCls}">
-      <span class="ps-rating-label">Рейтинг</span>
-      <span>${state.puzzle.sessionRating}</span>
-      ${pillDelta ? `<span class="ps-rating-delta">${pillDelta}</span>` : ""}
+    <div class="ps-block ps-timer">
+      <span class="ps-label">Время</span>
+      <span class="ps-val" id="puzzle-timer-val">${timer}</span>
     </div>
   `;
 }
@@ -3494,6 +4014,25 @@ function renderPuzzleUi() {
   renderPuzzleHistory();
   if (!card || !actions) return;
   const p = state.puzzle.current;
+  // Idle (pre-start) screen — user just opened the puzzle tab and we
+  // don't auto-load; show a single "Начать игру" button instead so
+  // they explicitly opt in to the difficulty bump / rating change.
+  if (!p && state.puzzle.idle) {
+    card.innerHTML = `
+      <div class="puzzle-start-screen">
+        <h3>Готов к пазлам?</h3>
+        <p class="muted">Нажми "Начать игру", чтобы загрузить первую задачу. Сложность подстроится под твой рейтинг.</p>
+        <button id="btn-puzzle-start" type="button" class="puzzle-primary puzzle-start-cta">▶ Начать игру</button>
+      </div>
+    `;
+    actions.innerHTML = "";
+    const startBtn = document.getElementById("btn-puzzle-start");
+    if (startBtn) startBtn.onclick = () => {
+      state.puzzle.idle = false;
+      loadNextPuzzle();
+    };
+    return;
+  }
   if (!p) {
     card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
     actions.innerHTML = "";
@@ -3505,6 +4044,8 @@ function renderPuzzleUi() {
   // Feedback box. We deliberately stay minimal — chess.com doesn't
   // expose theme/progress/move-count hints, neither do we. After
   // finalization the card shows the puzzle's rating and Δ once.
+  // Note: the side-to-move banner already says "Ход за <сторону>",
+  // so the in-progress feedback prompts only carry the call-to-action.
   let feedback = "";
   if (state.puzzle.feedback === "solved") {
     const last = state.puzzle.history[0];
@@ -3520,12 +4061,12 @@ function renderPuzzleUi() {
   } else if (state.puzzle.hintUsed) {
     feedback = `<div class="puzzle-feedback fb-info">Подсказка: исходная клетка подсвечена.</div>`;
   } else {
-    feedback = `<div class="puzzle-feedback fb-info">${sideLetter} Ход за <b>${sideLabel}</b>. Найди лучший ход.</div>`;
+    feedback = `<div class="puzzle-feedback fb-info">Найди лучший ход.</div>`;
   }
   card.innerHTML = `
     <div class="puzzle-side-banner">
       <span class="puzzle-side-icon ${sideCls}">${sideLetter}</span>
-      <span>Ход за <b>${sideLabel}</b>.</span>
+      <span class="puzzle-side-text">Ход за <b>${sideLabel}</b></span>
     </div>
     ${feedback}
   `;
@@ -4036,6 +4577,2755 @@ document.getElementById("nav-play").addEventListener("click", () => {
   else startAutoplay();
 });
 
+// ---------- User / Profile / Leaderboard ----------
+
+const AVATAR_CHOICES = [
+  "♟", "♞", "♝", "♜", "♛", "♚",
+  "🦊", "🐺", "🐯", "🦁", "🐼", "🐨",
+  "🐉", "🦄", "🐢", "🦅", "🦉", "🐧",
+  "🤖", "👾", "👻", "🎯", "🎮", "🚀",
+  "⚡", "🔥", "🌟", "💎", "🏆", "🎖",
+  "🍀", "🍕",
+];
+
+function _uuidv4() {
+  // RFC4122-ish v4 — good enough for a local client_id.
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  // Fallback
+  let s = "";
+  const hex = "0123456789abcdef";
+  for (let i = 0; i < 32; i++) {
+    let r = (Math.random() * 16) | 0;
+    if (i === 12) r = 4;
+    if (i === 16) r = (r & 0x3) | 0x8;
+    s += hex[r];
+    if (i === 7 || i === 11 || i === 15 || i === 19) s += "-";
+  }
+  return s;
+}
+
+function _loadLocalUser() {
+  try {
+    const raw = localStorage.getItem("cs.user");
+    if (!raw) return null;
+    const u = JSON.parse(raw);
+    if (!u || typeof u.client_id !== "string" || u.client_id.length < 4) return null;
+    return u;
+  } catch { return null; }
+}
+
+function _saveLocalUser() {
+  try {
+    localStorage.setItem("cs.user", JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname,
+      avatar: state.user.avatar,
+    }));
+  } catch (_) { /* ignore */ }
+}
+
+async function syncUserProfile() {
+  if (!state.user.client_id) return null;
+  try {
+    const u = await api("/api/users/upsert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: state.user.client_id,
+        nickname: state.user.nickname || "Гость",
+        avatar: state.user.avatar || "♟",
+      }),
+    });
+    // Server is authoritative for rating + stats. Pulling them down on
+    // every sync keeps the local view honest if e.g. users.json was
+    // reset or the user's localStorage drifted out of sync.
+    if (u && typeof u === "object") {
+      if (typeof u.rating === "number") {
+        state.puzzle.sessionRating = u.rating;
+      }
+      if (u.stats && typeof u.stats === "object") {
+        if (typeof u.stats.current_streak === "number") {
+          state.puzzle.sessionStats.streak = u.stats.current_streak;
+        }
+        if (typeof u.stats.best_streak === "number") {
+          state.puzzle.sessionStats.bestStreak = Math.max(
+            state.puzzle.sessionStats.bestStreak,
+            u.stats.best_streak,
+          );
+        }
+      }
+      _savePuzzleSession();
+    }
+    return u;
+  } catch { return null; }
+}
+
+async function userHeartbeat() {
+  if (!state.user.client_id) return;
+  try {
+    await api("/api/users/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: state.user.client_id }),
+    });
+  } catch { /* ignore */ }
+}
+
+async function recordPuzzleAttemptOnServer(payload) {
+  if (!state.user.client_id) return null;
+  try {
+    return await api("/api/users/puzzle_attempt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: state.user.client_id, ...payload }),
+    });
+  } catch { return null; }
+}
+
+function _renderOnboardingAvatars(selected) {
+  const host = document.getElementById("onboarding-avatars");
+  if (!host) return;
+  host.innerHTML = AVATAR_CHOICES.map((a) => {
+    const cls = a === selected ? "onboarding-avatar is-selected" : "onboarding-avatar";
+    return `<button type="button" class="${cls}" data-avatar="${escapeHtml(a)}">${escapeHtml(a)}</button>`;
+  }).join("");
+  host.querySelectorAll(".onboarding-avatar").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      host.querySelectorAll(".onboarding-avatar").forEach((b) => b.classList.remove("is-selected"));
+      btn.classList.add("is-selected");
+    });
+  });
+}
+
+function showOnboarding() {
+  const modal = document.getElementById("onboarding-modal");
+  if (!modal) return;
+  const nickInput = document.getElementById("onboarding-nick");
+  if (nickInput) nickInput.value = state.user.nickname || "";
+  _renderOnboardingAvatars(state.user.avatar || "♟");
+  modal.hidden = false;
+  setTimeout(() => nickInput && nickInput.focus(), 50);
+}
+
+function hideOnboarding() {
+  const modal = document.getElementById("onboarding-modal");
+  if (modal) modal.hidden = true;
+}
+
+function _selectedOnboardingAvatar() {
+  const sel = document.querySelector("#onboarding-avatars .onboarding-avatar.is-selected");
+  return (sel && sel.dataset.avatar) || "♟";
+}
+
+document.getElementById("btn-onboarding-save")?.addEventListener("click", async () => {
+  const nickInput = document.getElementById("onboarding-nick");
+  const nickname = (nickInput?.value || "").trim().slice(0, 32) || "Гость";
+  const avatar = _selectedOnboardingAvatar();
+  if (!state.user.client_id) state.user.client_id = _uuidv4();
+  state.user.nickname = nickname;
+  state.user.avatar = avatar;
+  _saveLocalUser();
+  await syncUserProfile();
+  hideOnboarding();
+});
+
+// Hamburger menu (Profile / Leaderboard).
+const userMenuBtn = document.getElementById("btn-user-menu");
+const userMenuDropdown = document.getElementById("user-menu-dropdown");
+function toggleUserMenu(force) {
+  if (!userMenuDropdown || !userMenuBtn) return;
+  const next = typeof force === "boolean" ? force : userMenuDropdown.hidden;
+  userMenuDropdown.hidden = !next;
+  userMenuBtn.setAttribute("aria-expanded", next ? "true" : "false");
+}
+userMenuBtn?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleUserMenu();
+});
+document.addEventListener("click", (e) => {
+  if (!userMenuDropdown || userMenuDropdown.hidden) return;
+  if (e.target instanceof Node && (userMenuBtn?.contains(e.target) || userMenuDropdown.contains(e.target))) return;
+  toggleUserMenu(false);
+});
+userMenuDropdown?.querySelectorAll(".user-menu-item").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    toggleUserMenu(false);
+    const action = btn.dataset.action;
+    if (action === "profile") {
+      openProfileModal(state.user.client_id);
+    } else if (action === "leaderboard") {
+      openLeaderboardModal();
+    } else if (action === "party") {
+      openPartyModal();
+    }
+  });
+});
+
+// Modal close handlers.
+document.querySelectorAll("[data-close]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const id = btn.dataset.close;
+    const modal = id && document.getElementById(id);
+    if (modal) modal.hidden = true;
+  });
+});
+document.querySelectorAll(".modal-overlay").forEach((overlay) => {
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.hidden = true;
+  });
+});
+
+function _formatLastSeen(ts) {
+  if (!ts) return "—";
+  const sec = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (sec < 60)        return "только что";
+  if (sec < 60 * 60)   return `${Math.floor(sec / 60)} мин назад`;
+  if (sec < 86400)     return `${Math.floor(sec / 3600)} ч назад`;
+  if (sec < 7 * 86400) return `${Math.floor(sec / 86400)} дн назад`;
+  const d = new Date(ts * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+function _eloHistoryFiltered(history, period) {
+  if (!Array.isArray(history) || history.length === 0) return [];
+  const nowSec = Math.floor(Date.now() / 1000);
+  let cutoff = 0;
+  if (period === "7d")  cutoff = nowSec - 7 * 86400;
+  if (period === "90d") cutoff = nowSec - 90 * 86400;
+  return history.filter((h) => (typeof h.ts === "number" ? h.ts >= cutoff : true));
+}
+
+function renderEloGraph(host, history) {
+  if (!host) return;
+  if (!history || history.length < 2) {
+    host.innerHTML = `<div class="elo-graph-empty">Недостаточно данных. Реши пару пазлов, чтобы увидеть график.</div>`;
+    return;
+  }
+  const points = history.map((h) => ({
+    ts: typeof h.ts === "number" ? h.ts : 0,
+    rating: typeof h.rating === "number" ? h.rating : 1200,
+  }));
+  const ratings = points.map((p) => p.rating);
+  const tmin = points[0].ts;
+  const tmax = points[points.length - 1].ts;
+  const tspan = Math.max(1, tmax - tmin);
+  const rmin = Math.min(...ratings);
+  const rmax = Math.max(...ratings);
+  const rpad = Math.max(20, (rmax - rmin) * 0.15);
+  const ylo = Math.max(0, Math.floor(rmin - rpad));
+  const yhi = Math.ceil(rmax + rpad);
+  const w = 600, h = 160, padL = 32, padR = 8, padT = 10, padB = 22;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+  const xOf = (ts) => padL + ((ts - tmin) / tspan) * innerW;
+  const yOf = (r)  => padT + (1 - (r - ylo) / Math.max(1, yhi - ylo)) * innerH;
+  let path = "";
+  points.forEach((p, i) => {
+    const x = xOf(p.ts), y = yOf(p.rating);
+    path += (i === 0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(1) + " ";
+  });
+  const fillPath = path + `L ${xOf(tmax).toFixed(1)} ${(padT + innerH).toFixed(1)} L ${xOf(tmin).toFixed(1)} ${(padT + innerH).toFixed(1)} Z`;
+  const yticks = 4;
+  const tickLines = [];
+  for (let i = 0; i <= yticks; i++) {
+    const r = Math.round(ylo + ((yhi - ylo) * i) / yticks);
+    const y = yOf(r);
+    tickLines.push(
+      `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${(w - padR).toFixed(1)}" y2="${y.toFixed(1)}" stroke="#1f2a3a" stroke-width="1" />`,
+      `<text x="${padL - 6}" y="${(y + 4).toFixed(1)}" fill="#94a4be" font-size="10" text-anchor="end">${r}</text>`
+    );
+  }
+  host.innerHTML = `
+    <div class="elo-graph-wrap">
+      <svg class="elo-graph" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+        ${tickLines.join("")}
+        <path d="${fillPath}" fill="url(#elo-grad)" opacity="0.3" />
+        <path d="${path}" fill="none" stroke="#6da7ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+        <g class="elo-cursor" visibility="hidden">
+          <line class="elo-cursor-line" y1="${padT}" y2="${padT + innerH}" stroke="#6da7ff" stroke-width="1" stroke-dasharray="3 3" opacity="0.8" />
+          <circle class="elo-cursor-dot" r="4.5" fill="#6da7ff" stroke="#fff" stroke-width="1.5" />
+        </g>
+        <rect class="elo-graph-hover" x="${padL}" y="${padT}" width="${innerW}" height="${innerH}" fill="transparent" />
+        <defs>
+          <linearGradient id="elo-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="#6da7ff" stop-opacity="0.6" />
+            <stop offset="100%" stop-color="#6da7ff" stop-opacity="0" />
+          </linearGradient>
+        </defs>
+      </svg>
+      <div class="elo-graph-tip" hidden>
+        <div class="elo-graph-tip-rating"></div>
+        <div class="elo-graph-tip-date"></div>
+        <div class="elo-graph-tip-delta"></div>
+      </div>
+    </div>
+  `;
+  _wireEloGraphHover(host, {
+    points, w, h, padL, padR, padT, padB, innerW, xOf, yOf,
+  });
+}
+
+// Mouse-tracking crosshair + tooltip for the Elo chart. The SVG uses
+// preserveAspectRatio="none" so its viewBox stretches to the host;
+// we convert clientX -> SVG-x via getBoundingClientRect, then snap
+// to the closest data point by timestamp.
+function _wireEloGraphHover(host, ctx) {
+  const wrap = host.querySelector(".elo-graph-wrap");
+  const svg = host.querySelector(".elo-graph");
+  const hot = host.querySelector(".elo-graph-hover");
+  const cur = host.querySelector(".elo-cursor");
+  const line = host.querySelector(".elo-cursor-line");
+  const dot = host.querySelector(".elo-cursor-dot");
+  const tip = host.querySelector(".elo-graph-tip");
+  const ratingEl = host.querySelector(".elo-graph-tip-rating");
+  const dateEl = host.querySelector(".elo-graph-tip-date");
+  const deltaEl = host.querySelector(".elo-graph-tip-delta");
+  if (!wrap || !svg || !hot || !cur || !tip) return;
+  const pts = ctx.points;
+  const onMove = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const px = ev.clientX - rect.left;
+    // Map screen-x to SVG viewBox-x.
+    const svgX = (px / rect.width) * ctx.w;
+    // Clamp to plot area.
+    const clampedX = Math.max(ctx.padL, Math.min(ctx.w - ctx.padR, svgX));
+    // Pick nearest point by SVG-x distance — points are
+    // monotonically increasing in ts so x is monotonic too.
+    let best = 0, bestDx = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const dx = Math.abs(ctx.xOf(pts[i].ts) - clampedX);
+      if (dx < bestDx) { bestDx = dx; best = i; }
+    }
+    const p = pts[best];
+    const x = ctx.xOf(p.ts), y = ctx.yOf(p.rating);
+    line.setAttribute("x1", x.toFixed(1));
+    line.setAttribute("x2", x.toFixed(1));
+    dot.setAttribute("cx", x.toFixed(1));
+    dot.setAttribute("cy", y.toFixed(1));
+    cur.setAttribute("visibility", "visible");
+    // Compose tooltip.
+    ratingEl.textContent = `Эло ${p.rating}`;
+    const dt = new Date(p.ts * 1000);
+    const datePart = dt.toLocaleDateString("ru-RU", {
+      day: "numeric", month: "short", year: "numeric",
+    });
+    const timePart = dt.toLocaleTimeString("ru-RU", {
+      hour: "2-digit", minute: "2-digit",
+    });
+    dateEl.textContent = `${datePart} · ${timePart}`;
+    if (best > 0) {
+      const dr = p.rating - pts[best - 1].rating;
+      deltaEl.textContent = dr === 0 ? "Δ 0" : (dr > 0 ? `▲ +${dr}` : `▼ ${dr}`);
+      deltaEl.className = "elo-graph-tip-delta " + (dr > 0 ? "is-up" : (dr < 0 ? "is-down" : "is-flat"));
+      deltaEl.hidden = false;
+    } else {
+      deltaEl.hidden = true;
+    }
+    // Position tooltip in client coords. Center horizontally above
+    // the dot, clamp to host bounds.
+    tip.hidden = false;
+    const wrapRect = wrap.getBoundingClientRect();
+    const dotClientX = rect.left + (x / ctx.w) * rect.width;
+    const dotClientY = rect.top + (y / ctx.h) * rect.height;
+    const tipW = tip.offsetWidth || 120;
+    const tipH = tip.offsetHeight || 50;
+    let tipX = dotClientX - wrapRect.left - tipW / 2;
+    let tipY = dotClientY - wrapRect.top - tipH - 14;
+    if (tipX < 4) tipX = 4;
+    if (tipX + tipW > wrapRect.width - 4) tipX = wrapRect.width - tipW - 4;
+    if (tipY < 4) {
+      // Not enough room above — flip below the point.
+      tipY = dotClientY - wrapRect.top + 14;
+    }
+    tip.style.left = `${tipX}px`;
+    tip.style.top = `${tipY}px`;
+  };
+  const onLeave = () => {
+    cur.setAttribute("visibility", "hidden");
+    tip.hidden = true;
+  };
+  hot.addEventListener("mousemove", onMove);
+  hot.addEventListener("mouseleave", onLeave);
+  // Touch support: tap and drag along the chart.
+  hot.addEventListener("touchmove", (ev) => {
+    const t = ev.touches[0];
+    if (t) onMove({ clientX: t.clientX, clientY: t.clientY });
+  });
+  hot.addEventListener("touchend", onLeave);
+}
+
+async function openProfileModal(clientId) {
+  const modal = document.getElementById("profile-modal");
+  const body = document.getElementById("profile-body");
+  if (!modal || !body) return;
+  body.innerHTML = `<div class="profile-empty">Загружаю профиль…</div>`;
+  modal.hidden = false;
+  let user = null;
+  if (clientId) {
+    try {
+      user = await api(`/api/users/${encodeURIComponent(clientId)}`);
+    } catch { user = null; }
+  }
+  if (!user) {
+    body.innerHTML = `<div class="profile-empty">Профиль не найден на этом сервере.</div>`;
+    return;
+  }
+  state.user.elo_history = clientId === state.user.client_id ? user.elo_history : null;
+  const stats = user.stats || {};
+  const games = stats.games || 0;
+  const solved = stats.solved || 0;
+  const wrong = stats.wrong || 0;
+  const skipped = stats.skipped || 0;
+  const winPct = games ? (solved / games * 100).toFixed(1) : "0";
+  const isSelf = user.client_id === state.user.client_id;
+  body.innerHTML = `
+    <header class="profile-header">
+      <div class="profile-avatar">${escapeHtml(user.avatar || "♟")}</div>
+      <div class="profile-name">
+        <h3>${escapeHtml(user.nickname || "Гость")}${isSelf ? " <span class=\"muted\" style=\"font-size:13px; font-weight:500;\">(вы)</span>" : ""}</h3>
+        <div class="muted">Последний раз: ${_formatLastSeen(user.last_seen)}</div>
+      </div>
+      ${isSelf ? `<button id="btn-profile-edit" type="button" class="puzzle-secondary" style="margin-left:auto;">Изменить</button>` : ""}
+    </header>
+    <section class="profile-stats-grid">
+      <div class="profile-stat"><span class="ps-label">Рейтинг</span><span class="ps-val rating">${user.rating || 1200}</span></div>
+      <div class="profile-stat"><span class="ps-label">Игр</span><span class="ps-val">${games}</span></div>
+      <div class="profile-stat"><span class="ps-label">Винрейт</span><span class="ps-val">${winPct}%</span></div>
+      <div class="profile-stat"><span class="ps-label">Решено</span><span class="ps-val ok">${solved}</span></div>
+      <div class="profile-stat"><span class="ps-label">Ошибок</span><span class="ps-val bad">${wrong}</span></div>
+      <div class="profile-stat"><span class="ps-label">Пропуск</span><span class="ps-val">${skipped}</span></div>
+      <div class="profile-stat"><span class="ps-label">Серия</span><span class="ps-val warn">🔥 ${stats.current_streak || 0}</span></div>
+      <div class="profile-stat"><span class="ps-label">Макс серия</span><span class="ps-val warn">${stats.best_streak || 0}</span></div>
+    </section>
+    <section class="profile-section">
+      <h4>График Эло</h4>
+      <div class="elo-period-tabs" id="elo-period-tabs">
+        <button type="button" class="elo-period-tab is-active" data-period="all">Всё время</button>
+        <button type="button" class="elo-period-tab" data-period="90d">90 дней</button>
+        <button type="button" class="elo-period-tab" data-period="7d">7 дней</button>
+      </div>
+      <div id="elo-graph-host"></div>
+    </section>
+    ${Array.isArray(user.parties) && user.parties.length ? `
+    <section class="profile-section">
+      <h4>История пати-матчей</h4>
+      <div class="profile-parties-list" id="profile-parties-list">${user.parties.slice(-20).reverse().map((p, idx) => {
+        const date = p.ts ? new Date(Number(p.ts) * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+        const dur = _formatPartyDuration(p.duration_sec || 0);
+        const winrate = Number(p.winrate || 0);
+        const elo = Number(p.elo_gained || 0);
+        const eloLabel = elo > 0 ? `+${elo}` : `${elo}`;
+        const place = Number(p.placement || 0);
+        const placeCls = place === 1 ? "ok" : (place === 2 ? "warn" : "");
+        const isSelfRow = isSelf;
+        return `
+          <button type="button" class="profile-party-row" data-idx="${idx}" ${isSelfRow ? "" : "disabled"} title="${isSelfRow ? "Открыть подробный результат" : "История доступна только владельцу профиля"}">
+            <span class="pp-rank ${placeCls}">#${place}</span>
+            <span class="pp-meta">
+              <span class="pp-date">${escapeHtml(date)}</span>
+              <span class="pp-duration muted">${escapeHtml(dur || "—")}</span>
+            </span>
+            <span class="pp-stats">
+              <span class="ok">✔ ${Number(p.solved || 0)}</span>
+              <span class="bad">✘ ${Number(p.failed || 0)}</span>
+              <span class="warn">↷ ${Number(p.skipped || 0)}</span>
+              <span>${winrate.toFixed(1)}%</span>
+            </span>
+            <span class="pp-score">${Number(p.score || 0)} pts</span>
+            <span class="pp-elo">${eloLabel} Эло</span>
+            <span class="pp-chevron muted">${isSelfRow ? "›" : ""}</span>
+          </button>`;
+      }).join("")}</div>
+    </section>` : ""}
+  `;
+  const eloHost = document.getElementById("elo-graph-host");
+  renderEloGraph(eloHost, user.elo_history || []);
+  document.getElementById("elo-period-tabs")?.querySelectorAll(".elo-period-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#elo-period-tabs .elo-period-tab").forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+      const filtered = _eloHistoryFiltered(user.elo_history || [], btn.dataset.period);
+      renderEloGraph(eloHost, filtered);
+    });
+  });
+  document.getElementById("btn-profile-edit")?.addEventListener("click", () => {
+    modal.hidden = true;
+    showOnboarding();
+  });
+  // Wire each party history row to its persisted detail modal. We
+  // index against the original `parties` array (newest-first display)
+  // so the click target reliably maps back to the saved record.
+  if (isSelf) {
+    const partiesAsc = Array.isArray(user.parties) ? user.parties : [];
+    const partiesDesc = partiesAsc.slice(-20).reverse();
+    document.querySelectorAll("#profile-parties-list .profile-party-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const idx = Number(row.dataset.idx);
+        const entry = partiesDesc[idx];
+        if (!entry) return;
+        // Hide profile modal so the party detail modal pops on top
+        // cleanly; user can re-open profile via the avatar button.
+        modal.hidden = true;
+        openPartyResultDetail(entry);
+      });
+    });
+  }
+}
+
+async function openLeaderboardModal() {
+  const modal = document.getElementById("leaderboard-modal");
+  const body = document.getElementById("leaderboard-body");
+  if (!modal || !body) return;
+  body.innerHTML = `<div class="profile-empty">Загружаю лидерборд…</div>`;
+  modal.hidden = false;
+  let users = [];
+  try {
+    const r = await api("/api/users");
+    users = (r && r.users) || [];
+  } catch { users = []; }
+  if (!users.length) {
+    body.innerHTML = `<div class="profile-empty">Пока никого нет. Реши первый пазл, чтобы появиться здесь.</div>`;
+    return;
+  }
+  const rowsHtml = users.map((u, idx) => {
+    const isSelf = u.client_id === state.user.client_id;
+    return `
+      <tr class="leaderboard-row ${isSelf ? "is-self" : ""}" data-cid="${escapeHtml(u.client_id)}">
+        <td class="lb-rank">#${idx + 1}</td>
+        <td>
+          <span class="lb-avatar">${escapeHtml(u.avatar || "♟")}</span>
+          <span class="lb-name">${escapeHtml(u.nickname || "Гость")}${isSelf ? " <span class=\"muted\">(вы)</span>" : ""}</span>
+        </td>
+        <td class="lb-rating">${u.rating}</td>
+        <td>${u.games}</td>
+        <td class="lb-pct">${u.win_pct}%</td>
+        <td class="lb-pct">${u.best_streak}</td>
+        <td class="muted">${_formatLastSeen(u.last_seen)}</td>
+      </tr>
+    `;
+  }).join("");
+  body.innerHTML = `
+    <table class="leaderboard-table">
+      <thead>
+        <tr>
+          <th>#</th><th>Игрок</th><th>Эло</th><th>Игр</th><th>Винрейт</th><th>Макс серия</th><th>В сети</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+  `;
+  body.querySelectorAll(".leaderboard-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      modal.hidden = true;
+      openProfileModal(row.dataset.cid);
+    });
+  });
+}
+
+async function _bootUser() {
+  const stored = _loadLocalUser();
+  if (stored) {
+    state.user.client_id = stored.client_id;
+    state.user.nickname = stored.nickname || "Гость";
+    state.user.avatar = stored.avatar || "♟";
+    await syncUserProfile();
+  } else {
+    state.user.client_id = _uuidv4();
+    showOnboarding();
+  }
+  // Heartbeat every 60s so last-seen stays fresh on the leaderboard.
+  setInterval(userHeartbeat, 60_000);
+  // Start the SSE notifications stream so party invitations pop up live.
+  _bootNotifications();
+  // If the user reloads while a puzzle was already in progress, the
+  // session-restore path in enterPuzzleView re-flips the board and
+  // calls renderBoard but does NOT call loadNextPuzzle (which is
+  // where presenceConnect now lives), so we'd never appear in the
+  // Оффлайн list. Catch that here: if we're on the puzzle tab and
+  // a puzzle is actually loaded (not the idle start screen),
+  // register presence now that client_id is known.
+  if (state.view === "puzzle"
+      && state.puzzle.current && !state.puzzle.idle) {
+    try { presenceConnect(); } catch (_) { /* ignore */ }
+  }
+}
+
+// ---------- Party (co-op puzzles over WebSocket) ----------
+
+function _partyWsUrl(code) {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const u = new URL(`${proto}//${location.host}/api/party/ws/${encodeURIComponent(code)}`);
+  u.searchParams.set("client_id", state.user.client_id || "");
+  u.searchParams.set("nickname", state.user.nickname || "");
+  u.searchParams.set("avatar", state.user.avatar || "");
+  // Send the player's local UI prefs so spectators can render this
+  // player's mini-board in *their* theme + pieces, not the watcher's.
+  u.searchParams.set("theme", userSettings.theme || "");
+  u.searchParams.set("pieces", userSettings.pieces || "");
+  // Legal-move hint colour the player picked — spectators paint their
+  // dots/rings in this same colour.
+  if (_isHexColor(userSettings.legalDotColor)) {
+    u.searchParams.set("legal_color", userSettings.legalDotColor);
+  }
+  return u.toString();
+}
+
+function _partyEnsureModal() {
+  const m = document.getElementById("party-modal");
+  if (m) m.hidden = false;
+  return document.getElementById("party-body");
+}
+
+// ---------- Presence (solo broadcast for the "Оффлайн" tab) ----------
+//
+// While the user is solving puzzles outside a party we keep an open
+// WebSocket so the server can fan-out their cursor / FEN / selection
+// to anyone watching. The connection is opened on enterPuzzleView()
+// and torn down on leavePuzzleView() or when joining a party (party
+// takes precedence — same socket would race both broadcasts).
+
+function _presenceWsUrl() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const u = new URL(`${proto}//${location.host}/api/presence/ws`);
+  u.searchParams.set("client_id", state.user.client_id || "");
+  u.searchParams.set("nickname", state.user.nickname || "");
+  u.searchParams.set("avatar", state.user.avatar || "");
+  u.searchParams.set("role", "player");
+  u.searchParams.set("theme", userSettings.theme || "");
+  u.searchParams.set("pieces", userSettings.pieces || "");
+  if (_isHexColor(userSettings.legalDotColor)) {
+    u.searchParams.set("legal_color", userSettings.legalDotColor);
+  }
+  const r = (state.user && state.user.elo_history && state.user.elo_history.rating)
+    ? state.user.elo_history.rating
+    : (state.sessionRating || 0);
+  if (r) u.searchParams.set("rating", String(r));
+  return u.toString();
+}
+
+function presenceConnect() {
+  if (!state.user.client_id) return;
+  if (state.party.active) return; // party owns the live channel
+  if (state.presence.ws) {
+    try {
+      if (state.presence.ws.readyState === WebSocket.OPEN
+          || state.presence.ws.readyState === WebSocket.CONNECTING) {
+        return;
+      }
+    } catch (_) { /* ignore */ }
+  }
+  let ws;
+  try { ws = new WebSocket(_presenceWsUrl()); }
+  catch (_) { return; }
+  state.presence.ws = ws;
+  state.presence.active = true;
+  ws.onopen = () => {
+    // Push current position immediately so spectators who attach
+    // right at this moment don't see an empty board.
+    try {
+      const c = (state.freeplay && state.freeplay.chess)
+        || (state.game && state.game.chess) || null;
+      const fen = c ? c.fen() : "";
+      if (fen) _partyReportPosition(fen);
+      _partySyncSelectionFromState();
+    } catch (_) { /* ignore */ }
+  };
+  ws.onmessage = () => { /* server-only signals; ignore */ };
+  ws.onerror = () => { /* surface as close */ };
+  ws.onclose = () => {
+    if (state.presence.ws === ws) {
+      state.presence.ws = null;
+      state.presence.active = false;
+    }
+  };
+}
+
+function presenceDisconnect() {
+  const ws = state.presence.ws;
+  state.presence.ws = null;
+  state.presence.active = false;
+  if (ws) {
+    try { ws.close(); } catch (_) { /* ignore */ }
+  }
+}
+
+function _formatPartyTimeLeft(endsAt) {
+  const ms = Math.max(0, endsAt * 1000 - Date.now());
+  const sec = Math.floor(ms / 1000);
+  const mm = Math.floor(sec / 60);
+  const ss = sec % 60;
+  return `${mm}:${String(ss).padStart(2, "0")}`;
+}
+
+function openPartyModal() {
+  if (!state.user.client_id) return;
+  const body = _partyEnsureModal();
+  if (!body) return;
+  if (state.party.active && state.party.status === "playing") {
+    closePartyModal();
+    return;
+  }
+  body.innerHTML = `
+    <header class="party-header">
+      <h2>🎉 Party</h2>
+      <p class="muted">Каждому участнику даётся 10 минут на свой поток пазлов; в конце — общий лидерборд.</p>
+    </header>
+
+    <div class="party-tabs" role="tablist">
+      <button type="button" class="party-tab is-active" data-tab="online" role="tab" aria-selected="true">Онлайн</button>
+      <button type="button" class="party-tab" data-tab="offline" role="tab" aria-selected="false">Оффлайн</button>
+    </div>
+
+    <section class="party-tab-panel" data-panel="online">
+      <div class="party-section-title">Открытые пати</div>
+      <div id="party-open-list" class="party-open-list">
+        <div class="party-open-empty">Загружаю…</div>
+      </div>
+
+      <div class="party-section-title">Пригласить друзей</div>
+      <div id="party-friend-picker" class="party-friends">
+        <div class="party-friend-empty">Загружаю список игроков…</div>
+      </div>
+      <div class="party-actions">
+        <button id="btn-party-create" type="button" class="puzzle-primary">Создать комнату и пригласить</button>
+        <button id="btn-party-create-empty" type="button" class="puzzle-secondary">Создать пустую (без приглашений)</button>
+      </div>
+
+      <details class="party-fallback" style="margin-top: 14px;">
+        <summary class="muted" style="cursor: pointer;">Войти по коду (старый способ)</summary>
+        <div class="party-actions" style="margin-top: 8px;">
+          <input id="party-join-code" type="text" maxlength="8" placeholder="КОД" class="party-code-input" />
+          <button id="btn-party-join" type="button" class="puzzle-secondary">Войти</button>
+        </div>
+      </details>
+    </section>
+
+    <section class="party-tab-panel" data-panel="offline" hidden>
+      <div class="party-section-title">
+        Игроки соло-пазлов
+        <button id="btn-presence-refresh" type="button" class="puzzle-ghost party-refresh-btn" title="Обновить">⟳</button>
+      </div>
+      <p class="muted" style="font-size: 12px; margin: 4px 0 8px;">
+        Игроки решают пазлы на настоящие эло. Кликни по карточке, чтобы наблюдать за их доской в реальном времени.
+      </p>
+      <div id="presence-open-list" class="party-open-list">
+        <div class="party-open-empty">Загружаю…</div>
+      </div>
+    </section>
+
+    <div id="party-error" class="party-error" hidden></div>
+  `;
+  body.querySelector("#btn-party-create").addEventListener("click", () => {
+    partyCreateAndInvite().catch((e) => _partyShowError(e));
+  });
+  body.querySelector("#btn-party-create-empty").addEventListener("click", () => {
+    partyCreate().catch((e) => _partyShowError(e));
+  });
+  body.querySelector("#btn-party-join").addEventListener("click", () => {
+    const code = (body.querySelector("#party-join-code").value || "").trim().toUpperCase();
+    if (!code) return;
+    partyJoin(code).catch((e) => _partyShowError(e));
+  });
+  body.querySelector("#party-join-code").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") body.querySelector("#btn-party-join").click();
+  });
+  // Tab switcher.
+  body.querySelectorAll(".party-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.tab;
+      body.querySelectorAll(".party-tab").forEach((b) => {
+        const active = b.dataset.tab === tab;
+        b.classList.toggle("is-active", active);
+        b.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      body.querySelectorAll(".party-tab-panel").forEach((p) => {
+        p.hidden = p.dataset.panel !== tab;
+      });
+      if (tab === "offline") _renderPresenceList().catch(() => {});
+    });
+  });
+  body.querySelector("#btn-presence-refresh")?.addEventListener("click", () => {
+    _renderPresenceList().catch(() => {});
+  });
+  // Async fills.
+  _renderFriendPicker().catch(() => {});
+  _renderOpenPartiesList().catch(() => {});
+}
+
+function _partyShowError(e) {
+  const errEl = document.getElementById("party-error");
+  if (!errEl) return;
+  errEl.hidden = false;
+  errEl.textContent = e && e.message ? e.message : "Ошибка";
+}
+
+function closePartyModal() {
+  const m = document.getElementById("party-modal");
+  if (m) m.hidden = true;
+}
+
+async function partyCreate() {
+  const res = await fetch("/api/party/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname,
+      avatar: state.user.avatar,
+    }),
+  });
+  if (!res.ok) throw new Error(`Не удалось создать (HTTP ${res.status})`);
+  const data = await res.json();
+  partyConnect(data.code);
+}
+
+async function partyJoin(code) {
+  const res = await fetch(`/api/party/${encodeURIComponent(code)}`);
+  if (res.status === 404) throw new Error("Комната не найдена");
+  if (!res.ok) throw new Error(`Ошибка: HTTP ${res.status}`);
+  partyConnect(code);
+}
+
+function partyConnect(code) {
+  if (state.party.ws) {
+    try { state.party.ws.close(); } catch (_) {}
+  }
+  // Party owns the live broadcast channel — drop the solo presence
+  // socket so spectator messages don't get duplicated across both.
+  try { presenceDisconnect(); } catch (_) { /* ignore */ }
+  state.party.code = code;
+  state.party.active = true;
+  state.party.status = "lobby";
+  state.party.finalResults = null;
+  state.party.finalMeta = null;
+  state.party.scoreboard = [];
+  state.party.members = [];
+  // Reset host-picked duration to 10 min default — the lobby selector
+  // will overwrite it as soon as the host clicks a different option.
+  state.party.durationSec = 600;
+  state.party.allowedDurations = [120, 180, 300, 600];
+  const ws = new WebSocket(_partyWsUrl(code));
+  state.party.ws = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handlePartyMessage(msg);
+  };
+  ws.onerror = () => _partyShowError(new Error("Соединение потеряно"));
+  ws.onclose = () => {
+    if (state.party.active && state.party.status !== "finished") {
+      // Disconnected before match end — surface as finished and keep board.
+      state.party.active = false;
+    }
+    if (state.party.countdownInterval) {
+      clearInterval(state.party.countdownInterval);
+      state.party.countdownInterval = null;
+    }
+  };
+}
+
+function handlePartyMessage(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "lobby":
+      state.party.party_id = msg.party_id;
+      state.party.host_id = msg.host_id;
+      state.party.status = msg.status;
+      state.party.endsAt = msg.ends_at || 0;
+      state.party.startedAt = msg.started_at || 0;
+      // Mirror server-supplied lobby duration so non-host clients see
+      // the same selection the host picked, and so the host's UI
+      // matches the server-side authoritative value after a reconnect.
+      if (Number.isFinite(msg.duration_sec) && msg.duration_sec > 0) {
+        state.party.durationSec = Math.floor(msg.duration_sec);
+      }
+      if (Array.isArray(msg.allowed_durations_sec) && msg.allowed_durations_sec.length) {
+        state.party.allowedDurations = msg.allowed_durations_sec.map((n) => Math.floor(Number(n) || 0)).filter((n) => n > 0);
+      }
+      state.party.members = Array.isArray(msg.members) ? msg.members : [];
+      if (state.party.status === "lobby") renderPartyLobby();
+      break;
+    case "start":
+      state.party.status = "playing";
+      state.party.endsAt = msg.ends_at || 0;
+      state.party.startedAt = msg.started_at || 0;
+      if (Number.isFinite(msg.duration_sec) && msg.duration_sec > 0) {
+        state.party.durationSec = Math.floor(msg.duration_sec);
+      }
+      state.party.selfScore = 0;
+      closePartyModal();
+      setView("puzzle");
+      _partyMountSidePanel();
+      _partyStartCountdown();
+      if (msg.your_puzzle) startPuzzle(_partyAdaptPuzzle(msg.your_puzzle));
+      break;
+    case "match_state":
+      state.party.endsAt = msg.ends_at || state.party.endsAt;
+      state.party.startedAt = msg.started_at || state.party.startedAt;
+      if (Number.isFinite(msg.duration_sec) && msg.duration_sec > 0) {
+        state.party.durationSec = Math.floor(msg.duration_sec);
+      }
+      if (Array.isArray(msg.scoreboard)) state.party.scoreboard = msg.scoreboard;
+      _partyMountSidePanel();
+      _partyStartCountdown();
+      if (msg.your_puzzle) startPuzzle(_partyAdaptPuzzle(msg.your_puzzle));
+      break;
+    case "next_puzzle":
+      if (msg.puzzle) startPuzzle(_partyAdaptPuzzle(msg.puzzle));
+      break;
+    case "scoreboard":
+      state.party.endsAt = msg.ends_at || state.party.endsAt;
+      if (Array.isArray(msg.scoreboard)) state.party.scoreboard = msg.scoreboard;
+      _partyRenderScoreboard();
+      break;
+    case "finish":
+      state.party.status = "finished";
+      state.party.finalResults = Array.isArray(msg.results) ? msg.results : [];
+      state.party.finalMeta = {
+        duration_sec: Number(msg.duration_sec) || state.party.durationSec || 0,
+        started_at: Number(msg.started_at) || state.party.startedAt || 0,
+        ended_at: Number(msg.ended_at) || Math.floor(Date.now() / 1000),
+        party_id: msg.party_id || state.party.party_id || "",
+      };
+      state.party.active = false;
+      if (state.party.countdownInterval) {
+        clearInterval(state.party.countdownInterval);
+        state.party.countdownInterval = null;
+      }
+      _partyShowResults();
+      try { state.party.ws && state.party.ws.close(); } catch (_) {}
+      break;
+    case "error":
+      _partyShowError(new Error(msg.message || msg.code || "Ошибка"));
+      break;
+  }
+}
+
+function _partyAdaptPuzzle(p) {
+  // The party WS payload mirrors /api/puzzle/random — pass through.
+  return {
+    id: p.id,
+    fen: p.fen,
+    moves: p.moves || [],
+    rating: p.rating || 1200,
+    side_to_solve: p.side_to_solve || null,
+    themes: p.themes || [],
+    themes_ru: p.themes || [],
+    url: p.url || null,
+  };
+}
+
+function sendPartyAttempt(payload) {
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ type: "attempt", ...payload }));
+  } catch (_) { /* already closed */ }
+}
+
+// Returns whichever live broadcast WebSocket is currently active
+// (party first, presence second), or null if neither. Both endpoints
+// accept the same {position, select, cursor} message vocabulary so
+// the helpers below use a single payload regardless of channel.
+function _liveBroadcastWs() {
+  if (state.party.active && state.party.status === "playing"
+      && state.party.ws && state.party.ws.readyState === WebSocket.OPEN) {
+    return state.party.ws;
+  }
+  if (state.presence && state.presence.active
+      && state.presence.ws && state.presence.ws.readyState === WebSocket.OPEN) {
+    return state.presence.ws;
+  }
+  return null;
+}
+
+function _liveIsActive() {
+  return _liveBroadcastWs() !== null;
+}
+
+// Broadcast the player's current FEN to spectators. Routed to the
+// active party or solo-presence WebSocket — no-op if neither is live.
+// Throttling is handled server-side. We piggy-back the current board
+// orientation and the last applied move so watchers can mirror the
+// player's view exactly (same flip + same yellow last-move highlight).
+function _partyReportPosition(fen, opts) {
+  const ws = _liveBroadcastWs();
+  if (!ws) return;
+  const lm = (opts && opts.lastMove) || state.lastMove;
+  const lastMoveStr = (lm && lm.from && lm.to) ? `${lm.from}${lm.to}` : "";
+  // Solo-presence consumers also need the puzzle id / rating /
+  // streak to render the watcher's overlay; party stores those
+  // separately so the extra fields are ignored there.
+  const cur = state.puzzle && state.puzzle.current;
+  try {
+    ws.send(JSON.stringify({
+      type: "position",
+      fen: String(fen || ""),
+      flipped: !!state.flipped,
+      last_move: lastMoveStr,
+      puzzle_id: cur ? String(cur.id || "") : "",
+      puzzle_rating: cur ? Number(cur.rating || 0) : 0,
+      streak: Number(state.puzzle ? state.puzzle.streak || 0 : 0),
+      best_streak: Number(state.puzzle ? state.puzzle.bestStreak || 0 : 0),
+      rating: Number(state.user && state.user.elo_history && state.user.elo_history.rating
+        ? state.user.elo_history.rating : (state.sessionRating || 0)),
+    }));
+  } catch (_) { /* already closed */ }
+}
+
+// Reads `state.selectedSquare` + `state.legalTargets` and rebroadcasts
+// them as a `select` message to spectators, deduped against the last
+// payload (so calling this once per renderBoard is cheap). Computes
+// the captures subset from the live chess instance (game / freeplay)
+// so spectators can paint capture rings vs movement dots, mirroring
+// the player's CSS.
+function _partySyncSelectionFromState() {
+  if (!_liveIsActive()) return;
+  const sel = state.selectedSquare;
+  if (!sel) {
+    if (window.__partyLastSelectionSent === null) return;
+    window.__partyLastSelectionSent = null;
+    _partyReportSelection({ from: null, piece: null, legalMoves: [], legalCaptures: [] });
+    return;
+  }
+  const targets = Array.isArray(state.legalTargets) ? state.legalTargets : [];
+  let c = null;
+  if (state.game && state.game.active) c = state.game.chess;
+  else if (state.legalMode) c = state.freeplay && state.freeplay.chess;
+  let pieceTag = null;
+  let captures = [];
+  if (c) {
+    try {
+      const p = c.get(sel);
+      if (p) pieceTag = (p.color || "w") + (p.type || "p").toUpperCase();
+      captures = targets.filter((sq) => {
+        try { return !!c.get(sq); } catch (_) { return false; }
+      });
+    } catch (_) { /* ignore */ }
+  }
+  const key = `${sel}|${targets.join(",")}|${pieceTag}|${captures.join(",")}`;
+  if (window.__partyLastSelectionSent === key) return;
+  window.__partyLastSelectionSent = key;
+  _partyReportSelection({
+    from: sel,
+    piece: pieceTag,
+    legalMoves: targets,
+    legalCaptures: captures,
+  });
+}
+
+// Selection relay so spectators see the same legal-move hints the
+// player sees. Sent on click-select, drag-start and on clear. We
+// always include the player's chosen hint colour so the watcher's
+// dots match what the player is looking at without a separate config
+// roundtrip.
+function _partyReportSelection({ from, piece, legalMoves, legalCaptures }) {
+  const ws = _liveBroadcastWs();
+  if (!ws) return;
+  try {
+    ws.send(JSON.stringify({
+      type: "select",
+      from: from || null,
+      piece: piece || null,
+      legal_moves: Array.isArray(legalMoves) ? legalMoves : [],
+      legal_captures: Array.isArray(legalCaptures) ? legalCaptures : [],
+      legal_color: _isHexColor(userSettings.legalDotColor)
+        ? userSettings.legalDotColor
+        : "",
+    }));
+  } catch (_) { /* already closed */ }
+}
+
+// Pointer relay so spectators can see what the player is doing
+// between moves (cursor over a square, dragging a piece). Bandwidth:
+// one JSON message every ~33ms while the cursor is over the board, so
+// at most ~30 msgs/sec — small per-player.
+let _cursorLastSendTs = 0;
+let _cursorLastPayload = "";
+// 4ms ~= 240 Hz. The browser only fires mousemove at the display's
+// refresh rate (typically 60–240 Hz on modern setups), so we'll
+// effectively send one frame per pointer event. Drag start/stop
+// frames bypass the throttle so state changes are never lost.
+const _CURSOR_THROTTLE_MS = 4;
+function _partyReportCursor(payload) {
+  const ws = _liveBroadcastWs();
+  if (!ws) return;
+  const now = Date.now();
+  // Always send drag start/stop and explicit "leave" frames so we
+  // don't get stuck with a stale dragging-flag on the spectator side.
+  const isStateChange = payload.dragging || payload.x === null;
+  if (!isStateChange && now - _cursorLastSendTs < _CURSOR_THROTTLE_MS) return;
+  const serialized = JSON.stringify(payload);
+  if (!isStateChange && serialized === _cursorLastPayload) return;
+  _cursorLastSendTs = now;
+  _cursorLastPayload = serialized;
+  try {
+    ws.send(JSON.stringify({ type: "cursor", ...payload }));
+  } catch (_) { /* already closed */ }
+}
+
+function _installPartyCursorTracking() {
+  if (window.__partyCursorInstalled) return;
+  window.__partyCursorInstalled = true;
+  const isPartyActive = () => _liveIsActive();
+  const sample = (el, ev) => {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const rawX = (ev.clientX - rect.left) / rect.width;
+    const rawY = (ev.clientY - rect.top) / rect.height;
+    // The local board may be flipped (black-on-bottom); spectators
+    // always view from white-on-bottom, so undo the flip here.
+    const flipped = !!state.flipped;
+    const sx = flipped ? 1 - rawX : rawX;
+    const sy = flipped ? 1 - rawY : rawY;
+    return { x: sx, y: sy, flipped };
+  };
+  const onMove = (ev) => {
+    if (!isPartyActive()) return;
+    const board = document.querySelector(".board");
+    if (!board) return;
+    const s = sample(board, ev);
+    if (!s) return;
+    const sel = (typeof state.selectedSquare === "string") ? state.selectedSquare : "";
+    _partyReportCursor({
+      x: s.x,
+      y: s.y,
+      flipped: s.flipped,
+      selected: sel,
+      dragging: !!window.__partyCursorDragging,
+      // Carry the piece + origin square so spectators can render the
+      // dragged glyph at the cursor position. Cleared on dragend so
+      // a stale icon never sticks around.
+      drag_piece: window.__partyCursorDragging ? (window.__partyDragPiece || "") : "",
+      drag_from: window.__partyCursorDragging ? (window.__partyDragFrom || "") : "",
+    });
+  };
+  const onLeave = () => {
+    if (!isPartyActive()) return;
+    // Clear the cursor on spectator side by sending an out-of-bounds
+    // position; the server clamps to [-0.05, 1.05] and the spectator
+    // CSS hides the dot when outside the board.
+    _partyReportCursor({
+      x: -1, y: -1, flipped: false, selected: "", dragging: false,
+      drag_piece: "", drag_from: "",
+    });
+  };
+  const onDragStart = (ev) => {
+    if (!isPartyActive()) return;
+    window.__partyCursorDragging = true;
+    // Identify the piece + origin square so spectators can render the
+    // same floating glyph the player is dragging. dragstart can fire
+    // on the .piece span itself, on a child img, or anywhere inside —
+    // closest(".piece") handles all those cases. The .piece carries
+    // dataset.piece (FEN char) and is a direct child of a .square
+    // div whose dataset.square is "e2" / "h7" / etc.
+    const pieceEl = ev && ev.target && ev.target.closest
+      ? ev.target.closest(".piece")
+      : null;
+    if (pieceEl) {
+      const fenChar = pieceEl.dataset && pieceEl.dataset.piece;
+      const sqEl = pieceEl.closest(".square");
+      const fromSq = (sqEl && sqEl.dataset && sqEl.dataset.square)
+        || (pieceEl.dataset && pieceEl.dataset.fromSquare)
+        || "";
+      if (fenChar) {
+        const color = fenChar === fenChar.toUpperCase() ? "w" : "b";
+        window.__partyDragPiece = color + fenChar.toUpperCase();
+      } else {
+        window.__partyDragPiece = "";
+      }
+      window.__partyDragFrom = fromSq || "";
+    } else {
+      window.__partyDragPiece = "";
+      window.__partyDragFrom = "";
+    }
+    // Push one frame immediately so spectators get the piece info as
+    // soon as the drag starts, not on the next mousemove. Use cursor
+    // coords from the event itself.
+    const board = document.querySelector(".board");
+    if (board) {
+      const s = sample(board, ev);
+      if (s) {
+        const sel = (typeof state.selectedSquare === "string") ? state.selectedSquare : "";
+        _partyReportCursor({
+          x: s.x, y: s.y, flipped: s.flipped, selected: sel,
+          dragging: true,
+          drag_piece: window.__partyDragPiece || "",
+          drag_from: window.__partyDragFrom || "",
+        });
+      }
+    }
+  };
+  const onDragEnd = () => {
+    if (!isPartyActive()) return;
+    window.__partyCursorDragging = false;
+    window.__partyDragPiece = "";
+    window.__partyDragFrom = "";
+    // Push one frame so spectators clear the floating piece + drag
+    // flag immediately rather than waiting on the next mousemove.
+    _partyReportCursor({
+      x: -1, y: -1, flipped: false, selected: "",
+      dragging: false, drag_piece: "", drag_from: "",
+    });
+  };
+  document.addEventListener("mousemove", (ev) => {
+    const board = document.querySelector(".board");
+    if (!board) return;
+    if (board === ev.target || board.contains(ev.target)) onMove(ev);
+  }, { passive: true });
+  document.addEventListener("mouseleave", onLeave, true);
+  document.addEventListener("dragstart", onDragStart, true);
+  document.addEventListener("dragend", onDragEnd, true);
+  document.addEventListener("drop", onDragEnd, true);
+  // The browser stops firing `mousemove` while an HTML5 drag is in
+  // progress — pointer position then has to be sampled from the
+  // `drag` event on the source piece, or from `dragover` on the
+  // board (whichever has reliable clientX/clientY in this browser).
+  // We listen to both so the spectator's cursor keeps tracking the
+  // pointer mid-drag instead of freezing in place.
+  document.addEventListener("drag", (ev) => {
+    if (!isPartyActive()) return;
+    if (typeof ev.clientX !== "number" || typeof ev.clientY !== "number") return;
+    if (ev.clientX === 0 && ev.clientY === 0) return; // chromium "ghost" drag-end frame
+    const board = document.querySelector(".board");
+    if (!board) return;
+    onMove(ev);
+  }, { passive: true, capture: true });
+  document.addEventListener("dragover", (ev) => {
+    if (!isPartyActive()) return;
+    const board = document.querySelector(".board");
+    if (!board) return;
+    if (board !== ev.target && !board.contains(ev.target)) return;
+    onMove(ev);
+  }, { passive: true, capture: true });
+  // ---- Touch (phones) — mirror the dragstart/drag/dragend wires
+  // above using clientX/clientY from the touch event so spectators
+  // see the same cursor / drag piece info when the player is on a
+  // phone. Skips multi-touch (pinch-zoom) and only fires when the
+  // touch is over the board.
+  const touchEvAdapter = (te) => {
+    const t = (te.touches && te.touches[0])
+      || (te.changedTouches && te.changedTouches[0])
+      || null;
+    if (!t) return null;
+    return {
+      clientX: t.clientX,
+      clientY: t.clientY,
+      target: te.target,
+    };
+  };
+  document.addEventListener("touchstart", (ev) => {
+    if (!isPartyActive()) return;
+    if (ev.touches.length !== 1) return;
+    const board = document.querySelector(".board");
+    if (!board) return;
+    const fake = touchEvAdapter(ev);
+    if (!fake) return;
+    if (board !== ev.target && !board.contains(ev.target)) return;
+    // If the finger landed on a piece we mark drag-start so spectators
+    // see the floating glyph; otherwise it's just a hover sample.
+    const pieceEl = ev.target.closest && ev.target.closest(".piece");
+    if (pieceEl) onDragStart(fake);
+    else onMove(fake);
+  }, { passive: true, capture: true });
+  document.addEventListener("touchmove", (ev) => {
+    if (!isPartyActive()) return;
+    if (ev.touches.length !== 1) return;
+    const board = document.querySelector(".board");
+    if (!board) return;
+    const fake = touchEvAdapter(ev);
+    if (!fake) return;
+    // We want cursor frames any time the finger is over the board,
+    // even mid-drag, so spectators see the smooth path.
+    onMove(fake);
+  }, { passive: true, capture: true });
+  document.addEventListener("touchend", () => {
+    if (!isPartyActive()) return;
+    if (window.__partyCursorDragging) onDragEnd();
+    else onLeave();
+  }, { passive: true, capture: true });
+  document.addEventListener("touchcancel", () => {
+    if (!isPartyActive()) return;
+    if (window.__partyCursorDragging) onDragEnd();
+  }, { passive: true, capture: true });
+}
+_installPartyCursorTracking();
+
+function _partyDurationLabel(sec) {
+  const n = Math.max(1, Math.round((Number(sec) || 0) / 60));
+  return `${n} мин`;
+}
+
+function renderPartyLobby() {
+  const body = _partyEnsureModal();
+  if (!body) return;
+  const m = state.party;
+  const isHost = m.host_id === state.user.client_id;
+  const memberRows = (m.members || []).map((mem) => `
+    <li class="party-member ${mem.online ? "is-online" : "is-offline"}">
+      <span class="party-avatar">${escapeHtml(mem.avatar || "♟")}</span>
+      <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
+      ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
+      ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
+    </li>
+  `).join("");
+  const allowed = (m.allowedDurations && m.allowedDurations.length)
+    ? m.allowedDurations
+    : [120, 180, 300, 600];
+  // The selector is the host's only way to set match length; non-hosts
+  // see the same value read-only so everyone agrees on what's about to
+  // happen before the start button gets pressed.
+  const durationButtons = allowed.map((sec) => {
+    const isActive = Number(m.durationSec) === Number(sec);
+    return `<button type="button" class="party-duration-opt ${isActive ? "is-active" : ""}" data-sec="${sec}" ${isHost ? "" : "disabled"}>${_partyDurationLabel(sec)}</button>`;
+  }).join("");
+  const startLabel = `Начать матч (${_partyDurationLabel(m.durationSec || 600)})`;
+  body.innerHTML = `
+    <header class="party-header">
+      <h2>🎉 Party — лобби</h2>
+      <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code></p>
+    </header>
+    <ul class="party-members">${memberRows || `<li class="party-empty">Пока никого…</li>`}</ul>
+    <section class="party-duration-section">
+      <div class="party-duration-label">Длительность матча${isHost ? "" : " <span class=\"muted\">(выбирает хост)</span>"}</div>
+      <div class="party-duration-options" role="radiogroup" aria-label="Длительность матча">${durationButtons}</div>
+    </section>
+    <div class="party-actions">
+      ${isHost
+        ? `<button id="btn-party-start" type="button" class="puzzle-primary">${escapeHtml(startLabel)}</button>`
+        : `<div class="muted">Ждём, пока хост запустит матч…</div>`}
+      <button id="btn-party-leave" type="button" class="puzzle-ghost">Выйти</button>
+    </div>
+    <div id="party-error" class="party-error" hidden></div>
+  `;
+  body.querySelector("#btn-party-leave")?.addEventListener("click", () => {
+    leaveParty();
+  });
+  if (isHost) {
+    body.querySelectorAll(".party-duration-opt").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const sec = Number(btn.dataset.sec) || 0;
+        if (!sec || !allowed.includes(sec)) return;
+        state.party.durationSec = sec;
+        renderPartyLobby();
+      });
+    });
+  }
+  body.querySelector("#btn-party-start")?.addEventListener("click", (ev) => {
+    const btn = ev.currentTarget;
+    // Hard guard against the user clicking 'Start' multiple times
+    // before the server's puzzle response arrives — extra sends were
+    // ignored on the server, but the round-trip is long enough on a
+    // big puzzle bank that the user can rack up several clicks. We
+    // disable the button immediately and re-enable on error / leave.
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = "Запускаем матч…";
+    const ws = state.party.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "start",
+        duration_sec: Number(state.party.durationSec) || 600,
+      }));
+    } else {
+      btn.disabled = false;
+      btn.textContent = startLabel;
+    }
+  });
+}
+
+function leaveParty() {
+  if (state.party.ws) {
+    try { state.party.ws.send(JSON.stringify({ type: "leave" })); } catch (_) {}
+    try { state.party.ws.close(); } catch (_) {}
+  }
+  state.party.active = false;
+  state.party.ws = null;
+  state.party.status = "lobby";
+  if (state.party.countdownInterval) {
+    clearInterval(state.party.countdownInterval);
+    state.party.countdownInterval = null;
+  }
+  closePartyModal();
+  _partyUnmountSidePanel();
+  // Drop the party puzzle from solo state — without this, returning to
+  // the puzzle tab would replay the exact same puzzle the user was on
+  // when the match ended (because enterPuzzleView only fetches a fresh
+  // one when state.puzzle.current is null).
+  _stopPuzzleTimer();
+  if (state.puzzle.pendingNext) {
+    clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = null;
+  }
+  state.puzzle.current = null;
+  state.puzzle.moves = [];
+  state.puzzle.fenStart = null;
+  state.puzzle.side = "w";
+  state.puzzle.feedback = null;
+  state.puzzle.attempts = 0;
+  state.puzzle.hintUsed = false;
+  state.puzzle.active = false;
+  state.puzzle.startedAt = 0;
+  state.puzzle.solveMs = 0;
+  state.puzzle.nextIdx = 0;
+  state.puzzle.needsNextOnReturn = true;
+  // If the user is still on the puzzle tab when they leave, fetch a
+  // fresh puzzle now so they don't sit on an empty board. Also restore
+  // the solo-broadcast WS so they show up in the "Оффлайн" tab again.
+  if (state.view === "puzzle") {
+    state.puzzle.needsNextOnReturn = false;
+    loadNextPuzzle();
+    try { presenceConnect(); } catch (_) { /* ignore */ }
+  }
+}
+
+function _partyStartCountdown() {
+  if (state.party.countdownInterval) {
+    clearInterval(state.party.countdownInterval);
+  }
+  state.party.countdownInterval = setInterval(_partyRenderHud, 1000);
+  _partyRenderHud();
+}
+
+function _partyMountSidePanel() {
+  let host = document.getElementById("party-side-panel");
+  if (host) return host;
+  host = document.createElement("aside");
+  host.id = "party-side-panel";
+  host.className = "party-side-panel";
+  document.body.appendChild(host);
+  return host;
+}
+
+function _partyUnmountSidePanel() {
+  const host = document.getElementById("party-side-panel");
+  if (host) host.remove();
+}
+
+function _partyRenderHud() {
+  _partyRenderScoreboard();
+}
+
+function _partyRenderScoreboard() {
+  const host = document.getElementById("party-side-panel");
+  if (!host) return;
+  const me = state.user.client_id;
+  const rows = (state.party.scoreboard || []).map((r, i) => `
+    <li class="party-row ${r.client_id === me ? "is-self" : ""}">
+      <span class="party-rank">#${i + 1}</span>
+      <span class="party-avatar">${escapeHtml(r.avatar || "♟")}</span>
+      <span class="party-name">${escapeHtml(r.nickname || "Гость")}</span>
+      <span class="party-score">${Number(r.score || 0)}</span>
+      <span class="party-solved">✔ ${Number(r.solved || 0)}</span>
+    </li>
+  `).join("");
+  const timer = state.party.status === "playing"
+    ? _formatPartyTimeLeft(state.party.endsAt)
+    : "—";
+  host.innerHTML = `
+    <header class="party-side-header">
+      <span class="party-side-title">🎉 Party</span>
+      <span class="party-side-timer">${timer}</span>
+    </header>
+    <ul class="party-side-list">${rows || `<li class="party-empty">…</li>`}</ul>
+    <button id="btn-party-leave-side" type="button" class="puzzle-ghost party-side-leave">Выйти из пати</button>
+  `;
+  host.querySelector("#btn-party-leave-side")?.addEventListener("click", leaveParty);
+}
+
+function _formatPartyDuration(sec) {
+  const total = Math.max(0, Math.round(Number(sec) || 0));
+  const mm = Math.floor(total / 60);
+  const ss = total % 60;
+  if (mm <= 0 && ss <= 0) return "—";
+  if (ss === 0) return `${mm} мин`;
+  return `${mm}:${String(ss).padStart(2, "0")}`;
+}
+
+function _formatSolveMs(ms) {
+  const v = Math.max(0, Math.round(Number(ms) || 0));
+  if (!v) return "—";
+  if (v < 1000) return `${v} мс`;
+  const sec = v / 1000;
+  if (sec < 10) return `${sec.toFixed(1)} с`;
+  return `${Math.round(sec)} с`;
+}
+
+// Build the detailed end-of-match scoreboard markup. The same renderer
+// is reused by the live "Итоги пати" modal *and* by the per-battle
+// detail modal opened from the profile, so the two views can never
+// drift out of sync.
+function _renderPartyResultsHTML(results, meta, opts) {
+  const { highlightId = null, includeAttempts = false, attempts = null } = opts || {};
+  const list = Array.isArray(results) ? results : [];
+  const durationLabel = _formatPartyDuration(meta && meta.duration_sec);
+  const startedAt = meta && (meta.ended_at || meta.started_at);
+  const dateLabel = startedAt
+    ? new Date(Number(startedAt) * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
+  const totals = list.reduce((acc, r) => {
+    acc.solved += Number(r.solved || 0);
+    acc.failed += Number(r.failed || 0);
+    acc.skipped += Number(r.skipped || 0);
+    return acc;
+  }, { solved: 0, failed: 0, skipped: 0 });
+  const totalAttempts = totals.solved + totals.failed + totals.skipped;
+  const lobbyWin = totalAttempts ? (totals.solved / totalAttempts * 100) : 0;
+  const headerMeta = `
+    <div class="party-results-meta">
+      <span><strong>${escapeHtml(durationLabel)}</strong> · длительность</span>
+      <span><strong>${list.length}</strong> игроков</span>
+      <span><strong>${totals.solved}</strong> решено / <strong>${totalAttempts}</strong> попыток</span>
+      <span>Винрейт лобби: <strong>${lobbyWin.toFixed(1)}%</strong></span>
+      ${dateLabel ? `<span class="muted">${escapeHtml(dateLabel)}</span>` : ""}
+    </div>`;
+  const tableRows = list.map((r) => {
+    const isSelf = highlightId && r.client_id === highlightId;
+    const winrate = Number(r.winrate || 0);
+    const elo = Number(r.party_elo || 0);
+    const eloLabel = elo > 0 ? `+${elo}` : `${elo}`;
+    const avg = _formatSolveMs(r.avg_solve_ms);
+    const best = _formatSolveMs(r.best_solve_ms);
+    return `
+      <tr class="party-results-row ${isSelf ? "is-self" : ""}">
+        <td class="party-rank">#${Number(r.rank || 0)}</td>
+        <td class="party-results-player">
+          <span class="party-avatar">${escapeHtml(r.avatar || "♟")}</span>
+          <span class="party-name">${escapeHtml(r.nickname || "Гость")}${isSelf ? " <span class=\"muted\" style=\"font-size:11px;\">(вы)</span>" : ""}</span>
+        </td>
+        <td class="party-results-num party-score">${Number(r.score || 0)}</td>
+        <td class="party-results-num ok">${Number(r.solved || 0)}</td>
+        <td class="party-results-num bad">${Number(r.failed || 0)}</td>
+        <td class="party-results-num warn">${Number(r.skipped || 0)}</td>
+        <td class="party-results-num">${winrate.toFixed(1)}%</td>
+        <td class="party-results-num warn">🔥 ${Number(r.best_streak || 0)}</td>
+        <td class="party-results-num muted">${avg} / ${best}</td>
+        <td class="party-results-num party-elo">${eloLabel}</td>
+      </tr>`;
+  }).join("");
+  const tableHtml = `
+    <div class="party-results-tablewrap">
+      <table class="party-results-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Игрок</th>
+            <th>Очки</th>
+            <th>✔</th>
+            <th>✘</th>
+            <th>↷</th>
+            <th>Винрейт</th>
+            <th>Серия</th>
+            <th>Среднее / лучшее</th>
+            <th>Эло</th>
+          </tr>
+        </thead>
+        <tbody>${tableRows || `<tr><td colspan="10" class="party-empty">Никто ничего не решил.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+  let attemptsHtml = "";
+  if (includeAttempts && Array.isArray(attempts) && attempts.length) {
+    const attemptRows = attempts.slice(-50).reverse().map((a, idx) => {
+      const outcome = String(a.outcome || "skipped");
+      const cls = outcome === "solved" ? "ok" : (outcome === "failed" ? "bad" : "warn");
+      const sym = outcome === "solved" ? "✔" : (outcome === "failed" ? "✘" : "↷");
+      const themes = Array.isArray(a.themes) ? a.themes.slice(0, 3).join(" · ") : "";
+      const score = Number(a.score || 0);
+      return `
+        <tr>
+          <td class="party-results-num muted">${attempts.length - idx}</td>
+          <td><span class="party-results-attempt-id">#${escapeHtml(String(a.puzzle_id || ""))}</span></td>
+          <td class="party-results-num">${Number(a.rating || 0)}</td>
+          <td class="party-results-num ${cls}">${sym}</td>
+          <td class="party-results-num">${_formatSolveMs(a.solve_ms)}</td>
+          <td class="party-results-num">${score > 0 ? `+${score}` : score}</td>
+          <td class="muted">${escapeHtml(themes)}</td>
+        </tr>`;
+    }).join("");
+    attemptsHtml = `
+      <details class="party-results-attempts" open>
+        <summary>Ваши попытки (${attempts.length})</summary>
+        <div class="party-results-tablewrap">
+          <table class="party-results-table party-results-attempts-table">
+            <thead>
+              <tr>
+                <th>#</th><th>Пазл</th><th>Эло</th><th>Итог</th><th>Время</th><th>Очки</th><th>Темы</th>
+              </tr>
+            </thead>
+            <tbody>${attemptRows}</tbody>
+          </table>
+        </div>
+      </details>`;
+  }
+  return `${headerMeta}${tableHtml}${attemptsHtml}`;
+}
+
+// Render the results card to a PNG via canvas, then trigger a
+// download. We draw text manually instead of leaning on a third-party
+// html-to-image lib to keep the frontend dependency-free.
+async function _partySaveResultsAsImage(results, meta, fileName) {
+  const list = Array.isArray(results) ? results : [];
+  const W = 1100;
+  const headerH = 130;
+  const rowH = 56;
+  const footerH = 80;
+  const tableTop = headerH + 60;
+  const H = headerH + 60 + Math.max(rowH * (list.length + 1), rowH) + footerH;
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return false;
+  // Background.
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#1f2a3a");
+  grad.addColorStop(1, "#161e2c");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  // Border.
+  ctx.strokeStyle = "#2c3950";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, W - 2, H - 2);
+  // Header.
+  ctx.fillStyle = "#e7eef9";
+  ctx.font = "bold 36px system-ui, sans-serif";
+  ctx.fillText("🏁 Итоги пати", 32, 56);
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.fillStyle = "#94a4be";
+  const durationLabel = _formatPartyDuration(meta && meta.duration_sec);
+  const startedAt = meta && (meta.ended_at || meta.started_at);
+  const dateLabel = startedAt
+    ? new Date(Number(startedAt) * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
+  ctx.fillText(`Длительность: ${durationLabel}   ·   Игроков: ${list.length}${dateLabel ? `   ·   ${dateLabel}` : ""}`, 32, 90);
+  // Table headers.
+  const cols = [
+    { x: 32,  w: 60,  label: "#",       align: "left" },
+    { x: 100, w: 320, label: "Игрок",   align: "left" },
+    { x: 430, w: 90,  label: "Очки",    align: "right" },
+    { x: 530, w: 60,  label: "✔",        align: "right" },
+    { x: 600, w: 60,  label: "✘",        align: "right" },
+    { x: 670, w: 60,  label: "↷",        align: "right" },
+    { x: 740, w: 100, label: "Винрейт", align: "right" },
+    { x: 850, w: 90,  label: "Серия",   align: "right" },
+    { x: 950, w: 120, label: "Эло",     align: "right" },
+  ];
+  ctx.fillStyle = "#94a4be";
+  ctx.font = "bold 14px system-ui, sans-serif";
+  for (const c of cols) {
+    ctx.textAlign = c.align;
+    const tx = c.align === "right" ? c.x + c.w : c.x;
+    ctx.fillText(c.label, tx, tableTop - 14);
+  }
+  // Rows.
+  ctx.font = "16px system-ui, sans-serif";
+  list.forEach((r, idx) => {
+    const y = tableTop + idx * rowH;
+    if (idx % 2 === 0) {
+      ctx.fillStyle = "rgba(26, 37, 56, 0.55)";
+      ctx.fillRect(24, y - 4, W - 48, rowH);
+    }
+    const winrate = Number(r.winrate || 0);
+    const elo = Number(r.party_elo || 0);
+    const eloLabel = elo > 0 ? `+${elo}` : `${elo}`;
+    const cellY = y + 28;
+    const draws = [
+      { c: cols[0], v: `#${Number(r.rank || 0)}`,                  color: "#94a4be" },
+      { c: cols[1], v: `${(r.avatar || "♟")}  ${(r.nickname || "Гость")}`, color: "#e7eef9" },
+      { c: cols[2], v: `${Number(r.score || 0)}`,                  color: "#6da7ff" },
+      { c: cols[3], v: `${Number(r.solved || 0)}`,                 color: "#6cf2a6" },
+      { c: cols[4], v: `${Number(r.failed || 0)}`,                 color: "#ffb1bf" },
+      { c: cols[5], v: `${Number(r.skipped || 0)}`,                color: "#ffd75e" },
+      { c: cols[6], v: `${winrate.toFixed(1)}%`,                   color: "#e7eef9" },
+      { c: cols[7], v: `🔥 ${Number(r.best_streak || 0)}`,          color: "#ffd75e" },
+      { c: cols[8], v: eloLabel,                                   color: "#ffd75e" },
+    ];
+    for (const d of draws) {
+      ctx.fillStyle = d.color;
+      ctx.textAlign = d.c.align;
+      const tx = d.c.align === "right" ? d.c.x + d.c.w : d.c.x;
+      ctx.fillText(d.v, tx, cellY);
+    }
+  });
+  // Footer.
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#6da7ff";
+  ctx.font = "italic 13px system-ui, sans-serif";
+  ctx.fillText("chess-sandbox · party puzzles", 32, H - 24);
+  // Trigger download.
+  const blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/png"));
+  if (!blob) return false;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName || `party-${meta && meta.party_id ? meta.party_id : Date.now()}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  // Best-effort native share (mobile etc) so the same button drops an
+  // image into Telegram / Photos / etc when supported.
+  try {
+    const file = new File([blob], a.download, { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: "Итоги пати", text: "Мой результат в puzzle-party 🏆" });
+    }
+  } catch (_) { /* user cancelled / unsupported */ }
+  return true;
+}
+
+function _partyShareToTelegram(results, meta) {
+  const list = Array.isArray(results) ? results : [];
+  const lines = list.slice(0, 10).map((r) => {
+    const winrate = Number(r.winrate || 0).toFixed(1);
+    return `#${r.rank} ${r.avatar || "♟"} ${r.nickname || "Гость"} — ${Number(r.score || 0)} pts (${Number(r.solved || 0)} ✔ / ${winrate}%)`;
+  });
+  const durationLabel = _formatPartyDuration(meta && meta.duration_sec);
+  const text = [
+    `🏁 Итоги пати (${durationLabel})`,
+    ...lines,
+    "chess-sandbox",
+  ].join("\n");
+  const url = location.origin || "https://chess-sandbox.app";
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`;
+  // Try the Web Share API first (works inside Telegram WebView and on
+  // most mobile browsers); fall back to the t.me share URL.
+  if (navigator.share) {
+    navigator.share({ title: "Итоги пати", text, url }).catch(() => {
+      window.open(shareUrl, "_blank", "noopener");
+    });
+  } else {
+    window.open(shareUrl, "_blank", "noopener");
+  }
+}
+
+function _partyShowResults() {
+  const body = _partyEnsureModal();
+  if (!body) return;
+  _partyUnmountSidePanel();
+  const list = Array.isArray(state.party.finalResults) ? state.party.finalResults : [];
+  const meta = state.party.finalMeta || {
+    duration_sec: state.party.durationSec || 600,
+    started_at: state.party.startedAt || 0,
+    ended_at: Math.floor(Date.now() / 1000),
+    party_id: state.party.party_id || "",
+  };
+  state.party.finalMeta = meta;
+  const myCid = state.user.client_id;
+  const tableHtml = _renderPartyResultsHTML(list, meta, { highlightId: myCid });
+  body.innerHTML = `
+    <header class="party-header">
+      <h2>🏁 Итоги пати</h2>
+      <p class="muted">Результат сохранён в истории профиля. Рейтинг за пати не начисляется.</p>
+    </header>
+    <div class="party-results-card">${tableHtml}</div>
+    <div class="party-actions party-actions-results">
+      <button id="btn-party-save-img" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
+      <button id="btn-party-share-tg" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
+      <button id="btn-party-close-results" type="button" class="puzzle-primary">Закрыть</button>
+    </div>
+  `;
+  body.querySelector("#btn-party-save-img")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "Сохраняю…";
+    try {
+      const ok = await _partySaveResultsAsImage(list, meta, `party-${meta.party_id || Date.now()}.png`);
+      btn.textContent = ok ? "✓ Сохранено" : "Не удалось сохранить";
+    } catch (_) {
+      btn.textContent = "Не удалось сохранить";
+    } finally {
+      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1800);
+    }
+  });
+  body.querySelector("#btn-party-share-tg")?.addEventListener("click", () => {
+    _partyShareToTelegram(list, meta);
+  });
+  body.querySelector("#btn-party-close-results")?.addEventListener("click", () => {
+    closePartyModal();
+    state.party.ws = null;
+    state.party.status = "lobby";
+    state.party.finalResults = null;
+    state.party.finalMeta = null;
+  });
+}
+
+// Open the persisted party-summary view from a profile history click.
+// `entry` is a single record from `user.parties[]` as written by the
+// backend in `Party.finish()`. Falls back to the per-user fields when
+// the older shape (no `results` array) is encountered, so legacy
+// matches still get a usable detail screen.
+function openPartyResultDetail(entry) {
+  if (!entry || typeof entry !== "object") return;
+  const body = _partyEnsureModal();
+  if (!body) return;
+  const meta = {
+    duration_sec: Number(entry.duration_sec) || 0,
+    started_at: Number(entry.started_at) || Number(entry.ts) || 0,
+    ended_at: Number(entry.ended_at) || Number(entry.ts) || 0,
+    party_id: String(entry.party_id || ""),
+  };
+  // Reconstruct a minimal scoreboard if the backend didn't send one
+  // (legacy entries) so the detail modal still opens with usable data.
+  const fallbackResults = [{
+    rank: Number(entry.placement || 1),
+    client_id: state.user.client_id,
+    nickname: state.user.nickname || "Гость",
+    avatar: state.user.avatar || "♟",
+    score: Number(entry.score || 0),
+    solved: Number(entry.solved || 0),
+    failed: Number(entry.failed || 0),
+    skipped: Number(entry.skipped || 0),
+    winrate: Number(entry.winrate || 0),
+    best_streak: Number(entry.best_streak || 0),
+    avg_solve_ms: Number(entry.avg_solve_ms || 0),
+    best_solve_ms: Number(entry.best_solve_ms || 0),
+    party_elo: Number(entry.elo_gained || 0),
+  }];
+  const list = Array.isArray(entry.results) && entry.results.length
+    ? entry.results
+    : fallbackResults;
+  const tableHtml = _renderPartyResultsHTML(list, meta, {
+    highlightId: state.user.client_id,
+    includeAttempts: true,
+    attempts: Array.isArray(entry.attempts) ? entry.attempts : null,
+  });
+  body.innerHTML = `
+    <header class="party-header">
+      <h2>📜 Подробный результат боя</h2>
+      <p class="muted">#${Number(entry.placement || 1)} из ${Number(entry.participants || list.length)} · ${escapeHtml(_formatPartyDuration(meta.duration_sec))}</p>
+    </header>
+    <div class="party-results-card">${tableHtml}</div>
+    <div class="party-actions party-actions-results">
+      <button id="btn-party-detail-save" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
+      <button id="btn-party-detail-share" type="button" class="puzzle-secondary">✈️ Поделиться в Telegram</button>
+      <button id="btn-party-detail-close" type="button" class="puzzle-primary">Закрыть</button>
+    </div>
+  `;
+  document.getElementById("party-modal").hidden = false;
+  body.querySelector("#btn-party-detail-save")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "Сохраняю…";
+    try {
+      const ok = await _partySaveResultsAsImage(list, meta, `party-${meta.party_id || meta.started_at || Date.now()}.png`);
+      btn.textContent = ok ? "✓ Сохранено" : "Не удалось сохранить";
+    } catch (_) {
+      btn.textContent = "Не удалось сохранить";
+    } finally {
+      setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1800);
+    }
+  });
+  body.querySelector("#btn-party-detail-share")?.addEventListener("click", () => {
+    _partyShareToTelegram(list, meta);
+  });
+  body.querySelector("#btn-party-detail-close")?.addEventListener("click", () => {
+    closePartyModal();
+  });
+}
+
+// Expose so profile rows can call it through inline onclick fallbacks.
+window.openPartyResultDetail = openPartyResultDetail;
+
+// ---------- Notifications (SSE) + party invitations ----------
+
+function _bootNotifications() {
+  if (!state.user.client_id) return;
+  _notificationsConnect();
+}
+
+function _notificationsConnect() {
+  // Tear down any previous stream.
+  if (state.notifications.es) {
+    try { state.notifications.es.close(); } catch (_) {}
+    state.notifications.es = null;
+  }
+  if (state.notifications.reconnectTimer) {
+    clearTimeout(state.notifications.reconnectTimer);
+    state.notifications.reconnectTimer = null;
+  }
+  const url = `/api/notifications/stream?client_id=${encodeURIComponent(state.user.client_id)}`;
+  let es;
+  try {
+    es = new EventSource(url);
+  } catch (_) {
+    return;
+  }
+  state.notifications.es = es;
+  es.onmessage = (ev) => {
+    let payload;
+    try { payload = JSON.parse(ev.data); } catch (_) { return; }
+    handleNotificationEvent(payload);
+  };
+  es.onerror = () => {
+    // Browser auto-reconnects on most failures; if it really dies,
+    // schedule a manual reopen.
+    if (es.readyState === EventSource.CLOSED) {
+      state.notifications.reconnectTimer = setTimeout(_notificationsConnect, 4000);
+    }
+  };
+}
+
+function handleNotificationEvent(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "hello":
+      // Snapshot of pending invitations on (re)connect.
+      (msg.invitations || []).forEach((inv) => _showInvitationToast(inv));
+      break;
+    case "invitation":
+      if (msg.invitation) _showInvitationToast(msg.invitation);
+      break;
+    case "invitation_accepted":
+      if (msg.invitation) {
+        _showInfoToast(`✔ ${msg.invitation.host_id === state.user.client_id ? "Кент принял твоё приглашение" : "Принято"}`);
+      }
+      break;
+    case "invitation_declined":
+      if (msg.invitation && msg.invitation.host_id === state.user.client_id) {
+        _showInfoToast(`Кент отклонил приглашение`);
+      }
+      break;
+  }
+}
+
+function _showInvitationToast(inv) {
+  if (!inv || !inv.id) return;
+  // Already on screen?
+  if (state.notifications.invitations[inv.id]) return;
+  state.notifications.invitations[inv.id] = inv;
+
+  const stack = document.getElementById("toast-stack");
+  if (!stack) return;
+  const card = document.createElement("div");
+  card.className = "toast";
+  card.dataset.invitationId = inv.id;
+  card.innerHTML = `
+    <div class="toast-header">
+      <span class="toast-avatar">${escapeHtml(inv.host_avatar || "♟")}</span>
+      <div>
+        <div class="toast-title">${escapeHtml(inv.host_nickname || "Гость")} зовёт в пати</div>
+        <div class="toast-sub">Код комнаты: ${escapeHtml(inv.party_code)}</div>
+      </div>
+    </div>
+    <div class="toast-actions">
+      <button type="button" class="toast-btn toast-btn-decline">Отклонить</button>
+      <button type="button" class="toast-btn toast-btn-accept">Принять</button>
+    </div>
+  `;
+  card.querySelector(".toast-btn-accept").addEventListener("click", () => {
+    _acceptInvitation(inv.id).catch((e) => _showInfoToast(`Ошибка: ${e.message || e}`));
+  });
+  card.querySelector(".toast-btn-decline").addEventListener("click", () => {
+    _declineInvitation(inv.id).catch((e) => _showInfoToast(`Ошибка: ${e.message || e}`));
+  });
+  stack.appendChild(card);
+}
+
+function _dismissInvitationToast(invId) {
+  delete state.notifications.invitations[invId];
+  const stack = document.getElementById("toast-stack");
+  if (!stack) return;
+  const node = stack.querySelector(`[data-invitation-id="${CSS.escape(invId)}"]`);
+  if (node) node.remove();
+}
+
+function _showInfoToast(text, ttl = 3500) {
+  const stack = document.getElementById("toast-stack");
+  if (!stack) return;
+  const card = document.createElement("div");
+  card.className = "toast";
+  card.innerHTML = `
+    <div class="toast-header">
+      <span class="toast-avatar">ℹ</span>
+      <div><div class="toast-title">${escapeHtml(text)}</div></div>
+    </div>
+  `;
+  stack.appendChild(card);
+  setTimeout(() => card.remove(), ttl);
+}
+
+async function _acceptInvitation(invId) {
+  const res = await fetch(`/api/party/invitations/${encodeURIComponent(invId)}/accept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: state.user.client_id }),
+  });
+  _dismissInvitationToast(invId);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  // Auto-join the party.
+  partyConnect(data.code);
+  openPartyModal();
+}
+
+async function _declineInvitation(invId) {
+  await fetch(`/api/party/invitations/${encodeURIComponent(invId)}/decline`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: state.user.client_id }),
+  }).catch(() => {});
+  _dismissInvitationToast(invId);
+}
+
+// ---------- Friend picker + open-parties list (party-create modal) ----------
+
+async function _renderFriendPicker() {
+  const host = document.getElementById("party-friend-picker");
+  if (!host) return;
+  let users = [];
+  try {
+    const res = await fetch("/api/users");
+    const data = await res.json();
+    users = (data.users || []).filter((u) => u.client_id !== state.user.client_id);
+  } catch (_) {
+    host.innerHTML = `<div class="party-friend-empty">Не удалось загрузить список</div>`;
+    return;
+  }
+  if (!users.length) {
+    host.innerHTML = `<div class="party-friend-empty">Пока нет других зарегистрированных игроков. Поделись ссылкой на сервер.</div>`;
+    return;
+  }
+  // Show recent / online first.
+  users.sort((a, b) => (Number(b.last_seen || 0)) - (Number(a.last_seen || 0)));
+  const now = Math.floor(Date.now() / 1000);
+  host.innerHTML = users.map((u) => {
+    const recent = (now - Number(u.last_seen || 0)) < 300;
+    return `
+      <label class="party-friend-row">
+        <input type="checkbox" class="party-friend-cb" value="${escapeHtml(u.client_id)}" />
+        <span class="toast-avatar">${escapeHtml(u.avatar || "♟")}</span>
+        <span class="party-friend-name">${escapeHtml(u.nickname || "Гость")}</span>
+        <span class="party-friend-meta">${recent ? "● онлайн" : ""} ${Number(u.rating || 1500)} elo</span>
+      </label>
+    `;
+  }).join("");
+}
+
+async function _renderOpenPartiesList() {
+  const host = document.getElementById("party-open-list");
+  if (!host) return;
+  let parties = [];
+  try {
+    const res = await fetch("/api/party/list");
+    const data = await res.json();
+    parties = (data.parties || []).filter((p) => p.host_id !== state.user.client_id);
+  } catch (_) {
+    host.innerHTML = `<div class="party-open-empty">Не удалось загрузить</div>`;
+    return;
+  }
+  if (!parties.length) {
+    host.innerHTML = `<div class="party-open-empty">Сейчас нет открытых пати</div>`;
+    return;
+  }
+  host.innerHTML = parties.map((p) => {
+    const status = p.status === "playing" ? "идёт" : "лобби";
+    const cls = p.status === "playing" ? "is-playing" : "";
+    const joinable = p.status === "lobby";
+    return `
+      <div class="party-open-row" data-code="${escapeHtml(p.code)}">
+        <span class="toast-avatar">${escapeHtml(p.host_avatar || "♟")}</span>
+        <div class="party-open-info">
+          <div>${escapeHtml(p.host_nickname || "Гость")} · <span class="muted">${escapeHtml(p.code)}</span></div>
+          <div class="muted" style="font-size:11px;">${p.members} игроков${p.spectator_count ? ` · ${p.spectator_count} наблюдателей` : ""}</div>
+        </div>
+        <span class="party-open-status ${cls}">${status}</span>
+        <div class="party-open-actions">
+          ${joinable ? `<button type="button" class="puzzle-secondary btn-open-join">Войти</button>` : ""}
+          ${p.status === "playing" ? `<button type="button" class="puzzle-ghost btn-open-spectate">🔭 Наблюдать</button>` : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
+  host.querySelectorAll(".party-open-row").forEach((row) => {
+    const code = row.dataset.code;
+    row.querySelector(".btn-open-join")?.addEventListener("click", () => {
+      partyJoin(code).catch((e) => _partyShowError(e));
+    });
+    row.querySelector(".btn-open-spectate")?.addEventListener("click", () => {
+      spectatorConnect(code);
+      closePartyModal();
+    });
+  });
+}
+
+// Renders the "Оффлайн" tab — solo puzzle players currently broadcasting.
+// Each card is clickable; click attaches a presence-spectator socket
+// and surfaces the standard mini-board overlay.
+async function _renderPresenceList() {
+  const host = document.getElementById("presence-open-list");
+  if (!host) return;
+  host.innerHTML = `<div class="party-open-empty">Загружаю…</div>`;
+  let players = [];
+  try {
+    const res = await fetch("/api/presence/list");
+    const data = await res.json();
+    players = (data.players || []).filter(
+      (p) => p.client_id !== state.user.client_id,
+    );
+  } catch (_) {
+    host.innerHTML = `<div class="party-open-empty">Не удалось загрузить</div>`;
+    return;
+  }
+  if (!players.length) {
+    host.innerHTML = `<div class="party-open-empty">Сейчас никто не решает соло-пазлы</div>`;
+    return;
+  }
+  host.innerHTML = players.map((p) => {
+    const rating = p.rating ? `${p.rating}` : "—";
+    const puzzleRating = p.puzzle_rating ? `пазл ${p.puzzle_rating}` : "";
+    const streak = p.streak ? `🔥 ${p.streak}` : "";
+    const meta = [puzzleRating, streak].filter(Boolean).join(" · ");
+    return `
+      <div class="party-open-row" data-cid="${escapeHtml(p.client_id)}">
+        <span class="toast-avatar">${escapeHtml(p.avatar || "♟")}</span>
+        <div class="party-open-info">
+          <div>${escapeHtml(p.nickname || "Гость")} · <span class="muted">${escapeHtml(rating)}</span></div>
+          <div class="muted" style="font-size:11px;">${escapeHtml(meta || "решает пазлы")}${p.spectator_count ? ` · ${p.spectator_count} наблюдателей` : ""}</div>
+        </div>
+        <span class="party-open-status is-playing">соло</span>
+        <div class="party-open-actions">
+          <button type="button" class="puzzle-ghost btn-presence-spectate">🔭 Наблюдать</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+  host.querySelectorAll(".party-open-row").forEach((row) => {
+    const cid = row.dataset.cid;
+    if (!cid) return;
+    row.querySelector(".btn-presence-spectate")?.addEventListener("click", () => {
+      presenceSpectatorConnect(cid);
+      closePartyModal();
+    });
+  });
+}
+
+async function partyCreateAndInvite() {
+  // Gather selected friend IDs first; we'll fire one invite per checkbox.
+  const checked = Array.from(
+    document.querySelectorAll("#party-friend-picker .party-friend-cb:checked")
+  ).map((cb) => cb.value).filter(Boolean);
+  // Create the party (returns code) then invite each.
+  const res = await fetch("/api/party/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname,
+      avatar: state.user.avatar,
+    }),
+  });
+  if (!res.ok) throw new Error(`Не удалось создать (HTTP ${res.status})`);
+  const data = await res.json();
+  partyConnect(data.code);
+  if (checked.length) {
+    await Promise.allSettled(
+      checked.map((targetId) => fetch("/api/party/invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: state.user.client_id,
+          target_id: targetId,
+          code: data.code,
+        }),
+      }))
+    );
+  }
+}
+
+// ---------- Spectator (binoculars) mode ----------
+
+function _spectatorWsUrl(code) {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const u = new URL(`${proto}//${location.host}/api/party/ws/${encodeURIComponent(code)}`);
+  u.searchParams.set("client_id", state.user.client_id || "");
+  u.searchParams.set("nickname", state.user.nickname || "");
+  u.searchParams.set("avatar", state.user.avatar || "");
+  u.searchParams.set("role", "spectator");
+  return u.toString();
+}
+
+function spectatorConnect(code) {
+  if (state.spectator.ws) {
+    try { state.spectator.ws.close(); } catch (_) {}
+  }
+  state.spectator = {
+    active: true,
+    ws: null,
+    code,
+    party_id: null,
+    status: "lobby",
+    endsAt: 0,
+    players: {},
+    cursors: {},
+    scoreboard: [],
+    selectedId: null,
+    mode: "single",
+  };
+  const ws = new WebSocket(_spectatorWsUrl(code));
+  state.spectator.ws = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handleSpectatorMessage(msg);
+  };
+  ws.onerror = () => {};
+  ws.onclose = () => {
+    state.spectator.active = false;
+  };
+  _spectatorRender();
+}
+
+function handleSpectatorMessage(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "spectator_init": {
+      const sp = state.spectator;
+      sp.status = msg.status || "lobby";
+      sp.endsAt = msg.ends_at || 0;
+      sp.party_id = (msg.state || {}).party_id || null;
+      sp.scoreboard = msg.scoreboard || [];
+      sp.players = {};
+      (msg.players || []).forEach((p) => { sp.players[p.client_id] = p; });
+      // Pick a default selected player.
+      if (!sp.selectedId) {
+        const first = (msg.players || [])[0];
+        sp.selectedId = first ? first.client_id : null;
+      }
+      _spectatorRender();
+      break;
+    }
+    case "lobby":
+      state.spectator.status = msg.status || state.spectator.status;
+      // Reset player set when lobby returns / changes.
+      if (Array.isArray(msg.members)) {
+        // Make sure every member has a slot in players map.
+        msg.members.forEach((m) => {
+          if (!state.spectator.players[m.client_id]) {
+            state.spectator.players[m.client_id] = {
+              client_id: m.client_id,
+              nickname: m.nickname,
+              avatar: m.avatar,
+              score: m.score || 0,
+              solved: m.solved || 0,
+              fen: "",
+            };
+          }
+        });
+      }
+      _spectatorRender();
+      break;
+    case "scoreboard":
+      state.spectator.endsAt = msg.ends_at || state.spectator.endsAt;
+      state.spectator.scoreboard = msg.scoreboard || state.spectator.scoreboard;
+      _spectatorRender();
+      break;
+    case "start":
+    case "match_state":
+      state.spectator.status = "playing";
+      state.spectator.endsAt = msg.ends_at || state.spectator.endsAt;
+      _spectatorRender();
+      break;
+    case "player_state": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      const prev = state.spectator.players[cid] || {};
+      state.spectator.players[cid] = { ...prev, ...msg };
+      _spectatorRender();
+      break;
+    }
+    case "player_cursor": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      state.spectator.cursors[cid] = {
+        x: Number(msg.x) || 0,
+        y: Number(msg.y) || 0,
+        flipped: !!msg.flipped,
+        selected: typeof msg.selected === "string" ? msg.selected : "",
+        dragging: !!msg.dragging,
+        drag_piece: typeof msg.drag_piece === "string" ? msg.drag_piece : "",
+        drag_from: typeof msg.drag_from === "string" ? msg.drag_from : "",
+        ts: Date.now(),
+      };
+      _spectatorRender();
+      break;
+    }
+    case "finish":
+      state.spectator.status = "finished";
+      state.spectator.scoreboard = msg.results || state.spectator.scoreboard;
+      _spectatorRender();
+      break;
+  }
+}
+
+function spectatorLeave() {
+  if (state.spectator.ws) {
+    try { state.spectator.ws.send(JSON.stringify({ type: "leave" })); } catch (_) {}
+    try { state.spectator.ws.close(); } catch (_) {}
+  }
+  state.spectator.active = false;
+  state.spectator.ws = null;
+  state.spectator.kind = "party";
+  const panel = document.getElementById("spectator-panel");
+  if (panel) panel.remove();
+}
+
+// Solo-presence spectator. Subscribes to a single live solo player
+// and translates `presence_state` / `presence_cursor` / `presence_gone`
+// into the same {players[cid], cursors[cid]} shape the party
+// spectator renderer already consumes — that way one panel handles
+// both modes with no extra UI work.
+function presenceSpectatorConnect(targetCid) {
+  if (!targetCid) return;
+  if (state.spectator.ws) {
+    try { state.spectator.ws.close(); } catch (_) {}
+  }
+  state.spectator = {
+    active: true,
+    ws: null,
+    code: targetCid,
+    party_id: null,
+    status: "playing",
+    endsAt: 0,
+    players: {},
+    cursors: {},
+    scoreboard: [],
+    selectedId: targetCid,
+    mode: "single",
+    kind: "presence",
+  };
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const u = new URL(`${proto}//${location.host}/api/presence/ws`);
+  u.searchParams.set("client_id", state.user.client_id || `s-${Math.random().toString(36).slice(2, 10)}`);
+  u.searchParams.set("nickname", state.user.nickname || "");
+  u.searchParams.set("avatar", state.user.avatar || "");
+  u.searchParams.set("role", "spectator");
+  u.searchParams.set("watch", targetCid);
+  let ws;
+  try { ws = new WebSocket(u.toString()); }
+  catch (_) {
+    state.spectator.active = false;
+    return;
+  }
+  state.spectator.ws = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handlePresenceSpectatorMessage(msg);
+  };
+  ws.onerror = () => { /* surface as close */ };
+  ws.onclose = () => {
+    if (state.spectator.kind === "presence") {
+      state.spectator.active = false;
+      state.spectator.ws = null;
+    }
+  };
+  _spectatorRender();
+}
+
+// Translates the presence WS payloads into the shape the existing
+// spectator renderer expects. ``presence_state`` carries everything
+// (FEN, theme, pieces, selection, last_move, flipped) so we just
+// merge it into players[cid]; ``presence_cursor`` mirrors the
+// `player_cursor` shape one-to-one.
+function handlePresenceSpectatorMessage(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "presence_state": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      const sp = state.spectator;
+      const prev = sp.players[cid] || {};
+      sp.players[cid] = {
+        ...prev,
+        client_id: cid,
+        nickname: msg.nickname || prev.nickname || "",
+        avatar: msg.avatar || prev.avatar || "♟",
+        theme: typeof msg.theme === "string" ? msg.theme : (prev.theme || ""),
+        pieces: typeof msg.pieces === "string" ? msg.pieces : (prev.pieces || ""),
+        legal_color: typeof msg.legal_color === "string" ? msg.legal_color : (prev.legal_color || ""),
+        rating: Number(msg.rating || prev.rating || 0),
+        flipped: !!msg.flipped,
+        last_move: typeof msg.last_move === "string" ? msg.last_move : "",
+        selection: msg.selection || null,
+        fen: typeof msg.fen === "string" ? msg.fen : (prev.fen || ""),
+        puzzle_id: msg.puzzle_id || prev.puzzle_id || "",
+        puzzle_rating: Number(msg.puzzle_rating || prev.puzzle_rating || 0),
+        streak: Number(msg.streak || 0),
+        best_streak: Number(msg.best_streak || 0),
+        score: Number(msg.streak || 0),
+        solved: Number(msg.best_streak || 0),
+      };
+      sp.selectedId = cid;
+      _spectatorRender();
+      break;
+    }
+    case "presence_cursor": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      state.spectator.cursors[cid] = {
+        x: Number(msg.x) || 0,
+        y: Number(msg.y) || 0,
+        flipped: !!msg.flipped,
+        selected: typeof msg.selected === "string" ? msg.selected : "",
+        dragging: !!msg.dragging,
+        drag_piece: typeof msg.drag_piece === "string" ? msg.drag_piece : "",
+        drag_from: typeof msg.drag_from === "string" ? msg.drag_from : "",
+        ts: Date.now(),
+      };
+      _spectatorRender();
+      break;
+    }
+    case "presence_gone": {
+      const cid = msg.client_id;
+      if (!cid) break;
+      const sp = state.spectator;
+      delete sp.players[cid];
+      delete sp.cursors[cid];
+      sp.status = "finished";
+      _spectatorRender();
+      break;
+    }
+  }
+}
+
+function _spectatorRender() {
+  let panel = document.getElementById("spectator-panel");
+  if (!state.spectator.active) {
+    if (panel) panel.remove();
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "spectator-panel";
+    panel.className = "spectator-panel";
+    document.body.appendChild(panel);
+  }
+  const sp = state.spectator;
+  const players = Object.values(sp.players);
+  // Pull live scores from scoreboard if present.
+  const sbMap = {};
+  (sp.scoreboard || []).forEach((r) => { sbMap[r.client_id] = r; });
+  players.forEach((p) => {
+    const r = sbMap[p.client_id];
+    if (r) {
+      p.score = r.score;
+      p.solved = r.solved;
+      p.failed = r.failed;
+      p.skipped = r.skipped;
+    }
+  });
+  // Sort by current score desc.
+  players.sort((a, b) => (b.score || 0) - (a.score || 0));
+  if (!sp.selectedId && players.length) sp.selectedId = players[0].client_id;
+  const selected = sp.players[sp.selectedId] || players[0] || null;
+
+  const timer = sp.status === "playing"
+    ? _formatPartyTimeLeft(sp.endsAt)
+    : (sp.status === "finished" ? "Финиш" : "Лобби");
+
+  const isPresence = sp.kind === "presence";
+  // Presence-mode follows exactly one player, so the grid toggle and
+  // timer make no sense — collapse the header to "watching X".
+  const headerMeta = isPresence
+    ? `<span class="spectator-meta">соло</span>`
+    : `<span class="spectator-meta">${escapeHtml(sp.code || "")} · ${escapeHtml(timer)}</span>`;
+  const headerToggles = isPresence
+    ? ""
+    : `
+      <button type="button" class="spectator-toggle ${sp.mode === "single" ? "is-active" : ""}" data-mode="single">Одна доска</button>
+      <button type="button" class="spectator-toggle ${sp.mode === "grid" ? "is-active" : ""}" data-mode="grid">Все доски</button>
+    `;
+  panel.innerHTML = `
+    <div class="spectator-header">
+      <span class="spectator-title">🔭 Наблюдатель</span>
+      ${headerMeta}
+      <span class="spectator-spacer"></span>
+      ${headerToggles}
+      <button type="button" class="spectator-leave">Выйти</button>
+    </div>
+    <div class="spectator-body">
+      <aside class="spectator-side">
+        <h3>Игроки</h3>
+        ${players.map((p) => `
+          <div class="spectator-player-row ${p.client_id === sp.selectedId ? "is-selected" : ""}" data-cid="${escapeHtml(p.client_id)}">
+            <span class="toast-avatar">${escapeHtml(p.avatar || "♟")}</span>
+            <span class="pname">${escapeHtml(p.nickname || "Гость")}</span>
+            <span class="pscore">${Number(p.score || 0)}</span>
+          </div>
+        `).join("") || `<div class="muted" style="padding: 8px;">Никого…</div>`}
+      </aside>
+      <div class="spectator-stage">
+        ${sp.mode === "single"
+          ? _spectatorRenderSingle(selected)
+          : _spectatorRenderGrid(players)}
+      </div>
+    </div>
+  `;
+  panel.querySelectorAll(".spectator-toggle").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      sp.mode = btn.dataset.mode || "single";
+      _spectatorRender();
+    });
+  });
+  panel.querySelector(".spectator-leave").addEventListener("click", spectatorLeave);
+  panel.querySelectorAll(".spectator-player-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      sp.selectedId = row.dataset.cid;
+      sp.mode = "single";
+      _spectatorRender();
+    });
+  });
+}
+
+function _spectatorRenderSingle(p) {
+  if (!p) return `<div class="muted">Игрок не выбран</div>`;
+  const fen = p.fen || "";
+  const streak = Number(p.streak || 0);
+  const streakHtml = streak >= 3
+    ? `<span class="ps-val ok">🔥 ${streak}</span>`
+    : `<span class="ps-val">🔥 ${streak}</span>`;
+  // Solo-presence view shows real-rating + current puzzle rating;
+  // party view keeps the score / solved / failed breakdown.
+  const isPresence = state.spectator && state.spectator.kind === "presence";
+  const metaInner = isPresence
+    ? `
+        <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
+        <div class="row">Рейтинг игрока: <b>${Number(p.rating || 0) || "—"}</b></div>
+        <div class="row">Текущий пазл: ${p.puzzle_rating ? `<b>${Number(p.puzzle_rating)}</b>` : "—"}</div>
+        <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
+      `
+    : `
+        <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
+        <div class="row">Очки: <b>${Number(p.score || 0)}</b></div>
+        <div class="row">Решено: ${Number(p.solved || 0)} · ошибок: ${Number(p.failed || 0)} · пропущено: ${Number(p.skipped || 0)}</div>
+        <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
+      `;
+  return `
+    <div class="spectator-single">
+      <div class="board-host">${_renderMiniBoardFromFen(fen, p)}</div>
+      <div class="meta-host">${metaInner}</div>
+    </div>
+  `;
+}
+
+function _spectatorRenderGrid(players) {
+  if (!players.length) return `<div class="muted">Никого нет</div>`;
+  return `
+    <div class="spectator-grid">
+      ${players.map((p) => {
+        const streak = Number(p.streak || 0);
+        return `
+          <div class="grid-cell" data-cid="${escapeHtml(p.client_id)}">
+            <div class="grid-head">
+              <span>${escapeHtml(p.avatar || "♟")}</span>
+              <span class="gname">${escapeHtml(p.nickname || "Гость")}</span>
+              <span class="gscore">${Number(p.score || 0)}</span>
+            </div>
+            <div class="grid-streak">Серия: 🔥 ${streak}</div>
+            <div class="board-host">${_renderMiniBoardFromFen(p.fen || "", p)}</div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function _miniBoardThemeStyle(themeKey) {
+  const t = BOARD_THEMES[themeKey] || BOARD_THEMES[DEFAULT_BOARD_THEME];
+  if (!t) return "";
+  // Scope the theme variables to this wrapper only — spectators
+  // viewing player A and player B at the same time may see two
+  // different themes side by side, so we cannot mutate :root.
+  const lightSq = t.image ? "transparent" : t.light;
+  const darkSq = t.image ? "transparent" : t.dark;
+  // Inline style attributes are quoted with `"` in our HTML strings,
+  // so the URL must NOT contain a literal `"` (it would terminate
+  // the attribute and the whole rule would be silently dropped —
+  // which is what was killing the board background for image-based
+  // themes in the spectator). CSS allows unquoted url(...) for paths
+  // without parentheses or whitespace; our static asset paths are
+  // safe so we emit them bare.
+  const boardImage = t.image ? `url(${t.image})` : "none";
+  const cls = t.image ? "mini-board-wrap board-theme-image" : "mini-board-wrap";
+  return {
+    cls,
+    style: (
+      `--light-sq:${lightSq};--dark-sq:${darkSq};--board-image:${boardImage};`
+    ),
+  };
+}
+
+// FEN -> read-only mini-board rendered in the *watched* player's
+// chosen piece set and board theme (so the spectator always sees the
+// same board the player is looking at, regardless of the spectator's
+// own settings). Mirrors the main board's a-h/1-8 strip labels.
+function _renderMiniBoardFromFen(fen, player) {
+  const pieceSet = (player && player.pieces) || getPieceSet();
+  const themeKey = (player && player.theme) || userSettings.theme;
+  const themeStyle = _miniBoardThemeStyle(themeKey);
+  const cid = (player && player.client_id) || "";
+  // Mirror the player's own orientation so the watcher sees the exact
+  // same board the player is staring at. Without this, a player
+  // solving for black would have their board flipped while spectators
+  // would still see white-on-bottom — left/right and top/bottom
+  // would be inverted between them.
+  const flipped = !!(player && player.flipped);
+  // Player's chosen "legal hint" colour drives the dot / capture-ring
+  // overlay so the watcher sees hints in the same colour the player
+  // configured. CSS reads --mb-legal-dot for fills.
+  const legalColor = (player && typeof player.legal_color === "string"
+    && /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(player.legal_color))
+    ? player.legal_color
+    : "#28c85a";
+  const legalRgba = _hexToRgba(legalColor, 0.55);
+  // Cursor / selection overlay sourced from `player_state` cursor
+  // updates relayed by the server. The player normalizes their
+  // cursor to white-on-bottom coords before sending; if the spectator
+  // is rendering flipped we re-mirror so the dot lands on the same
+  // visual square the player is hovering.
+  const cursor = (player && state.spectator && state.spectator.cursors)
+    ? state.spectator.cursors[cid]
+    : null;
+  let overlayHtml = "";
+  if (cursor && typeof cursor.x === "number" && typeof cursor.y === "number") {
+    const cx = flipped ? 1 - cursor.x : cursor.x;
+    const cy = flipped ? 1 - cursor.y : cursor.y;
+    const x = Math.max(0, Math.min(1, cx)) * 100;
+    const y = Math.max(0, Math.min(1, cy)) * 100;
+    // Floating dragged-piece glyph: rendered first so the cursor dot
+    // sits on top of it (player's chosen piece set, sized like a
+    // mini-board cell so it visually matches the squares).
+    if (cursor.dragging && cursor.drag_piece) {
+      const dp = String(cursor.drag_piece);
+      // dp like "wQ" / "bP" — convert to FEN char so pieceSvgUrl
+      // resolves the right asset under the player's piece set.
+      const color = dp[0];
+      const t = (dp[1] || "P").toUpperCase();
+      const fenChar = color === "w" ? t : t.toLowerCase();
+      const url = pieceSvgUrl(fenChar, pieceSet);
+      overlayHtml += `<img class="mb-drag-piece" src="${url}" alt="${escapeHtml(dp)}" draggable="false" style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%;">`;
+    }
+    const cls = cursor.dragging ? "mb-cursor is-drag" : "mb-cursor";
+    overlayHtml += `<div class="${cls}" style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%;"></div>`;
+  }
+  // Helper: convert algebraic ("e4") to row/col indices in the
+  // currently rendered orientation. Pure white-on-bottom: file 'a'
+  // is column 0, rank 8 is row 0. Flipped: invert both.
+  const sqToRC = (sq) => {
+    if (!sq || sq.length !== 2) return null;
+    const file = sq.charCodeAt(0) - "a".charCodeAt(0);
+    const rank = parseInt(sq[1], 10);
+    if (file < 0 || file > 7 || rank < 1 || rank > 8) return null;
+    const r = flipped ? rank - 1 : 8 - rank;
+    const f = flipped ? 7 - file : file;
+    return { r, f };
+  };
+  if (!fen || typeof fen !== "string") {
+    return `<div class="${themeStyle.cls}" style="${themeStyle.style}">
+      <div class="mb-ranks"></div>
+      <div class="mini-board" data-cid="${escapeHtml(cid)}">${overlayHtml}</div>
+      <div class="mb-corner"></div>
+      <div class="mb-files"></div>
+    </div>`;
+  }
+  const rawRows = fen.split(" ")[0].split("/");
+  if (rawRows.length !== 8) return `<div class="${themeStyle.cls}" style="${themeStyle.style}"></div>`;
+  const selectedRC = (cursor && cursor.selected) ? sqToRC(cursor.selected) : null;
+  // Last applied move (e.g. "e2e4") sent in `player_state`.
+  const lm = (player && typeof player.last_move === "string") ? player.last_move : "";
+  const lmFromRC = lm.length >= 4 ? sqToRC(lm.slice(0, 2)) : null;
+  const lmToRC = lm.length >= 4 ? sqToRC(lm.slice(2, 4)) : null;
+  // Player's current selection — `from` square + the squares they can
+  // legally move to (split into plain moves vs captures so we render
+  // dot vs ring like the main board does).
+  const selection = (player && player.selection) || null;
+  const selFromRC = (selection && selection.from) ? sqToRC(selection.from) : null;
+  const moveSet = new Set();
+  const captureSet = new Set();
+  if (selection) {
+    (selection.legal_moves || []).forEach((sq) => moveSet.add(sq));
+    (selection.legal_captures || []).forEach((sq) => captureSet.add(sq));
+    // A square in both lists is a capture — drop from the moves set.
+    captureSet.forEach((sq) => moveSet.delete(sq));
+  }
+  const cells = [];
+  for (let r = 0; r < 8; r++) {
+    // Source row in the FEN — flipped boards walk the FEN bottom-up.
+    const fenRowIdx = flipped ? 7 - r : r;
+    const row = rawRows[fenRowIdx];
+    const expanded = [];
+    for (const ch of row) {
+      if (/\d/.test(ch)) {
+        for (let i = 0; i < Number(ch); i++) expanded.push("");
+      } else {
+        expanded.push(ch);
+      }
+    }
+    if (expanded.length !== 8) {
+      return `<div class="${themeStyle.cls}" style="${themeStyle.style}"></div>`;
+    }
+    for (let f = 0; f < 8; f++) {
+      const fenColIdx = flipped ? 7 - f : f;
+      const isLight = (fenRowIdx + fenColIdx) % 2 === 0;
+      const piece = expanded[fenColIdx];
+      const pieceHtml = piece
+        ? `<img class="mb-piece" src="${pieceSvgUrl(piece, pieceSet)}" alt="${piece}" draggable="false">`
+        : "";
+      const isSelected = selectedRC && selectedRC.r === r && selectedRC.f === f;
+      const isLm = (lmFromRC && lmFromRC.r === r && lmFromRC.f === f)
+        || (lmToRC && lmToRC.r === r && lmToRC.f === f);
+      // Squares the watched player can legally land on.
+      const fileChar = String.fromCharCode("a".charCodeAt(0) + (flipped ? 7 - f : f));
+      const rankChar = String(flipped ? r + 1 : 8 - r);
+      const sqName = fileChar + rankChar;
+      const isFromSel = selFromRC && selFromRC.r === r && selFromRC.f === f;
+      const isMove = moveSet.has(sqName);
+      const isCapture = captureSet.has(sqName);
+      // Hint overlay rendered as a child element (the square's own
+      // ::before/::after slots are already taken by last-move /
+      // selected highlights).
+      const hintHtml = isCapture
+        ? `<span class="mb-hint mb-hint-capture"></span>`
+        : isMove
+          ? `<span class="mb-hint mb-hint-move"></span>`
+          : "";
+      const extra =
+        `${isSelected ? " mb-selected" : ""}` +
+        `${isLm ? " mb-lastmove" : ""}` +
+        `${isFromSel ? " mb-sel-from" : ""}`;
+      const cls = `mb-square ${isLight ? "mb-light" : "mb-dark"}${extra}`;
+      cells.push(`<div class="${cls}">${pieceHtml}${hintHtml}</div>`);
+    }
+  }
+  const rankOrder = flipped
+    ? ["1", "2", "3", "4", "5", "6", "7", "8"]
+    : ["8", "7", "6", "5", "4", "3", "2", "1"];
+  const fileOrder = flipped
+    ? ["h", "g", "f", "e", "d", "c", "b", "a"]
+    : ["a", "b", "c", "d", "e", "f", "g", "h"];
+  const ranks = rankOrder.map((r) => `<span>${r}</span>`).join("");
+  const files = fileOrder.map((f) => `<span>${f}</span>`).join("");
+  // Append the player's legal-hint colour as a CSS variable so the
+  // mini-board's dot/ring overlays render in their colour, not the
+  // spectator's default.
+  const wrapStyle = `${themeStyle.style}--mb-legal-dot:${legalRgba};--mb-legal-color:${legalColor};`;
+  return `
+    <div class="${themeStyle.cls}" style="${wrapStyle}">
+      <div class="mb-ranks">${ranks}</div>
+      <div class="mini-board" data-cid="${escapeHtml(cid)}">${cells.join("")}${overlayHtml}</div>
+      <div class="mb-corner"></div>
+      <div class="mb-files">${files}</div>
+    </div>
+  `;
+}
+
 // ---------- Boot ----------
 
 loadFen(STARTPOS_FEN);
@@ -4043,6 +7333,7 @@ renderPalette();
 renderBoard();
 setBoardMode(true);
 refreshEngineStatus();
+_bootUser();
 
 // Expose for debugging.
 window.__chess = { state, buildFen, loadFen };
