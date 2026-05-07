@@ -48,6 +48,7 @@ const BOARD_THEMES = {
   tournament: { name: "Tournament", light: "#c9c9c9", dark: "#5d6470", highlight: "rgba(180, 200, 255, 0.40)" },
   newspaper:  { name: "Newspaper",  light: "#ffffff", dark: "#9b9b9b", highlight: "rgba(255, 230, 90, 0.45)" },
   set1:       { name: "#1",         image: "/static/board-themes/set1.png", highlight: "rgba(255, 220, 90, 0.45)" },
+  set2:       { name: "#2",         image: "/static/board-themes/set2.png", highlight: "rgba(255, 220, 90, 0.45)" },
 };
 
 // Available piece sets. Files live under /static/pieces/<key>/ and are
@@ -66,7 +67,14 @@ const PIECE_SETS = {
   fantasy:    { name: "Fantasy" },
   pirouetti:  { name: "Wood" },
   set1:       { name: "#1", ext: "png" },
+  set2:       { name: "#2", ext: "png" },
 };
+
+// Default colour for the legal-move dots / capture rings. Users can
+// override this from the settings modal; we keep a single source of
+// truth so the CSS variable, the picker, and the saved settings all
+// agree.
+const DEFAULT_LEGAL_DOT_COLOR = "#28c85a";
 
 const DEFAULT_PV_ARROW_COUNT = 6;
 const MAX_PV_ARROW_COUNT = 12;
@@ -82,6 +90,13 @@ function _clampBestLine(n) {
   if (!Number.isFinite(v)) return DEFAULT_BEST_LINE_LENGTH;
   return Math.max(1, Math.min(MAX_BEST_LINE_LENGTH, Math.round(v)));
 }
+// Validates a CSS colour string the user typed/picked. We restrict to
+// `#rgb` / `#rrggbb` because the colour input emits those, and a hex
+// value drops trivially into rgba() expressions for the dot/ring fill.
+function _isHexColor(s) {
+  return typeof s === "string" && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s);
+}
+
 function loadSettings() {
   const fallback = {
     theme: DEFAULT_BOARD_THEME,
@@ -89,6 +104,7 @@ function loadSettings() {
     soundOn: true,
     pvArrowCount: DEFAULT_PV_ARROW_COUNT,
     bestLineLength: DEFAULT_BEST_LINE_LENGTH,
+    legalDotColor: DEFAULT_LEGAL_DOT_COLOR,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -100,6 +116,9 @@ function loadSettings() {
       soundOn: parsed.soundOn !== false,
       pvArrowCount: _clampArrows(parsed.pvArrowCount ?? DEFAULT_PV_ARROW_COUNT),
       bestLineLength: _clampBestLine(parsed.bestLineLength ?? DEFAULT_BEST_LINE_LENGTH),
+      legalDotColor: _isHexColor(parsed.legalDotColor)
+        ? parsed.legalDotColor
+        : DEFAULT_LEGAL_DOT_COLOR,
     };
   } catch { return fallback; }
 }
@@ -114,6 +133,31 @@ function getPieceExt() {
   const set = PIECE_SETS[getPieceSet()];
   return (set && set.ext) || "svg";
 }
+// Convert "#rrggbb" / "#rgb" -> rgba() with the requested alpha. Used
+// to fade the legal-dot picker colour into the board overlay.
+function _hexToRgba(hex, alpha) {
+  const m = String(hex || "").trim();
+  let r = 40, g = 200, b = 90;
+  if (/^#[0-9a-f]{3}$/i.test(m)) {
+    r = parseInt(m[1] + m[1], 16);
+    g = parseInt(m[2] + m[2], 16);
+    b = parseInt(m[3] + m[3], 16);
+  } else if (/^#[0-9a-f]{6}$/i.test(m)) {
+    r = parseInt(m.slice(1, 3), 16);
+    g = parseInt(m.slice(3, 5), 16);
+    b = parseInt(m.slice(5, 7), 16);
+  }
+  const a = Math.max(0, Math.min(1, Number(alpha)));
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
+function applyLegalDotColor() {
+  const c = _isHexColor(userSettings.legalDotColor)
+    ? userSettings.legalDotColor
+    : DEFAULT_LEGAL_DOT_COLOR;
+  document.documentElement.style.setProperty("--legal-dot", _hexToRgba(c, 0.55));
+}
+
 function applyBoardTheme() {
   const t = BOARD_THEMES[userSettings.theme] || BOARD_THEMES[DEFAULT_BOARD_THEME];
   const root = document.documentElement;
@@ -133,6 +177,7 @@ function applyBoardTheme() {
     root.style.setProperty("--dark-sq", t.dark);
     document.body.classList.remove("board-theme-image");
   }
+  applyLegalDotColor();
 }
 applyBoardTheme();
 
@@ -1254,6 +1299,30 @@ function openSettingsModal() {
     };
     blInput.addEventListener("change", apply);
     blInput.addEventListener("blur", apply);
+  }
+  const dotInput = document.getElementById("settings-legal-dot");
+  const dotReset = document.getElementById("settings-legal-dot-reset");
+  if (dotInput) {
+    dotInput.value = _isHexColor(userSettings.legalDotColor)
+      ? userSettings.legalDotColor
+      : DEFAULT_LEGAL_DOT_COLOR;
+    const apply = () => {
+      const v = dotInput.value;
+      if (!_isHexColor(v)) return;
+      userSettings.legalDotColor = v;
+      saveSettings(userSettings);
+      applyLegalDotColor();
+    };
+    dotInput.addEventListener("input", apply);
+    dotInput.addEventListener("change", apply);
+  }
+  if (dotReset) {
+    dotReset.addEventListener("click", () => {
+      userSettings.legalDotColor = DEFAULT_LEGAL_DOT_COLOR;
+      saveSettings(userSettings);
+      applyLegalDotColor();
+      if (dotInput) dotInput.value = DEFAULT_LEGAL_DOT_COLOR;
+    });
   }
   modal.hidden = false;
 }

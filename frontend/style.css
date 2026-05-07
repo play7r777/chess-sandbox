@@ -1188,6 +1188,25 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   padding: 6px 8px;
   font-size: 14px;
 }
+.settings-color-row { gap: 12px; }
+.settings-options input[type="color"] {
+  width: 48px; height: 32px;
+  background: #11151f;
+  border: 1px solid #2a3140;
+  border-radius: 6px;
+  padding: 2px;
+  cursor: pointer;
+}
+.settings-color-reset {
+  background: #11151f;
+  border: 1px solid #2a3140;
+  color: #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.settings-color-reset:hover { border-color: #4a5060; }
 .theme-swatch, .piece-swatch {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   background: #11151f;
