@@ -78,24 +78,19 @@ class HeartbeatRequest(BaseModel):
 
 
 class PuzzleAttemptRequest(BaseModel):
+    """Client-submitted puzzle attempt.
+
+    NOTE: rating math (delta / new_rating) is computed server-side from
+    the puzzle's *canonical* rating in the SQLite bank, the user's
+    current server-side rating, and the outcome. Clients used to send
+    these numbers themselves, which let anyone bump their leaderboard
+    rating to 3000 with a single curl. Any extra fields in the payload
+    are ignored.
+    """
     client_id: str = Field(..., min_length=4, max_length=64)
     outcome: str = Field(..., description="solved|solved-hint|failed|skipped")
-    delta: int = Field(default=0, ge=-200, le=200)
-    new_rating: int = Field(default=1200, ge=400, le=3000)
     puzzle_id: str | None = Field(default=None, max_length=64)
-    puzzle_rating: int | None = Field(default=None, ge=0, le=4000)
     solve_ms: int | None = Field(default=None, ge=0, le=10_000_000)
-
-
-class PartyResultRequest(BaseModel):
-    client_id: str = Field(..., min_length=4, max_length=64)
-    party_id: str = Field(..., max_length=64)
-    placement: int = Field(..., ge=1, le=64)
-    participants: int = Field(..., ge=1, le=64)
-    solved: int = Field(default=0, ge=0, le=10_000)
-    elo_gained: int = Field(default=0, ge=-1000, le=1000)
-    duration_sec: int = Field(default=0, ge=0, le=86_400)
-    notes: str | None = Field(default=None, max_length=240)
 
 
 class PartyInviteRequest(BaseModel):
@@ -369,14 +364,21 @@ async def game_analyse(req: GameAnalyseRequest) -> dict[str, Any]:
 
 # ---- Puzzles ----
 
+# Puzzle / users endpoints below are declared as `def` (not `async def`) on
+# purpose: FastAPI runs sync endpoints inside its threadpool, so the SQLite
+# / users.json calls don't block the event loop. With `async def` a slow
+# random_puzzle (5.5M-row scan) would freeze concurrent requests like
+# /api/users/upsert — which is exactly the "Загружаю профиль…" hang we hit
+# while a puzzle was loading.
+
 @app.get("/api/puzzle/stats")
-async def puzzle_stats() -> dict[str, Any]:
+def puzzle_stats() -> dict[str, Any]:
     """Pack-level metadata: counts, difficulty bands, theme labels."""
     return puzzles_db.stats()
 
 
 @app.get("/api/puzzle/random")
-async def puzzle_random(
+def puzzle_random(
     difficulty: str | None = None,
     theme: str | None = None,
     min_rating: int | None = None,
@@ -408,7 +410,7 @@ async def puzzle_random(
 
 
 @app.get("/api/puzzle/{puzzle_id}")
-async def puzzle_by_id(puzzle_id: str) -> dict[str, Any]:
+def puzzle_by_id(puzzle_id: str) -> dict[str, Any]:
     p = puzzles_db.get_by_id(puzzle_id)
     if not p:
         raise HTTPException(status_code=404, detail="Puzzle not found.")
@@ -468,7 +470,7 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
 # ---- Users / Profile / Leaderboard ----
 
 @app.post("/api/users/upsert")
-async def users_upsert(req: UserUpsertRequest) -> dict[str, Any]:
+def users_upsert(req: UserUpsertRequest) -> dict[str, Any]:
     """Register or update profile for a given client_id."""
     return users_db.upsert_user(
         client_id=req.client_id,
@@ -478,18 +480,18 @@ async def users_upsert(req: UserUpsertRequest) -> dict[str, Any]:
 
 
 @app.post("/api/users/heartbeat")
-async def users_heartbeat(req: HeartbeatRequest) -> dict[str, Any]:
+def users_heartbeat(req: HeartbeatRequest) -> dict[str, Any]:
     users_db.heartbeat(req.client_id)
     return {"ok": True}
 
 
 @app.get("/api/users")
-async def users_list() -> dict[str, Any]:
+def users_list() -> dict[str, Any]:
     return {"users": users_db.list_users()}
 
 
 @app.get("/api/users/{client_id}")
-async def users_get(client_id: str) -> dict[str, Any]:
+def users_get(client_id: str) -> dict[str, Any]:
     u = users_db.get_user(client_id)
     if not u:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -497,14 +499,20 @@ async def users_get(client_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/users/puzzle_attempt")
-async def users_puzzle_attempt(req: PuzzleAttemptRequest) -> dict[str, Any]:
+def users_puzzle_attempt(req: PuzzleAttemptRequest) -> dict[str, Any]:
+    # Look up the authoritative puzzle rating from the bank if the client
+    # supplied a puzzle_id — that way we don't trust the client's number
+    # and a tampered request can't pretend a 2800 puzzle was solved.
+    canonical_rating: int | None = None
+    if req.puzzle_id:
+        p = puzzles_db.get_by_id(req.puzzle_id)
+        if p:
+            canonical_rating = int(p.get("rating") or 0)
     u = users_db.record_puzzle_attempt(
         client_id=req.client_id,
         outcome=req.outcome,
-        delta=req.delta,
-        new_rating=req.new_rating,
         puzzle_id=req.puzzle_id,
-        puzzle_rating=req.puzzle_rating,
+        puzzle_rating=canonical_rating,
         solve_ms=req.solve_ms,
     )
     if not u:
@@ -512,21 +520,12 @@ async def users_puzzle_attempt(req: PuzzleAttemptRequest) -> dict[str, Any]:
     return u
 
 
-@app.post("/api/users/party_result")
-async def users_party_result(req: PartyResultRequest) -> dict[str, Any]:
-    users_db.record_party_result(
-        req.client_id,
-        {
-            "party_id": req.party_id,
-            "placement": req.placement,
-            "participants": req.participants,
-            "solved": req.solved,
-            "elo_gained": req.elo_gained,
-            "duration_sec": req.duration_sec,
-            "notes": req.notes,
-        },
-    )
-    return {"ok": True}
+# NOTE: /api/users/party_result was removed. Party results are written
+# into a user's history server-side from `Party.finish()` — exposing an
+# HTTP endpoint that took the placement / elo_gained from the client
+# meant any caller could `curl` a fake "I won, +500 ELO" entry into
+# their own profile. The server-side path remains the only way to
+# append to `parties[]`.
 
 
 # ---- Party / Co-op puzzles ----

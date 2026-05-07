@@ -3517,13 +3517,32 @@ function finalizePuzzle(result) {
       solve_ms: state.puzzle.solveMs,
     });
   } else {
+    // Server is authoritative for rating — it computes Δ and the new
+    // rating from the canonical puzzle rating in its bank. We don't
+    // send `delta` / `new_rating` any more (those used to be trusted,
+    // which let anyone hand-edit users.json over the network). Sync
+    // back from the server's response so localStorage stays in step.
     recordPuzzleAttemptOnServer({
       outcome,
-      delta,
-      new_rating: state.puzzle.sessionRating,
       puzzle_id: state.puzzle.current ? String(state.puzzle.current.id || "") : null,
-      puzzle_rating: pr,
       solve_ms: state.puzzle.solveMs,
+    }).then((u) => {
+      if (u && typeof u === "object" && typeof u.rating === "number") {
+        state.puzzle.sessionRating = u.rating;
+        if (u.stats && typeof u.stats === "object") {
+          if (typeof u.stats.current_streak === "number") {
+            state.puzzle.sessionStats.streak = u.stats.current_streak;
+          }
+          if (typeof u.stats.best_streak === "number") {
+            state.puzzle.sessionStats.bestStreak = Math.max(
+              state.puzzle.sessionStats.bestStreak,
+              u.stats.best_streak,
+            );
+          }
+        }
+        _savePuzzleSession();
+        renderPuzzleStatsBar();
+      }
     });
   }
   renderPuzzleUi();
@@ -4187,7 +4206,7 @@ function _saveLocalUser() {
 async function syncUserProfile() {
   if (!state.user.client_id) return null;
   try {
-    return await api("/api/users/upsert", {
+    const u = await api("/api/users/upsert", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -4196,6 +4215,27 @@ async function syncUserProfile() {
         avatar: state.user.avatar || "♟",
       }),
     });
+    // Server is authoritative for rating + stats. Pulling them down on
+    // every sync keeps the local view honest if e.g. users.json was
+    // reset or the user's localStorage drifted out of sync.
+    if (u && typeof u === "object") {
+      if (typeof u.rating === "number") {
+        state.puzzle.sessionRating = u.rating;
+      }
+      if (u.stats && typeof u.stats === "object") {
+        if (typeof u.stats.current_streak === "number") {
+          state.puzzle.sessionStats.streak = u.stats.current_streak;
+        }
+        if (typeof u.stats.best_streak === "number") {
+          state.puzzle.sessionStats.bestStreak = Math.max(
+            state.puzzle.sessionStats.bestStreak,
+            u.stats.best_streak,
+          );
+        }
+      }
+      _savePuzzleSession();
+    }
+    return u;
   } catch { return null; }
 }
 
@@ -4820,6 +4860,33 @@ function leaveParty() {
   }
   closePartyModal();
   _partyUnmountSidePanel();
+  // Drop the party puzzle from solo state — without this, returning to
+  // the puzzle tab would replay the exact same puzzle the user was on
+  // when the match ended (because enterPuzzleView only fetches a fresh
+  // one when state.puzzle.current is null).
+  _stopPuzzleTimer();
+  if (state.puzzle.pendingNext) {
+    clearTimeout(state.puzzle.pendingNext);
+    state.puzzle.pendingNext = null;
+  }
+  state.puzzle.current = null;
+  state.puzzle.moves = [];
+  state.puzzle.fenStart = null;
+  state.puzzle.side = "w";
+  state.puzzle.feedback = null;
+  state.puzzle.attempts = 0;
+  state.puzzle.hintUsed = false;
+  state.puzzle.active = false;
+  state.puzzle.startedAt = 0;
+  state.puzzle.solveMs = 0;
+  state.puzzle.nextIdx = 0;
+  state.puzzle.needsNextOnReturn = true;
+  // If the user is still on the puzzle tab when they leave, fetch a
+  // fresh puzzle now so they don't sit on an empty board.
+  if (state.view === "puzzle") {
+    state.puzzle.needsNextOnReturn = false;
+    loadNextPuzzle();
+  }
 }
 
 function _partyStartCountdown() {
@@ -5363,6 +5430,10 @@ function _spectatorRender() {
 function _spectatorRenderSingle(p) {
   if (!p) return `<div class="muted">Игрок не выбран</div>`;
   const fen = p.fen || "";
+  const streak = Number(p.streak || 0);
+  const streakHtml = streak >= 3
+    ? `<span class="ps-val ok">🔥 ${streak}</span>`
+    : `<span class="ps-val">🔥 ${streak}</span>`;
   return `
     <div class="spectator-single">
       <div class="board-host">${_renderMiniBoardFromFen(fen)}</div>
@@ -5370,8 +5441,7 @@ function _spectatorRenderSingle(p) {
         <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
         <div class="row">Очки: <b>${Number(p.score || 0)}</b></div>
         <div class="row">Решено: ${Number(p.solved || 0)} · ошибок: ${Number(p.failed || 0)} · пропущено: ${Number(p.skipped || 0)}</div>
-        <div class="row">Текущий пазл: ${escapeHtml(p.puzzle_id || "—")} ${p.puzzle_rating ? `· ${p.puzzle_rating}` : ""}</div>
-        <div class="row muted" style="font-size:11px;">Доска обновляется каждые ≥200мс по мере ходов.</div>
+        <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
       </div>
     </div>
   `;
@@ -5381,33 +5451,34 @@ function _spectatorRenderGrid(players) {
   if (!players.length) return `<div class="muted">Никого нет</div>`;
   return `
     <div class="spectator-grid">
-      ${players.map((p) => `
-        <div class="grid-cell" data-cid="${escapeHtml(p.client_id)}">
-          <div class="grid-head">
-            <span>${escapeHtml(p.avatar || "♟")}</span>
-            <span class="gname">${escapeHtml(p.nickname || "Гость")}</span>
-            <span class="gscore">${Number(p.score || 0)}</span>
+      ${players.map((p) => {
+        const streak = Number(p.streak || 0);
+        return `
+          <div class="grid-cell" data-cid="${escapeHtml(p.client_id)}">
+            <div class="grid-head">
+              <span>${escapeHtml(p.avatar || "♟")}</span>
+              <span class="gname">${escapeHtml(p.nickname || "Гость")}</span>
+              <span class="gscore">${Number(p.score || 0)}</span>
+            </div>
+            <div class="grid-streak">Серия: 🔥 ${streak}</div>
+            <div class="board-host">${_renderMiniBoardFromFen(p.fen || "")}</div>
           </div>
-          <div class="board-host">${_renderMiniBoardFromFen(p.fen || "")}</div>
-        </div>
-      `).join("")}
+        `;
+      }).join("")}
     </div>
   `;
 }
 
-// FEN -> SVG/HTML mini-board (read-only). Uses Unicode chess glyphs so
-// we don't need to ship sprites; matches the spectator-only UI tone.
-const _PIECE_GLYPH = {
-  K: "♔", Q: "♕", R: "♖", B: "♗", N: "♘", P: "♙",
-  k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟",
-};
-
+// FEN -> read-only mini-board with the user's selected piece set and
+// board theme. Mirrors the main board (real piece SVGs, a-h/1-8 strip
+// labels, theme-driven square colours) so spectators see exactly what
+// they'd see if they were the one solving.
 function _renderMiniBoardFromFen(fen) {
   if (!fen || typeof fen !== "string") {
-    return `<div class="mini-board"></div>`;
+    return `<div class="mini-board-wrap"></div>`;
   }
   const rows = fen.split(" ")[0].split("/");
-  if (rows.length !== 8) return `<div class="mini-board"></div>`;
+  if (rows.length !== 8) return `<div class="mini-board-wrap"></div>`;
   const cells = [];
   for (let r = 0; r < 8; r++) {
     const row = rows[r];
@@ -5421,16 +5492,32 @@ function _renderMiniBoardFromFen(fen) {
     }
     if (expanded.length !== 8) {
       // malformed — bail
-      return `<div class="mini-board"></div>`;
+      return `<div class="mini-board-wrap"></div>`;
     }
     for (let f = 0; f < 8; f++) {
       const isLight = (r + f) % 2 === 0;
       const piece = expanded[f];
-      const glyph = _PIECE_GLYPH[piece] || "";
-      cells.push(`<div class="mb-square ${isLight ? "mb-light" : "mb-dark"}">${glyph}</div>`);
+      const pieceHtml = piece
+        ? `<img class="mb-piece" src="${pieceSvgUrl(piece)}" alt="${piece}" draggable="false">`
+        : "";
+      cells.push(`<div class="mb-square ${isLight ? "mb-light" : "mb-dark"}">${pieceHtml}</div>`);
     }
   }
-  return `<div class="mini-board">${cells.join("")}</div>`;
+  // Coords match the main board (white-at-bottom orientation): rank
+  // labels read 8→1 down the left edge, file labels a→h along the
+  // bottom. Spectator view never flips the board so this is fixed.
+  const ranks = ["8", "7", "6", "5", "4", "3", "2", "1"]
+    .map((r) => `<span>${r}</span>`).join("");
+  const files = ["a", "b", "c", "d", "e", "f", "g", "h"]
+    .map((f) => `<span>${f}</span>`).join("");
+  return `
+    <div class="mini-board-wrap">
+      <div class="mb-ranks">${ranks}</div>
+      <div class="mini-board">${cells.join("")}</div>
+      <div class="mb-corner"></div>
+      <div class="mb-files">${files}</div>
+    </div>
+  `;
 }
 
 // ---------- Boot ----------

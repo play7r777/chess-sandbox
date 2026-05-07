@@ -26,6 +26,53 @@ from .settings import settings
 _USERS_PATH = settings.data_dir / "users.json"
 _LOCK = threading.Lock()
 
+# Server-authoritative rating bounds (mirror the old client-side clamp).
+_MIN_RATING = 400
+_MAX_RATING = 3000
+
+
+def _rating_delta(
+    user_rating: int,
+    puzzle_rating: int,
+    outcome: str,
+    solve_ms: int | None,
+) -> int:
+    """Glicko-lite Elo delta. Mirrors the old frontend `_ratingDelta`.
+
+    Server-side rather than client-side so a tampered POST body can't
+    inject an arbitrary ``new_rating`` into the leaderboard.
+    """
+    if outcome == "solved-hint":
+        return 0
+    expected = 1.0 / (1.0 + 10.0 ** ((puzzle_rating - user_rating) / 400.0))
+    if user_rating >= 2200:
+        k = 14
+    elif user_rating >= 1700:
+        k = 18
+    elif user_rating >= 1200:
+        k = 22
+    else:
+        k = 26
+    if outcome == "solved":
+        sec = max(0.0, (solve_ms or 0) / 1000.0)
+        if sec <= 8:
+            speed = 1.5
+        elif sec <= 15:
+            speed = 1.3
+        elif sec <= 30:
+            speed = 1.1
+        elif sec <= 60:
+            speed = 1.0
+        elif sec <= 90:
+            speed = 0.85
+        else:
+            speed = 0.7
+        raw = k * (1.0 - expected) * speed
+        return max(1, round(raw))
+    # failed / skipped — rating drops, capped at -1.
+    raw = -k * expected
+    return min(-1, round(raw))
+
 
 def _ensure_dir() -> None:
     _USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -152,17 +199,22 @@ def record_puzzle_attempt(
     client_id: str,
     *,
     outcome: str,
-    delta: int,
-    new_rating: int,
     puzzle_id: str | None,
     puzzle_rating: int | None,
     solve_ms: int | None,
 ) -> dict[str, Any] | None:
-    """Persist a single puzzle outcome. Returns updated user row."""
+    """Persist a single puzzle outcome. Returns the updated user row.
+
+    The rating delta and resulting ``new_rating`` are computed
+    server-side from the user's current rating, the puzzle's canonical
+    rating, and the outcome. The caller (HTTP layer) is expected to look
+    up ``puzzle_rating`` from the puzzle bank rather than trusting the
+    client. If ``puzzle_rating`` is None we fall back to a neutral 1500.
+    """
     if outcome not in ("solved", "solved-hint", "failed", "skipped"):
         return None
-    new_rating = max(400, min(3000, int(new_rating)))
-    delta = int(delta)
+    pr = int(puzzle_rating) if puzzle_rating is not None else 1500
+    pr = max(0, min(4000, pr))
     now = int(time.time())
     with _LOCK:
         data = _load()
@@ -195,6 +247,10 @@ def record_puzzle_attempt(
         else:  # skipped
             s["skipped"] = int(s.get("skipped") or 0) + 1
             s["current_streak"] = 0
+        prev_rating = int(u.get("rating") or 1200)
+        prev_rating = max(_MIN_RATING, min(_MAX_RATING, prev_rating))
+        delta = _rating_delta(prev_rating, pr, outcome, solve_ms)
+        new_rating = max(_MIN_RATING, min(_MAX_RATING, prev_rating + delta))
         u["rating"] = new_rating
         u["last_seen"] = now
         history = u.setdefault("elo_history", [])
@@ -205,7 +261,7 @@ def record_puzzle_attempt(
                 "delta": delta,
                 "outcome": outcome,
                 "puzzle_id": puzzle_id,
-                "puzzle_rating": puzzle_rating,
+                "puzzle_rating": pr,
                 "solve_ms": solve_ms,
             }
         )

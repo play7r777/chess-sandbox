@@ -37,9 +37,11 @@ MAX_MEMBERS = 16
 # build (one SQLite call) regardless of total bank size.
 PARTY_QUEUE_SIZE = 1000
 # Min interval between two consecutive player_state broadcasts for a
-# given player. Even on a fast solver who clicks a piece every 200ms
-# the spectator stream stays well-bounded (≤5 events/sec/player).
-PLAYER_STATE_THROTTLE_SEC = 0.2
+# given player. Spectators want the live board to mirror moves as soon
+# as they happen, so we set this to 1ms — effectively no throttle.
+# Position broadcasts only fire on actual board moves (one ws.send per
+# legal move), so a 1ms floor is safe even with 16 simultaneous players.
+PLAYER_STATE_THROTTLE_SEC = 0.001
 
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _PARTIES: dict[str, Party] = {}
@@ -88,6 +90,10 @@ class Member:
     solved: int = 0
     failed: int = 0
     skipped: int = 0
+    # Live "current consecutive solves" counter shown to spectators as
+    # the player's "Серия" badge. Resets on a fail or skip.
+    streak: int = 0
+    best_streak: int = 0
     # Index into the party's shared puzzle queue. Each player advances
     # their own pointer when they finish a puzzle (solve / fail / skip),
     # so members work through the *same* shuffled list — whoever is
@@ -142,6 +148,8 @@ class Party:
             "solved": m.solved,
             "failed": m.failed,
             "skipped": m.skipped,
+            "streak": m.streak,
+            "best_streak": m.best_streak,
             "online": m.ws is not None,
         }
 
@@ -222,6 +230,8 @@ class Party:
             "solved": m.solved,
             "failed": m.failed,
             "skipped": m.skipped,
+            "streak": m.streak,
+            "best_streak": m.best_streak,
             "puzzle_id": cur.get("id"),
             "fen": m.current_fen or str(cur.get("fen") or ""),
             "puzzle_rating": int(cur.get("rating") or 0),
@@ -456,10 +466,15 @@ class Party:
             m.solved += 1
             m.last_solve_ms = int(solve_ms)
             m.score += _score_for(int(m.current_puzzle.get("rating") or 1200), int(solve_ms))
+            m.streak += 1
+            if m.streak > m.best_streak:
+                m.best_streak = m.streak
         elif outcome == "failed":
             m.failed += 1
+            m.streak = 0
         else:
             m.skipped += 1
+            m.streak = 0
         nxt = self._next_puzzle_for(m)
         if nxt is not None:
             await self._send(
