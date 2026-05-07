@@ -895,6 +895,14 @@ function renderBoard() {
   renderBoardCoords();
   syncMetaInputs();
   document.getElementById("fen-input").value = buildFen();
+  // After every full board re-render, push the current selection (or
+  // its absence) to spectators so their hint dots / source-square
+  // overlay stay in sync with what the player sees. The helper is a
+  // no-op outside an active party and dedupes against the last
+  // payload, so it's cheap to call here.
+  if (typeof _partySyncSelectionFromState === "function") {
+    _partySyncSelectionFromState();
+  }
 }
 
 // Render rank numbers (left strip) and file letters (bottom strip)
@@ -1185,12 +1193,34 @@ function paintDragLegalTargets(squareName) {
     fromCell.classList.add("selected");
     _dragHighlightedSquares.add(squareName);
   }
+  const captures = [];
   for (const sq of r.targets) {
     const cell = boardEl.querySelector(`.square[data-square="${sq}"]`);
     if (!cell) continue;
     const piece = r.chess.get(sq);
     cell.classList.add(piece ? "legal-capture" : "legal-move");
+    if (piece) captures.push(sq);
     _dragHighlightedSquares.add(sq);
+  }
+  // Drag bypasses renderBoard() (rebuilding the DOM mid-drag would
+  // cancel the drag), so we still need to push the same hint info to
+  // spectators directly here.
+  if (state.party.active && state.party.status === "playing") {
+    let pieceTag = null;
+    try {
+      const p = r.chess.get(squareName);
+      if (p) pieceTag = (p.color || "w") + (p.type || "p").toUpperCase();
+    } catch (_) { /* ignore */ }
+    const key = `${squareName}|${r.targets.join(",")}|${pieceTag}|${captures.join(",")}`;
+    if (window.__partyLastSelectionSent !== key) {
+      window.__partyLastSelectionSent = key;
+      _partyReportSelection({
+        from: squareName,
+        piece: pieceTag,
+        legalMoves: r.targets,
+        legalCaptures: captures,
+      });
+    }
   }
 }
 
@@ -1204,6 +1234,11 @@ function clearDragLegalTargets() {
     cell.classList.remove("legal-move", "legal-capture", "selected");
   }
   _dragHighlightedSquares.clear();
+  if (state.party.active && state.party.status === "playing"
+      && window.__partyLastSelectionSent !== null) {
+    window.__partyLastSelectionSent = null;
+    _partyReportSelection({ from: null, piece: null, legalMoves: [], legalCaptures: [] });
+  }
 }
 
 function selectFreeplaySquare(squareName) {
@@ -4759,6 +4794,11 @@ function _partyWsUrl(code) {
   // player's mini-board in *their* theme + pieces, not the watcher's.
   u.searchParams.set("theme", userSettings.theme || "");
   u.searchParams.set("pieces", userSettings.pieces || "");
+  // Legal-move hint colour the player picked — spectators paint their
+  // dots/rings in this same colour.
+  if (_isHexColor(userSettings.legalDotColor)) {
+    u.searchParams.set("legal_color", userSettings.legalDotColor);
+  }
   return u.toString();
 }
 
@@ -4993,16 +5033,81 @@ function _partyReportPosition(fen, opts) {
   } catch (_) { /* already closed */ }
 }
 
+// Reads `state.selectedSquare` + `state.legalTargets` and rebroadcasts
+// them as a `select` message to spectators, deduped against the last
+// payload (so calling this once per renderBoard is cheap). Computes
+// the captures subset from the live chess instance (game / freeplay)
+// so spectators can paint capture rings vs movement dots, mirroring
+// the player's CSS.
+function _partySyncSelectionFromState() {
+  if (!state.party.active || state.party.status !== "playing") return;
+  const sel = state.selectedSquare;
+  if (!sel) {
+    if (window.__partyLastSelectionSent === null) return;
+    window.__partyLastSelectionSent = null;
+    _partyReportSelection({ from: null, piece: null, legalMoves: [], legalCaptures: [] });
+    return;
+  }
+  const targets = Array.isArray(state.legalTargets) ? state.legalTargets : [];
+  let c = null;
+  if (state.game && state.game.active) c = state.game.chess;
+  else if (state.legalMode) c = state.freeplay && state.freeplay.chess;
+  let pieceTag = null;
+  let captures = [];
+  if (c) {
+    try {
+      const p = c.get(sel);
+      if (p) pieceTag = (p.color || "w") + (p.type || "p").toUpperCase();
+      captures = targets.filter((sq) => {
+        try { return !!c.get(sq); } catch (_) { return false; }
+      });
+    } catch (_) { /* ignore */ }
+  }
+  const key = `${sel}|${targets.join(",")}|${pieceTag}|${captures.join(",")}`;
+  if (window.__partyLastSelectionSent === key) return;
+  window.__partyLastSelectionSent = key;
+  _partyReportSelection({
+    from: sel,
+    piece: pieceTag,
+    legalMoves: targets,
+    legalCaptures: captures,
+  });
+}
+
+// Selection relay so spectators see the same legal-move hints the
+// player sees. Sent on click-select, drag-start and on clear. We
+// always include the player's chosen hint colour so the watcher's
+// dots match what the player is looking at without a separate config
+// roundtrip.
+function _partyReportSelection({ from, piece, legalMoves, legalCaptures }) {
+  if (!state.party.active || state.party.status !== "playing") return;
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({
+      type: "select",
+      from: from || null,
+      piece: piece || null,
+      legal_moves: Array.isArray(legalMoves) ? legalMoves : [],
+      legal_captures: Array.isArray(legalCaptures) ? legalCaptures : [],
+      legal_color: _isHexColor(userSettings.legalDotColor)
+        ? userSettings.legalDotColor
+        : "",
+    }));
+  } catch (_) { /* already closed */ }
+}
+
 // Pointer relay so spectators can see what the player is doing
 // between moves (cursor over a square, dragging a piece). Bandwidth:
 // one JSON message every ~33ms while the cursor is over the board, so
 // at most ~30 msgs/sec — small per-player.
 let _cursorLastSendTs = 0;
 let _cursorLastPayload = "";
-// 16ms ~= 60 Hz. Doubled from the previous 33ms (~30 Hz) so spectators
-// see smoother pointer motion. Drag start/stop frames bypass the
-// throttle so state changes are never lost.
-const _CURSOR_THROTTLE_MS = 16;
+// 4ms ~= 240 Hz. The browser only fires mousemove at the display's
+// refresh rate (typically 60–240 Hz on modern setups), so we'll
+// effectively send one frame per pointer event. Drag start/stop
+// frames bypass the throttle so state changes are never lost.
+const _CURSOR_THROTTLE_MS = 4;
 function _partyReportCursor(payload) {
   if (!state.party.active || state.party.status !== "playing") return;
   const ws = state.party.ws;
@@ -5052,6 +5157,11 @@ function _installPartyCursorTracking() {
       flipped: s.flipped,
       selected: sel,
       dragging: !!window.__partyCursorDragging,
+      // Carry the piece + origin square so spectators can render the
+      // dragged glyph at the cursor position. Cleared on dragend so
+      // a stale icon never sticks around.
+      drag_piece: window.__partyCursorDragging ? (window.__partyDragPiece || "") : "",
+      drag_from: window.__partyCursorDragging ? (window.__partyDragFrom || "") : "",
     });
   };
   const onLeave = () => {
@@ -5059,15 +5169,49 @@ function _installPartyCursorTracking() {
     // Clear the cursor on spectator side by sending an out-of-bounds
     // position; the server clamps to [-0.05, 1.05] and the spectator
     // CSS hides the dot when outside the board.
-    _partyReportCursor({ x: -1, y: -1, flipped: false, selected: "", dragging: false });
+    _partyReportCursor({
+      x: -1, y: -1, flipped: false, selected: "", dragging: false,
+      drag_piece: "", drag_from: "",
+    });
   };
-  const onDragStart = () => {
+  const onDragStart = (ev) => {
     if (!isPartyActive()) return;
     window.__partyCursorDragging = true;
+    // Try to identify the piece + origin square so spectators can
+    // render the same floating glyph the player is dragging. The
+    // dragstart event is emitted on the .piece <img>, whose parent
+    // .square has data-square="e2" and whose own dataset.piece is
+    // the FEN char (uppercase = white).
+    const pieceEl = ev && ev.target && ev.target.classList && ev.target.classList.contains("piece")
+      ? ev.target
+      : null;
+    if (pieceEl) {
+      const fenChar = pieceEl.dataset && pieceEl.dataset.piece;
+      const sqEl = pieceEl.closest(".square");
+      const fromSq = sqEl && sqEl.dataset && sqEl.dataset.square;
+      if (fenChar) {
+        const color = fenChar === fenChar.toUpperCase() ? "w" : "b";
+        window.__partyDragPiece = color + fenChar.toUpperCase();
+      } else {
+        window.__partyDragPiece = "";
+      }
+      window.__partyDragFrom = fromSq || "";
+    } else {
+      window.__partyDragPiece = "";
+      window.__partyDragFrom = "";
+    }
   };
   const onDragEnd = () => {
     if (!isPartyActive()) return;
     window.__partyCursorDragging = false;
+    window.__partyDragPiece = "";
+    window.__partyDragFrom = "";
+    // Push one frame so spectators clear the floating piece + drag
+    // flag immediately rather than waiting on the next mousemove.
+    _partyReportCursor({
+      x: -1, y: -1, flipped: false, selected: "",
+      dragging: false, drag_piece: "", drag_from: "",
+    });
   };
   document.addEventListener("mousemove", (ev) => {
     const board = document.querySelector(".board");
@@ -5829,6 +5973,14 @@ function _renderMiniBoardFromFen(fen, player) {
   // would still see white-on-bottom — left/right and top/bottom
   // would be inverted between them.
   const flipped = !!(player && player.flipped);
+  // Player's chosen "legal hint" colour drives the dot / capture-ring
+  // overlay so the watcher sees hints in the same colour the player
+  // configured. CSS reads --mb-legal-dot for fills.
+  const legalColor = (player && typeof player.legal_color === "string"
+    && /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(player.legal_color))
+    ? player.legal_color
+    : "#28c85a";
+  const legalRgba = _hexToRgba(legalColor, 0.55);
   // Cursor / selection overlay sourced from `player_state` cursor
   // updates relayed by the server. The player normalizes their
   // cursor to white-on-bottom coords before sending; if the spectator
@@ -5843,6 +5995,19 @@ function _renderMiniBoardFromFen(fen, player) {
     const cy = flipped ? 1 - cursor.y : cursor.y;
     const x = Math.max(0, Math.min(1, cx)) * 100;
     const y = Math.max(0, Math.min(1, cy)) * 100;
+    // Floating dragged-piece glyph: rendered first so the cursor dot
+    // sits on top of it (player's chosen piece set, sized like a
+    // mini-board cell so it visually matches the squares).
+    if (cursor.dragging && cursor.drag_piece) {
+      const dp = String(cursor.drag_piece);
+      // dp like "wQ" / "bP" — convert to FEN char so pieceSvgUrl
+      // resolves the right asset under the player's piece set.
+      const color = dp[0];
+      const t = (dp[1] || "P").toUpperCase();
+      const fenChar = color === "w" ? t : t.toLowerCase();
+      const url = pieceSvgUrl(fenChar, pieceSet);
+      overlayHtml += `<img class="mb-drag-piece" src="${url}" alt="${escapeHtml(dp)}" draggable="false" style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%;">`;
+    }
     const cls = cursor.dragging ? "mb-cursor is-drag" : "mb-cursor";
     overlayHtml += `<div class="${cls}" style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%;"></div>`;
   }
@@ -5873,6 +6038,19 @@ function _renderMiniBoardFromFen(fen, player) {
   const lm = (player && typeof player.last_move === "string") ? player.last_move : "";
   const lmFromRC = lm.length >= 4 ? sqToRC(lm.slice(0, 2)) : null;
   const lmToRC = lm.length >= 4 ? sqToRC(lm.slice(2, 4)) : null;
+  // Player's current selection — `from` square + the squares they can
+  // legally move to (split into plain moves vs captures so we render
+  // dot vs ring like the main board does).
+  const selection = (player && player.selection) || null;
+  const selFromRC = (selection && selection.from) ? sqToRC(selection.from) : null;
+  const moveSet = new Set();
+  const captureSet = new Set();
+  if (selection) {
+    (selection.legal_moves || []).forEach((sq) => moveSet.add(sq));
+    (selection.legal_captures || []).forEach((sq) => captureSet.add(sq));
+    // A square in both lists is a capture — drop from the moves set.
+    captureSet.forEach((sq) => moveSet.delete(sq));
+  }
   const cells = [];
   for (let r = 0; r < 8; r++) {
     // Source row in the FEN — flipped boards walk the FEN bottom-up.
@@ -5899,9 +6077,27 @@ function _renderMiniBoardFromFen(fen, player) {
       const isSelected = selectedRC && selectedRC.r === r && selectedRC.f === f;
       const isLm = (lmFromRC && lmFromRC.r === r && lmFromRC.f === f)
         || (lmToRC && lmToRC.r === r && lmToRC.f === f);
-      const extra = `${isSelected ? " mb-selected" : ""}${isLm ? " mb-lastmove" : ""}`;
+      // Squares the watched player can legally land on.
+      const fileChar = String.fromCharCode("a".charCodeAt(0) + (flipped ? 7 - f : f));
+      const rankChar = String(flipped ? r + 1 : 8 - r);
+      const sqName = fileChar + rankChar;
+      const isFromSel = selFromRC && selFromRC.r === r && selFromRC.f === f;
+      const isMove = moveSet.has(sqName);
+      const isCapture = captureSet.has(sqName);
+      // Hint overlay rendered as a child element (the square's own
+      // ::before/::after slots are already taken by last-move /
+      // selected highlights).
+      const hintHtml = isCapture
+        ? `<span class="mb-hint mb-hint-capture"></span>`
+        : isMove
+          ? `<span class="mb-hint mb-hint-move"></span>`
+          : "";
+      const extra =
+        `${isSelected ? " mb-selected" : ""}` +
+        `${isLm ? " mb-lastmove" : ""}` +
+        `${isFromSel ? " mb-sel-from" : ""}`;
       const cls = `mb-square ${isLight ? "mb-light" : "mb-dark"}${extra}`;
-      cells.push(`<div class="${cls}">${pieceHtml}</div>`);
+      cells.push(`<div class="${cls}">${pieceHtml}${hintHtml}</div>`);
     }
   }
   const rankOrder = flipped
@@ -5912,8 +6108,12 @@ function _renderMiniBoardFromFen(fen, player) {
     : ["a", "b", "c", "d", "e", "f", "g", "h"];
   const ranks = rankOrder.map((r) => `<span>${r}</span>`).join("");
   const files = fileOrder.map((f) => `<span>${f}</span>`).join("");
+  // Append the player's legal-hint colour as a CSS variable so the
+  // mini-board's dot/ring overlays render in their colour, not the
+  // spectator's default.
+  const wrapStyle = `${themeStyle.style}--mb-legal-dot:${legalRgba};--mb-legal-color:${legalColor};`;
   return `
-    <div class="${themeStyle.cls}" style="${themeStyle.style}">
+    <div class="${themeStyle.cls}" style="${wrapStyle}">
       <div class="mb-ranks">${ranks}</div>
       <div class="mini-board" data-cid="${escapeHtml(cid)}">${cells.join("")}${overlayHtml}</div>
       <div class="mb-corner"></div>

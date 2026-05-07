@@ -656,6 +656,7 @@ async def party_ws(ws: WebSocket, code: str) -> None:
     avatar = ws.query_params.get("avatar") or ""
     theme = ws.query_params.get("theme") or ""
     pieces = ws.query_params.get("pieces") or ""
+    legal_color = ws.query_params.get("legal_color") or ""
     role = (ws.query_params.get("role") or "player").lower()
     if not client_id or len(client_id) < 4:
         await ws.close(code=4400)
@@ -668,7 +669,9 @@ async def party_ws(ws: WebSocket, code: str) -> None:
     if role == "spectator":
         await _party_ws_spectator(ws, party, client_id, nickname, avatar)
     else:
-        await _party_ws_player(ws, party, client_id, nickname, avatar, theme, pieces)
+        await _party_ws_player(
+            ws, party, client_id, nickname, avatar, theme, pieces, legal_color,
+        )
 
 
 async def _party_ws_player(
@@ -679,10 +682,17 @@ async def _party_ws_player(
     avatar: str,
     theme: str,
     pieces: str,
+    legal_color: str,
 ) -> None:
     try:
         await party.attach(
-            client_id, nickname, avatar, ws, theme=theme, pieces=pieces,
+            client_id,
+            nickname,
+            avatar,
+            ws,
+            theme=theme,
+            pieces=pieces,
+            legal_color=legal_color,
         )
     except party_room.PartyError as e:
         await ws.send_json({"type": "error", "code": e.code, "message": e.message})
@@ -726,6 +736,20 @@ async def _party_ws_player(
                     flipped=bool(msg.get("flipped")),
                     selected=str(msg.get("selected") or "") or None,
                     dragging=bool(msg.get("dragging")),
+                    drag_piece=str(msg.get("drag_piece") or "") or None,
+                    drag_from=str(msg.get("drag_from") or "") or None,
+                )
+            elif mtype == "select":
+                # Player started/cleared a selection (click or drag).
+                # Spectators replicate the same hint dots / rings the
+                # player sees on candidate squares.
+                await party.update_selection(
+                    client_id,
+                    from_sq=msg.get("from"),
+                    piece=msg.get("piece"),
+                    legal_moves=msg.get("legal_moves"),
+                    legal_captures=msg.get("legal_captures"),
+                    legal_color=msg.get("legal_color"),
                 )
             elif mtype == "ping":
                 await ws.send_json({"type": "pong"})

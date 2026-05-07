@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -46,6 +47,52 @@ PLAYER_STATE_THROTTLE_SEC = 0.001
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _PARTIES: dict[str, Party] = {}
 _LOCK = asyncio.Lock()
+
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+_SQUARE_RE = re.compile(r"^[a-h][1-8]$")
+_PIECE_RE = re.compile(r"^[wb][KQRBNP]$")
+
+
+def _sanitize_hex_color(s: Any) -> str:
+    """Returns ``s`` lowercased iff it's a syntactically valid hex
+    colour (#rgb or #rrggbb), otherwise the empty string. Used to
+    clamp client-supplied colour values before storing them on a
+    member — we never trust the client to send well-formed CSS."""
+    if not isinstance(s, str):
+        return ""
+    s = s.strip()
+    if _HEX_COLOR_RE.match(s):
+        return s.lower()
+    return ""
+
+
+def _sanitize_square(s: Any) -> str | None:
+    if not isinstance(s, str):
+        return None
+    s = s.strip().lower()
+    return s if _SQUARE_RE.match(s) else None
+
+
+def _sanitize_squares(seq: Any) -> list[str]:
+    if not isinstance(seq, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in seq[:32]:  # cap to reasonable upper bound (max ~28 from a queen)
+        sq = _sanitize_square(item)
+        if sq and sq not in seen:
+            seen.add(sq)
+            out.append(sq)
+    return out
+
+
+def _sanitize_piece_id(s: Any) -> str | None:
+    """Accepts the client's piece tag (e.g. "wQ", "bP") used purely
+    for the spectator overlay icon — never for game logic."""
+    if not isinstance(s, str):
+        return None
+    s = s.strip()
+    return s if _PIECE_RE.match(s) else None
 
 
 def _new_code() -> str:
@@ -120,6 +167,16 @@ class Member:
     # spectator can paint a yellow last-move highlight that matches the
     # main board.
     last_move: str = ""
+    # Hex (#rrggbb) colour the player picked for "legal move" hints.
+    # Spectators paint their own hint dots in this same colour so the
+    # watching experience matches what the player sees.
+    legal_color: str = "#28c85a"
+    # Player's current selection (square they clicked or are dragging).
+    # Spectators get a copy of this so they can render the same dots /
+    # rings on candidate squares the player sees mid-think.
+    # Shape: {"from": "e2", "piece": "wP",
+    #         "legal_moves": ["e3","e4"], "legal_captures": ["d3"]}
+    selection: dict[str, Any] | None = None
     last_solve_ms: int = 0
     disconnected_at: float | None = None
     is_host: bool = False
@@ -254,6 +311,8 @@ class Party:
             "best_streak": m.best_streak,
             "theme": m.theme,
             "pieces": m.pieces,
+            "legal_color": m.legal_color or "#28c85a",
+            "selection": m.selection,
             "puzzle_id": cur.get("id"),
             "fen": m.current_fen or str(cur.get("fen") or ""),
             "puzzle_rating": int(cur.get("rating") or 0),
@@ -297,6 +356,9 @@ class Party:
         # Drop the previous puzzle's last-move highlight so spectators
         # don't keep painting an arrow from the puzzle that just ended.
         m.last_move = ""
+        # And clear any in-progress selection — the new puzzle has its
+        # own legal moves and the old hint dots would be misleading.
+        m.selection = None
         return p
 
     async def attach(
@@ -308,8 +370,10 @@ class Party:
         *,
         theme: str = "",
         pieces: str = "",
+        legal_color: str = "",
     ) -> Member:
         existing = self.members.get(client_id)
+        sanitized_color = _sanitize_hex_color(legal_color) if legal_color else ""
         if existing is None:
             if len([m for m in self.members.values() if m.ws is not None]) >= MAX_MEMBERS:
                 raise PartyError("party_full", "Party is full")
@@ -323,6 +387,7 @@ class Party:
                 is_host=(client_id == self.host_id),
                 theme=(theme or "")[:32],
                 pieces=(pieces or "")[:32],
+                legal_color=sanitized_color or "#28c85a",
             )
             self.members[client_id] = existing
         else:
@@ -336,6 +401,8 @@ class Party:
                 existing.theme = theme[:32]
             if pieces:
                 existing.pieces = pieces[:32]
+            if sanitized_color:
+                existing.legal_color = sanitized_color
         await self._send(client_id, {"type": "lobby", **self.public_state()})
         await self.broadcast({"type": "lobby", **self.public_state()})
         if self.status == "playing":
@@ -483,6 +550,45 @@ class Party:
             m.last_move = str(last_move or "")
         await self.broadcast_player_state(m)
 
+    async def update_selection(
+        self,
+        client_id: str,
+        *,
+        from_sq: Any,
+        piece: Any,
+        legal_moves: Any,
+        legal_captures: Any,
+        legal_color: Any,
+    ) -> None:
+        """Player tells us what square they're selecting / dragging,
+        which squares it can legally move to, and the colour to paint
+        the hint dots in. Stored on the member and replicated to
+        spectators in the next ``player_state`` broadcast so they see
+        the same hint overlay the player sees."""
+        m = self.members.get(client_id)
+        if m is None:
+            return
+        sq = _sanitize_square(from_sq)
+        if sq is None:
+            # Treat as "selection cleared" — spectator wipes the hints.
+            if m.selection is None:
+                return
+            m.selection = None
+        else:
+            piece_id = _sanitize_piece_id(piece)
+            moves = _sanitize_squares(legal_moves)
+            captures = _sanitize_squares(legal_captures)
+            m.selection = {
+                "from": sq,
+                "piece": piece_id,
+                "legal_moves": moves,
+                "legal_captures": captures,
+            }
+        col = _sanitize_hex_color(legal_color)
+        if col:
+            m.legal_color = col
+        await self.broadcast_player_state(m, force=True)
+
     async def relay_cursor(
         self,
         client_id: str,
@@ -492,6 +598,8 @@ class Party:
         flipped: bool = False,
         selected: str | None = None,
         dragging: bool = False,
+        drag_piece: str | None = None,
+        drag_from: str | None = None,
     ) -> None:
         """Pure relay of a player's pointer position to spectators.
 
@@ -514,9 +622,9 @@ class Party:
             yv = max(-0.05, min(1.05, float(y)))
         except (TypeError, ValueError):
             return
-        sel = (selected or "").strip().lower()
-        if len(sel) != 2 or sel[0] not in "abcdefgh" or sel[1] not in "12345678":
-            sel = ""
+        sel = _sanitize_square(selected) or ""
+        dp = _sanitize_piece_id(drag_piece) or ""
+        df = _sanitize_square(drag_from) or ""
         await self.broadcast_spectators(
             {
                 "type": "player_cursor",
@@ -526,6 +634,8 @@ class Party:
                 "flipped": bool(flipped),
                 "selected": sel,
                 "dragging": bool(dragging),
+                "drag_piece": dp,
+                "drag_from": df,
             }
         )
 

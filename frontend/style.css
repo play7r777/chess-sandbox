@@ -2283,6 +2283,44 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 220, 80, 0.42);
   pointer-events: none;
 }
+/* Source square of the player's current selection (the piece they
+   clicked / are dragging). Same colour the main board uses so the
+   visual is identical. */
+.mini-board .mb-square.mb-sel-from {
+  box-shadow: inset 0 0 0 3px var(--selected, rgba(80, 160, 255, 0.55));
+}
+/* Legal-move hint — a small dot in the centre of an empty target
+   square, painted in the watched player's colour (CSS variable set
+   per mini-board wrapper from `legal_color`). */
+.mini-board .mb-hint {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 4;
+}
+.mini-board .mb-hint-move {
+  width: 28%; height: 28%;
+  border-radius: 50%;
+  background: var(--mb-legal-dot, rgba(40, 200, 90, 0.55));
+}
+.mini-board .mb-hint-capture {
+  width: 90%; height: 90%;
+  border-radius: 50%;
+  border: 3px solid var(--mb-legal-dot, rgba(40, 200, 90, 0.55));
+  box-sizing: border-box;
+  background: transparent;
+}
+/* Floating dragged-piece glyph — sized like a single square, anchored
+   at the cursor's normalized coords (0..1) via inline left/top. */
+.mini-board .mb-drag-piece {
+  position: absolute;
+  width: 12.5%; height: 12.5%;  /* one cell on the 8x8 grid */
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 4;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.45));
+}
 /* Live cursor dot — anchored to the .mini-board grid via percentage
    coords sent by the player. Hidden when out-of-bounds. */
 .mini-board .mb-cursor {
