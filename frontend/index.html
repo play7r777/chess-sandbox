@@ -14,7 +14,22 @@
         <div class="view-tabs" role="tablist" aria-label="Режим интерфейса">
           <button id="tab-main"     class="view-tab is-active" type="button" role="tab" aria-selected="true"  data-view="main">Main</button>
           <button id="tab-analysis" class="view-tab"           type="button" role="tab" aria-selected="false" data-view="analysis">Analysis</button>
-          <button id="tab-puzzle"   class="view-tab"           type="button" role="tab" aria-selected="false" data-view="puzzle">Puzzle</button>
+          <button id="tab-puzzle"   class="view-tab view-tab-icon" type="button" role="tab" aria-selected="false" data-view="puzzle" title="Puzzle">
+            <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M67.882 15.1v17.09h7.448c4.475 0 9.67-2.93 9.67-7.92V15.1H67.882zM29.5 20.09v9.17c0 2.797 2.626 3.4 4.83 3.4 5 0 10.91 3.398 10.91 8.95h1V20.09H29.5zM5 50.14v-9.17l39.965 10 39.965-10v9.07c0 1.48-.69 2.96-2.07 4.09l-32.96 27c-1.38 1.13-3.19 1.7-5 1.7s-3.62-.57-5-1.7L7.07 54.23C5.69 53.1 5 51.62 5 50.14z" fill="#A93616"/><path fill-rule="evenodd" clip-rule="evenodd" d="M82.995 40.006a6.786 6.786 0 0 0-3.34 1.84L52.36 69.14a16.743 16.743 0 0 0-4.844 13.278A7.366 7.366 0 0 0 49.9 81.13l32.96-27c1.38-1.13 2.07-2.61 2.07-4.09v-9.17s-.87-.476-1.935-.864z" fill="#DC501D"/><path d="M75.33 7.18c4.673 0 10.164 3.272 9.644 8.56-.523 5.314-6.14 7.24-10.734 7.24-2.432 0-4.824 2.79-2.41 4.75l11.02 9.03c1.385 1.134 2.07 2.57 2.07 4.21 0 1.64-.694 2.854-2.07 3.98l-32.96 27c-1.38 1.13-3.19 1.7-5 1.7s-3.62-.57-5-1.7L7.07 45.06c-1.3-1.065-2.063-2.498-2.063-4.09 0-1.592.604-2.905 2.063-4.1l8.51-6.98c3.3-2.71 8.01-.369 8.01 2.14 0 5.686 5.861 9.19 10.93 9.19 5.101 0 11.02-3.463 10.713-9.19-.29-5.377-6.03-8.55-10.903-8.55-2.172 0-4.802-1.497-4.83-3.48 0-.761.046-1.54 1.04-2.36l9.48-7.77c2.76-2.26 7.24-2.26 10 0l9.87 8.08c1.87 1.53 6.14.77 5.8-2.21-.52-5.293 4.957-8.57 9.64-8.57v.01z" fill="#FA742C"/><path fill-rule="evenodd" clip-rule="evenodd" d="M77.794 49.091 49.89 71.95c-1.38 1.13-3.19 1.7-5 1.7s-3.62-.57-5-1.7L21.834 57.157l18.333 10.336a10 10 0 0 0 10.436-.376L77.794 49.09z" fill="#FFA459"/></svg>
+            <span>Puzzle</span>
+          </button>
+          <button id="tab-daily" class="view-tab view-tab-icon" type="button" role="tab" aria-selected="false" data-view="daily" title="Daily Puzzle">
+            <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M5 45h80V13a8 8 0 0 0-8-8H13a8 8 0 0 0-8 8v32z" fill="#5D9948"/><path d="M5 35V13a8 8 0 0 1 8-8h42l-39.42.986c-4.936.123-9.074 3.831-9.341 8.76C5.878 21.407 5.997 27.21 5 35z" fill="#81B64C"/><path d="M24 5h8l1.014 6.082a5.083 5.083 0 1 1-10.028 0L24 5zM58 5h8l1.014 6.082a5.083 5.083 0 1 1-10.028 0L58 5z" fill="#45753C"/><path d="M32 4a4 4 0 0 0-8 0v5a4 4 0 0 0 8 0V4zM66 4a4 4 0 0 0-8 0v5a4 4 0 0 0 8 0V4z" fill="#81B64C"/><path d="M5 51h80v26a8 8 0 0 1-8 8H13a8 8 0 0 1-8-8V51z" fill="#BEBDB9"/><path d="M5 75h80v3H5v-3z" fill="#8B8987"/></svg>
+            <span>Daily</span>
+          </button>
+          <button id="tab-rush" class="view-tab view-tab-icon" type="button" role="tab" aria-selected="false" data-view="rush" title="Puzzle Rush">
+            <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M79.4 13.47c-6.77 2.64-12.66 12.72-9.96 17.17.96 1.59 7.63 1.38 7.89 1.38 2.48 0 4.95-.77 6.84-2.32 1.89-1.55 2.83-3.57 2.83-5.6v-9.17s-5.33-2.35-7.6-1.46zM31.31 19.92v9.17c0 2.894 2.819 3.4 5.02 3.4 5 0 10.91 3.398 10.91 8.95h3.481V20.265l-19.41-.345zM81.6 40.7 43 79.5l41.86-25.54c1.609-1 2.07-2.61 2.07-4.09V40.7H81.6z" fill="#99580E"/><path d="M77.33 7.01c4.391 0 9.475 2.8 9.67 7.658.235 5.823-5.926 8.142-10.76 8.142-.87 0-1.74.27-2.41.81-1.33 1.09-1.33 2.86 0 3.94l11.02 9.03c2.76 2.26 2.76 5.93 0 8.19L43.954 78.871c-.698.582-1.747.007-1.632-.894L44.23 63 7.413 84.431c-.948.552-1.965-.605-1.295-1.475L24.591 59 4.602 63.19c-.927.193-1.58-.89-.974-1.619L17.58 44.78l-15.686.093c-.943.006-1.369-1.176-.64-1.773L17.58 29.72c2.465-2.02 8.01-1.1 8.01 2.14 0 5.69 5.86 9.19 10.93 9.19 5.1 0 11.02-3.463 10.712-9.19-.289-5.376-6.029-8.55-10.902-8.55-1.406 0-2.51.134-3.7-.83-1.75-1.44-1.75-3.64-.09-5.01l9.48-7.77c1.38-1.13 3.19-1.7 5-1.7s3.62.57 5 1.7l9.87 8.08c.66.54 1.54.82 2.41.82.87 0 1.74-.27 2.41-.82.74-.61 1.07-1.42.98-2.21C67.17 10.277 72.647 7 77.33 7v.01z" fill="#F7C631"/><path fill-rule="evenodd" clip-rule="evenodd" d="m75.361 52.69-31.407 26.18c-.698.582-1.747.007-1.633-.894L44.23 63 7.413 84.431c-.949.552-1.965-.605-1.295-1.475L24.59 59 4.602 63.19c-.927.193-1.58-.89-.974-1.619L17.58 44.78l-15.686.093c-.942.006-1.368-1.176-.64-1.773L17.58 29.72c.836-.685 2.027-1.032 3.236-1.065C20.02 38.04 26.634 47.27 37 48.5l11 2.334a6.33 6.33 0 0 1 4.99 6.765c-.218 2.413 2.245 4.168 4.454 3.171l17.917-8.08z" fill="#FA742C"/></svg>
+            <span>Rush</span>
+          </button>
+          <button id="tab-opening" class="view-tab view-tab-icon" type="button" role="tab" aria-selected="false" data-view="opening" title="Opening Trainer">
+            <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 91 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="m84.15 63.34 4 1.74-3.69 2.35-.31-4.09zM83.88 49.32l4 1.74-3.69 2.34-.31-4.08zM84.28 35.16l4.01 1.74-3.69 2.34-.32-4.08z" fill="#CA9350"/><path d="M86.67 65.94 53.89 84.71l-1.87-40.85 34.64-18.07s-1.87 7.31 0 11.97c.12.31.04 1.45.04 1.45s-2.24 8.59-.04 12.76c.34.64-.12 1.24-.12 1.24s-1.74 6.7.12 12.73h.01z" fill="#E7E6E5"/><path d="M89.11 53.11 55.28 72.09v.01c-1.49 3.43-1.49 8.38-.81 11.95l33.69-18.97.81.41.01.01c1.22.42 1.36 1.24.41 1.79L55.56 86.26 1.76 64.4c-2.32-4.81-2.31-10.86-.14-14.16-2.45-4.819-1.77-10.737.269-14.168A12.956 12.956 0 0 1 .25 29.75c0-2.33.68-4.4 1.77-6.19l53.13 21.59c-.81 1.93-1.22 3.98-1.22 5.91 0 1.66.27 3.17.54 4.68l33.69-18.83h.13l.82.27c.54.27.95.69.82.96 0 .28-.14.55-.55.83L55.569 58.06h.001c-1.49 3.44-2.04 8.12-1.36 11.69l33.69-18.7.94.28c1.09.41 1.22 1.23.27 1.78z" fill="#9D6C3E"/><path d="M88.97 24.11 39.79 4.05c-1.09-.41-2.85-.41-3.67.14L2.02 23.56l53.12 21.59 34.1-19.25c.95-.55.81-1.38-.27-1.79z" fill="#CA9350"/></svg>
+            <span>Opening</span>
+          </button>
         </div>
       </div>
       <div class="topbar-actions">
@@ -200,6 +215,31 @@
           <div id="puzzle-card" class="puzzle-card"></div>
           <div id="puzzle-actions" class="puzzle-actions"></div>
           <div id="puzzle-history" class="puzzle-history"></div>
+        </section>
+
+        <section class="panel" id="panel-daily" data-view="daily">
+          <h2>Daily Puzzle <span class="puzzle-h-sub">— один пазл на сегодня для всех</span></h2>
+          <div id="daily-stats-bar" class="puzzle-stats-bar"></div>
+          <div id="daily-card" class="puzzle-card"></div>
+          <div id="daily-actions" class="puzzle-actions"></div>
+          <div id="daily-leaderboard" class="puzzle-history"></div>
+        </section>
+
+        <section class="panel" id="panel-rush" data-view="rush">
+          <h2>Puzzle Rush <span class="puzzle-h-sub">— реши как можно больше за время</span></h2>
+          <div id="rush-stats-bar" class="puzzle-stats-bar"></div>
+          <div id="rush-card" class="puzzle-card"></div>
+          <div id="rush-actions" class="puzzle-actions"></div>
+          <div id="rush-history" class="puzzle-history"></div>
+          <div id="rush-leaderboard" class="puzzle-history"></div>
+        </section>
+
+        <section class="panel" id="panel-opening" data-view="opening">
+          <h2>Opening Trainer <span class="puzzle-h-sub">— дебюты с тренером</span></h2>
+          <div id="opening-stats-bar" class="puzzle-stats-bar"></div>
+          <div id="opening-card" class="puzzle-card"></div>
+          <div id="opening-actions" class="puzzle-actions"></div>
+          <div id="opening-history" class="puzzle-history"></div>
         </section>
 
         <section class="panel" id="panel-review" data-view="analysis">

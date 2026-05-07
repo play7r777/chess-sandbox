@@ -340,7 +340,7 @@ const state = {
   view: "main",
   // Local user identity (nickname/avatar) loaded from localStorage and
   // synced to the backend so the leaderboard sees this client.
-  user: { client_id: null, nickname: "", avatar: "♟", elo_history: null },
+  user: { client_id: null, nickname: "", avatar: "♟", rating: 0, elo_history: null },
   // Active party / co-op puzzle session, if any.
   party: {
     active: false,       // true between WS open and "finish" message
@@ -480,6 +480,70 @@ const state = {
     needsNextOnReturn: false, // user left mid-pendingNext; advance when they come back
     timerHandle: null,        // setInterval handle for live timer display
     idle: true,               // gate auto-load behind a "Начать игру" click
+  },
+  // Daily Puzzle — one shared puzzle per UTC day with leaderboard + streak.
+  daily: {
+    active: false,
+    current: null,            // { id, fen, moves, side_to_solve, rating, themes, date }
+    moves: [],
+    nextIdx: 0,
+    side: null,
+    fenStart: null,
+    flippedSnapshot: null,
+    feedback: null,
+    startedAt: 0,
+    solveMs: 0,
+    timerHandle: null,
+    leaderboard: [],          // [{ client_id, nickname, avatar, solve_ms, attempts }]
+    streak: 0,                // current streak (consecutive days)
+    bestStreak: 0,
+    solvedToday: false,
+    failed: false,
+    attemptsToday: 0,
+    pendingNext: null,
+  },
+  // Puzzle Rush — timed (180/300s) or Survival (3 strikes) sprints.
+  rush: {
+    active: false,
+    mode: null,               // "180" | "300" | "survival"
+    deadlineAt: 0,
+    durationSec: 0,
+    startedAt: 0,
+    score: 0,
+    mistakes: 0,
+    maxMistakes: 3,
+    queue: [],
+    fetchedTotal: 0,
+    current: null,
+    moves: [],
+    nextIdx: 0,
+    side: null,
+    fenStart: null,
+    flippedSnapshot: null,
+    timerHandle: null,
+    finished: false,
+    finishReason: null,        // "time" | "mistakes" | "user-stop"
+    sessionId: null,
+    history: [],               // [{ id, rating, outcome, solveMs }]
+    bestToday: { "180": 0, "300": 0, "survival": 0 },
+    bestEver:  { "180": 0, "300": 0, "survival": 0 },
+    leaderboard: { "180": [], "300": [], "survival": [] },
+    leaderboardScope: "today", // "today" | "alltime"
+    leaderboardMode: "180",
+  },
+  // Opening Trainer — pick an opening, theory + practice + mastery.
+  opening: {
+    active: false,
+    catalog: [],               // [{ id, name, eco, color, lines: [{ id, name, moves, comments? }], description? }]
+    selectedId: null,
+    selectedLineId: null,
+    mode: "theory",            // "theory" | "practice"
+    chess: null,
+    moveIdx: 0,
+    feedback: null,
+    flippedSnapshot: null,
+    mastery: {},               // { lineId: { plays, correct, completed_at } }
+    coachMsg: "",
   },
 };
 
@@ -1211,6 +1275,18 @@ function tryFreeplayMove(from, to) {
   }
   if (state.puzzle && state.puzzle.active && state.view === "puzzle") {
     tryPuzzleMove(from, to);
+    return;
+  }
+  if (state.daily && state.daily.active && state.view === "daily") {
+    tryDailyMove(from, to);
+    return;
+  }
+  if (state.rush && state.rush.active && state.view === "rush") {
+    tryRushMove(from, to);
+    return;
+  }
+  if (state.opening && state.opening.active && state.view === "opening") {
+    tryOpeningMove(from, to);
     return;
   }
   const c = ensureFreeplayChess();
@@ -2337,29 +2413,31 @@ if (dropzone) {
 // ---------- View tabs (Main / Analysis) ----------
 
 function setView(view) {
-  let v;
-  if (view === "analysis")    v = "analysis";
-  else if (view === "puzzle") v = "puzzle";
-  else                        v = "main";
+  const allowed = ["main", "analysis", "puzzle", "daily", "rush", "opening"];
+  const v = allowed.includes(view) ? view : "main";
   const prev = state.view;
   state.view = v;
-  document.body.classList.toggle("view-main",     v === "main");
-  document.body.classList.toggle("view-analysis", v === "analysis");
-  document.body.classList.toggle("view-puzzle",   v === "puzzle");
+  for (const k of allowed) {
+    document.body.classList.toggle(`view-${k}`, v === k);
+  }
   document.querySelectorAll(".view-tab").forEach((btn) => {
     const isActive = btn.dataset.view === v;
     btn.classList.toggle("is-active", isActive);
     btn.setAttribute("aria-selected", isActive ? "true" : "false");
   });
   try { localStorage.setItem("cs.view", v); } catch (_) { /* ignore */ }
-  // Puzzle mode owns the board while it's the active view; entering
-  // and leaving the view is the natural place to load a puzzle / put
-  // the board back the way the user found it.
-  if (v === "puzzle") {
-    enterPuzzleView();
-  } else if (prev === "puzzle" && state.puzzle && state.puzzle.current) {
+  // Each "puzzle-like" view owns the board while it's active; entering
+  // and leaving the view is the natural place to load / unload it.
+  if (prev === "puzzle" && v !== "puzzle" && state.puzzle && state.puzzle.current) {
     leavePuzzleView();
   }
+  if (prev === "rush" && v !== "rush") leaveRushView();
+  if (prev === "daily" && v !== "daily") leaveDailyView();
+  if (prev === "opening" && v !== "opening") leaveOpeningView();
+  if (v === "puzzle")       enterPuzzleView();
+  else if (v === "daily")   enterDailyView();
+  else if (v === "rush")    enterRushView();
+  else if (v === "opening") enterOpeningView();
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
@@ -4644,6 +4722,7 @@ async function syncUserProfile() {
     if (u && typeof u === "object") {
       if (typeof u.rating === "number") {
         state.puzzle.sessionRating = u.rating;
+        state.user.rating = u.rating;
       }
       if (u.stats && typeof u.stats === "object") {
         if (typeof u.stats.current_streak === "number") {
@@ -4974,7 +5053,12 @@ async function openProfileModal(clientId) {
     body.innerHTML = `<div class="profile-empty">Профиль не найден на этом сервере.</div>`;
     return;
   }
-  state.user.elo_history = clientId === state.user.client_id ? user.elo_history : null;
+  if (clientId === state.user.client_id) {
+    state.user.elo_history = Array.isArray(user.elo_history) ? user.elo_history : null;
+    if (typeof user.rating === "number") state.user.rating = user.rating;
+  } else {
+    state.user.elo_history = null;
+  }
   const stats = user.stats || {};
   const games = stats.games || 0;
   const solved = stats.solved || 0;
@@ -5203,9 +5287,9 @@ function _presenceWsUrl() {
   if (_isHexColor(userSettings.legalDotColor)) {
     u.searchParams.set("legal_color", userSettings.legalDotColor);
   }
-  const r = (state.user && state.user.elo_history && state.user.elo_history.rating)
-    ? state.user.elo_history.rating
-    : (state.sessionRating || 0);
+  const r = (state.user && Number(state.user.rating))
+    || (state.puzzle && Number(state.puzzle.sessionRating))
+    || 0;
   if (r) u.searchParams.set("rating", String(r));
   return u.toString();
 }
@@ -5447,6 +5531,7 @@ function handlePartyMessage(msg) {
         state.party.allowedDurations = msg.allowed_durations_sec.map((n) => Math.floor(Number(n) || 0)).filter((n) => n > 0);
       }
       state.party.members = Array.isArray(msg.members) ? msg.members : [];
+      if (Number.isFinite(msg.avg_rating)) state.party.avgRating = Math.floor(msg.avg_rating);
       if (state.party.status === "lobby") renderPartyLobby();
       break;
     case "start":
@@ -5456,6 +5541,7 @@ function handlePartyMessage(msg) {
       if (Number.isFinite(msg.duration_sec) && msg.duration_sec > 0) {
         state.party.durationSec = Math.floor(msg.duration_sec);
       }
+      if (Number.isFinite(msg.avg_rating)) state.party.avgRating = Math.floor(msg.avg_rating);
       state.party.selfScore = 0;
       closePartyModal();
       setView("puzzle");
@@ -5571,8 +5657,11 @@ function _partyReportPosition(fen, opts) {
       puzzle_rating: cur ? Number(cur.rating || 0) : 0,
       streak: Number(state.puzzle ? state.puzzle.streak || 0 : 0),
       best_streak: Number(state.puzzle ? state.puzzle.bestStreak || 0 : 0),
-      rating: Number(state.user && state.user.elo_history && state.user.elo_history.rating
-        ? state.user.elo_history.rating : (state.sessionRating || 0)),
+      rating: Number(
+        (state.user && state.user.rating)
+        || (state.puzzle && state.puzzle.sessionRating)
+        || 0
+      ),
     }));
   } catch (_) { /* already closed */ }
 }
@@ -5884,10 +5973,13 @@ function renderPartyLobby() {
     return `<button type="button" class="party-duration-opt ${isActive ? "is-active" : ""}" data-sec="${sec}" ${isHost ? "" : "disabled"}>${_partyDurationLabel(sec)}</button>`;
   }).join("");
   const startLabel = `Начать матч (${_partyDurationLabel(m.durationSec || 600)})`;
+  const avgRatingPill = Number.isFinite(m.avgRating) && m.avgRating > 0
+    ? `<span class="party-avg-pill" title="средний ELO лобби — под эту отметку подбираются пазлы">ср. ELO ${m.avgRating}</span>`
+    : "";
   body.innerHTML = `
     <header class="party-header">
       <h2>🎉 Party — лобби</h2>
-      <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code></p>
+      <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code> ${avgRatingPill}</p>
     </header>
     <ul class="party-members">${memberRows || `<li class="party-empty">Пока никого…</li>`}</ul>
     <section class="party-duration-section">
@@ -6042,11 +6134,16 @@ function _partyRenderScoreboard() {
   const timer = state.party.status === "playing"
     ? _formatPartyTimeLeft(state.party.endsAt)
     : "—";
+  const avgRating = Number.isFinite(state.party.avgRating) ? state.party.avgRating : 0;
+  const avgRatingLine = avgRating > 0
+    ? `<div class="party-side-avg" title="Пазлы подбираются под этот лобби">ср. ELO лобби: <strong>${avgRating}</strong></div>`
+    : "";
   host.innerHTML = `
     <header class="party-side-header">
       <span class="party-side-title">🎉 Party</span>
       <span class="party-side-timer">${timer}</span>
     </header>
+    ${avgRatingLine}
     <ul class="party-side-list">${rows || `<li class="party-empty">…</li>`}</ul>
     <button id="btn-party-leave-side" type="button" class="puzzle-ghost party-side-leave">Выйти из пати</button>
   `;
@@ -6511,6 +6608,1351 @@ function openPartyResultDetail(entry, opts) {
 // Expose so profile rows can call it through inline onclick fallbacks.
 window.openPartyResultDetail = openPartyResultDetail;
 
+// ---------- Daily Puzzle / Puzzle Rush / Opening Trainer ----------
+//
+// All three views share the same board the puzzle view uses. They
+// each install their own move-dispatch handler in `tryFreeplayMove`
+// (legal-mode forced on so drops route through us), wire their own
+// "card" / "actions" / "history" containers in the right sidebar,
+// and persist the user-facing stats via /api/users/* helpers.
+
+const STARTPOS_FEN_FALLBACK = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+function _startposFen() {
+  try { return STARTPOS_FEN; } catch (_) { return STARTPOS_FEN_FALLBACK; }
+}
+
+function _puzzleViewSnapshotFlipped(slot) {
+  if (state[slot].flippedSnapshot === null) {
+    state[slot].flippedSnapshot = state.flipped;
+  }
+}
+function _puzzleViewRestoreFlipped(slot) {
+  if (state[slot].flippedSnapshot !== null
+      && state.flipped !== state[slot].flippedSnapshot) {
+    state.flipped = state[slot].flippedSnapshot;
+  }
+  state[slot].flippedSnapshot = null;
+}
+
+function _puzzleResetBoardCommon() {
+  state.bestArrow = null;
+  state.bestPv = null;
+  state.reviewBadge = null;
+  state.lastMove = null;
+  try { loadFen(_startposFen()); } catch (_) { /* ignore */ }
+  renderBoard();
+}
+
+function _flashSquare(sq, cls) {
+  const cell = boardEl && boardEl.querySelector(`.square[data-square="${sq}"]`);
+  if (!cell) return;
+  cell.classList.add(cls);
+  setTimeout(() => cell.classList.remove(cls), 600);
+}
+
+function _fmtMmSs(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// =================== Daily Puzzle =====================
+
+const DAILY_LS_KEY = "cs.daily.session";
+
+function _loadDailySession() {
+  try {
+    const raw = localStorage.getItem(DAILY_LS_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data && typeof data === "object") {
+      if (typeof data.streak === "number") state.daily.streak = data.streak;
+      if (typeof data.bestStreak === "number") state.daily.bestStreak = data.bestStreak;
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function _saveDailySession() {
+  try {
+    localStorage.setItem(DAILY_LS_KEY, JSON.stringify({
+      streak: state.daily.streak,
+      bestStreak: state.daily.bestStreak,
+    }));
+  } catch (_) { /* ignore */ }
+}
+
+function _hydrateDailyFromUser(u) {
+  if (!u || typeof u !== "object") return;
+  const dp = (u.stats && u.stats.daily_puzzle) || u.daily_puzzle;
+  if (!dp || typeof dp !== "object") return;
+  if (typeof dp.streak === "number")      state.daily.streak = dp.streak;
+  if (typeof dp.best_streak === "number") state.daily.bestStreak = dp.best_streak;
+  if (typeof dp.last_solved_date === "string") {
+    const today = _todayUtcIso();
+    if (dp.last_solved_date === today) state.daily.solvedToday = true;
+  }
+  _saveDailySession();
+}
+
+function _todayUtcIso() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+}
+
+async function enterDailyView() {
+  _puzzleViewSnapshotFlipped("daily");
+  if (!state.legalMode) setBoardMode(true);
+  _loadDailySession();
+  // Always (re)fetch leaderboard.
+  _refreshDailyLeaderboard();
+  if (!state.daily.current) {
+    await _loadDailyPuzzle();
+  } else if (state.daily.active) {
+    // Restore the in-progress board (idempotent).
+    _restoreDailyBoard();
+    renderDailyUi();
+  } else {
+    renderDailyUi();
+  }
+}
+
+function leaveDailyView() {
+  _stopDailyTimer();
+  if (state.daily.pendingNext) {
+    clearTimeout(state.daily.pendingNext);
+    state.daily.pendingNext = null;
+  }
+  _puzzleViewRestoreFlipped("daily");
+  _puzzleResetBoardCommon();
+}
+
+async function _loadDailyPuzzle() {
+  const card = document.getElementById("daily-card");
+  if (card) card.innerHTML = `<div class="puzzle-empty">Загружаем сегодняшний пазл…</div>`;
+  let p;
+  try {
+    p = await api(`/api/daily_puzzle/today`);
+  } catch (err) {
+    if (card) card.innerHTML = `<div class="puzzle-empty">Не удалось загрузить пазл: ${escapeHtml(String(err && err.message || err))}</div>`;
+    return;
+  }
+  state.daily.current = p;
+  state.daily.moves = Array.isArray(p.moves) ? p.moves.slice() : [];
+  state.daily.fenStart = p.fen;
+  state.daily.side = p.side_to_solve || "w";
+  state.daily.active = false;     // user must press Start
+  state.daily.feedback = null;
+  state.daily.attemptsToday = 0;
+  state.daily.startedAt = 0;
+  state.daily.solveMs = 0;
+  state.daily.failed = false;
+  // If the user has a heartbeat that says they already solved today,
+  // preserve solvedToday — otherwise reset.
+  renderDailyUi();
+}
+
+async function _refreshDailyLeaderboard() {
+  try {
+    const r = await api(`/api/daily_puzzle/leaderboard?limit=20`);
+    state.daily.leaderboard = Array.isArray(r.rows) ? r.rows : [];
+  } catch (_) {
+    state.daily.leaderboard = [];
+  }
+  renderDailyLeaderboard();
+}
+
+function _startDailyTimer() {
+  _stopDailyTimer();
+  state.daily.timerHandle = setInterval(_paintDailyTimer, 500);
+  _paintDailyTimer();
+}
+function _stopDailyTimer() {
+  if (state.daily.timerHandle) {
+    clearInterval(state.daily.timerHandle);
+    state.daily.timerHandle = null;
+  }
+}
+function _paintDailyTimer() {
+  const el = document.getElementById("daily-timer-val");
+  if (!el) return;
+  const ms = state.daily.startedAt
+    ? (state.daily.solveMs || (Date.now() - state.daily.startedAt))
+    : 0;
+  el.textContent = _fmtMmSs(ms);
+}
+
+function _restoreDailyBoard() {
+  if (!state.daily.current) return;
+  try { loadFen(state.daily.fenStart); } catch (_) { return; }
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  for (let i = 0; i < state.daily.nextIdx; i++) {
+    const u = state.daily.moves[i];
+    if (!u || u.length < 4) break;
+    try {
+      c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" });
+    } catch { break; }
+  }
+  loadFen(c.fen());
+  const wantFlipped = state.daily.side === "b";
+  if (state.flipped !== wantFlipped) state.flipped = wantFlipped;
+  renderBoard();
+}
+
+function startDailyPuzzle() {
+  if (!state.daily.current) return;
+  state.daily.active = true;
+  state.daily.feedback = null;
+  state.daily.failed = false;
+  state.daily.nextIdx = 0;
+  state.daily.startedAt = 0;
+  state.daily.solveMs = 0;
+  try { loadFen(state.daily.fenStart); } catch (_) { return; }
+  const wantFlipped = state.daily.side === "b";
+  if (state.flipped !== wantFlipped) state.flipped = wantFlipped;
+  renderBoard();
+  renderDailyUi();
+  setTimeout(() => _playDailySetupMove(), 220);
+}
+
+function _playDailySetupMove() {
+  if (!state.daily.active || !state.daily.current) return;
+  const u = state.daily.moves[0];
+  if (!u || u.length < 4) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  let move;
+  try { move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" }); } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.daily.nextIdx = 1;
+  state.daily.startedAt = Date.now();
+  _startDailyTimer();
+  renderDailyUi();
+}
+
+function tryDailyMove(from, to) {
+  if (!state.daily.active) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  const moveTo = freeplayCastlingTarget(c, from, to) || to;
+  let move;
+  try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
+  if (!move) {
+    setStatus("Нелегальный ход.", "error");
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  const playedUci = move.from + move.to + (move.promotion || "");
+  const expected = state.daily.moves[state.daily.nextIdx] || "";
+  const sameMove = playedUci === expected
+    || (expected.length >= 4
+        && playedUci.slice(0, 4) === expected.slice(0, 4)
+        && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
+  if (!sameMove) {
+    try { c.undo(); } catch (_) { /* ignore */ }
+    state.daily.attemptsToday += 1;
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    _flashSquare(move.to, "puzzle-flash-bad");
+    state.daily.feedback = "wrong";
+    renderBoard();
+    renderDailyUi();
+    return;
+  }
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  state.daily.feedback = "correct";
+  state.daily.nextIdx += 1;
+  renderBoard();
+  renderDailyUi();
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
+  _flashSquare(move.to, "puzzle-flash-ok");
+  if (state.daily.nextIdx >= state.daily.moves.length) {
+    finalizeDailyPuzzle("solved");
+    return;
+  }
+  setTimeout(() => _playDailyOpponentReply(), 220);
+}
+
+function _playDailyOpponentReply() {
+  if (!state.daily.active) return;
+  const u = state.daily.moves[state.daily.nextIdx];
+  if (!u || u.length < 4) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  let move;
+  try { move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" }); } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.daily.nextIdx += 1;
+  state.daily.feedback = null;
+  renderDailyUi();
+  if (state.daily.nextIdx >= state.daily.moves.length) {
+    finalizeDailyPuzzle("solved");
+  }
+}
+
+async function finalizeDailyPuzzle(result) {
+  state.daily.active = false;
+  _stopDailyTimer();
+  state.daily.solveMs = state.daily.startedAt ? (Date.now() - state.daily.startedAt) : 0;
+  if (result === "solved") {
+    state.daily.solvedToday = true;
+    state.daily.feedback = "solved";
+    spawnPuzzleCelebration("ok");
+  } else {
+    state.daily.failed = true;
+    state.daily.feedback = "shown";
+    spawnPuzzleCelebration("bad");
+  }
+  renderDailyUi();
+  // Submit to backend.
+  const u = state.user;
+  if (u && u.client_id && state.daily.current) {
+    try {
+      const updated = await api(`/api/daily_puzzle/attempt`, {
+        method: "POST",
+        body: JSON.stringify({
+          client_id: u.client_id,
+          date: state.daily.current.date || _todayUtcIso(),
+          puzzle_id: String(state.daily.current.id || ""),
+          outcome: result === "solved" ? "solved" : "failed",
+          solve_ms: state.daily.solveMs,
+        }),
+      });
+      _hydrateDailyFromUser(updated);
+    } catch (_) { /* ignore */ }
+  }
+  _refreshDailyLeaderboard();
+  renderDailyUi();
+}
+
+function _surrenderDailyPuzzle() {
+  if (!state.daily.active) return;
+  finalizeDailyPuzzle("failed");
+}
+
+function renderDailyUi() {
+  renderDailyStatsBar();
+  renderDailyLeaderboard();
+  const card = document.getElementById("daily-card");
+  const actions = document.getElementById("daily-actions");
+  if (!card || !actions) return;
+  const p = state.daily.current;
+  if (!p) {
+    card.innerHTML = `<div class="puzzle-empty">Загружаем сегодняшний пазл…</div>`;
+    actions.innerHTML = "";
+    return;
+  }
+  const themes = (p.themes_ru || p.themes || []).slice(0, 4)
+    .map((t) => `<span class="puzzle-theme-pill">${escapeHtml(t)}</span>`).join("");
+  const sideTxt = state.daily.side === "b" ? "чёрные" : "белые";
+  let banner = "";
+  if (state.daily.feedback === "solved") {
+    banner = `<div class="puzzle-banner puzzle-banner-ok">Решено! Вернись завтра — будет новый пазл.</div>`;
+  } else if (state.daily.feedback === "shown") {
+    banner = `<div class="puzzle-banner puzzle-banner-bad">Не получилось. Попробуй вернуться завтра.</div>`;
+  } else if (state.daily.feedback === "wrong") {
+    banner = `<div class="puzzle-banner puzzle-banner-bad">Неверно. Попробуй ещё.</div>`;
+  } else if (state.daily.feedback === "correct") {
+    banner = `<div class="puzzle-banner puzzle-banner-ok">Хороший ход!</div>`;
+  }
+  card.innerHTML = `
+    <div class="puzzle-meta">
+      <div class="puzzle-id">Daily · ${escapeHtml(p.date || _todayUtcIso())}</div>
+      <div class="puzzle-rating">★ ${p.rating || "—"}</div>
+    </div>
+    <div class="puzzle-themes">${themes}</div>
+    <div class="puzzle-side">Ход за <b>${sideTxt}</b>.</div>
+    ${banner}
+  `;
+  if (!state.daily.active && !state.daily.solvedToday && !state.daily.failed) {
+    actions.innerHTML = `<button id="btn-daily-start" type="button" class="puzzle-primary">Начать</button>`;
+    const btn = document.getElementById("btn-daily-start");
+    if (btn) btn.onclick = startDailyPuzzle;
+  } else if (state.daily.active) {
+    actions.innerHTML = `<button id="btn-daily-give-up" type="button" class="puzzle-secondary">Сдаться</button>`;
+    const btn = document.getElementById("btn-daily-give-up");
+    if (btn) btn.onclick = _surrenderDailyPuzzle;
+  } else {
+    actions.innerHTML = `<button id="btn-daily-replay" type="button" class="puzzle-secondary" disabled>Завтра новый пазл</button>`;
+  }
+}
+
+function renderDailyStatsBar() {
+  const host = document.getElementById("daily-stats-bar");
+  if (!host) return;
+  const ms = state.daily.startedAt
+    ? (state.daily.solveMs || (Date.now() - state.daily.startedAt))
+    : 0;
+  host.innerHTML = `
+    <div class="ps-block ps-streak">
+      <span class="ps-label">Серия дней</span>
+      <span class="ps-val ${state.daily.streak >= 3 ? "ok" : ""}">🔥 ${state.daily.streak}</span>
+    </div>
+    <div class="ps-divider"></div>
+    <div class="ps-block">
+      <span class="ps-label">Лучший</span>
+      <span class="ps-val">${state.daily.bestStreak}</span>
+    </div>
+    <div class="ps-divider"></div>
+    <div class="ps-block ps-timer">
+      <span class="ps-label">Время</span>
+      <span class="ps-val" id="daily-timer-val">${_fmtMmSs(ms)}</span>
+    </div>
+  `;
+}
+
+function renderDailyLeaderboard() {
+  const host = document.getElementById("daily-leaderboard");
+  if (!host) return;
+  const rows = state.daily.leaderboard || [];
+  if (!rows.length) {
+    host.innerHTML = `<div class="puzzle-empty">Пока никто не решил. Будь первым!</div>`;
+    return;
+  }
+  const items = rows.slice(0, 20).map((r, i) => {
+    const av = escapeHtml(r.avatar || "♟");
+    const nick = escapeHtml(r.nickname || "Гость");
+    const ms = typeof r.solve_ms === "number" ? r.solve_ms : 0;
+    const att = typeof r.attempts === "number" ? r.attempts : 0;
+    const tag = att <= 1 ? "" : ` <span class="muted">×${att}</span>`;
+    return `<div class="lb-row">
+      <span class="lb-rank">${i + 1}</span>
+      <span class="lb-av">${av}</span>
+      <span class="lb-nick">${nick}</span>
+      <span class="lb-time">${_fmtMmSs(ms)}${tag}</span>
+    </div>`;
+  }).join("");
+  host.innerHTML = `<div class="lb-title">Лидерборд сегодня</div>${items}`;
+}
+
+// =================== Puzzle Rush =====================
+
+const RUSH_LS_KEY = "cs.rush.session";
+const RUSH_FETCH_BATCH = 6; // pre-fetch this many at a time
+
+function _loadRushSession() {
+  try {
+    const raw = localStorage.getItem(RUSH_LS_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data && typeof data === "object") {
+      if (data.bestEver && typeof data.bestEver === "object") {
+        state.rush.bestEver = { ...state.rush.bestEver, ...data.bestEver };
+      }
+      if (data.bestToday && typeof data.bestToday === "object" && data.bestToday._date === _todayUtcIso()) {
+        const { _date, ...vals } = data.bestToday;
+        state.rush.bestToday = { ...state.rush.bestToday, ...vals };
+      }
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function _saveRushSession() {
+  try {
+    localStorage.setItem(RUSH_LS_KEY, JSON.stringify({
+      bestEver: state.rush.bestEver,
+      bestToday: { ...state.rush.bestToday, _date: _todayUtcIso() },
+    }));
+  } catch (_) { /* ignore */ }
+}
+
+function _hydrateRushFromUser(u) {
+  if (!u || typeof u !== "object") return;
+  const pr = (u.stats && u.stats.puzzle_rush) || u.puzzle_rush;
+  if (!pr || typeof pr !== "object") return;
+  const today = _todayUtcIso();
+  for (const m of ["180", "300", "survival"]) {
+    const slot = pr[m];
+    if (slot && typeof slot === "object") {
+      if (typeof slot.best_ever === "number") {
+        state.rush.bestEver[m] = Math.max(state.rush.bestEver[m] || 0, slot.best_ever);
+      }
+      if (typeof slot.best_today === "number" && slot.best_today_date === today) {
+        state.rush.bestToday[m] = Math.max(state.rush.bestToday[m] || 0, slot.best_today);
+      }
+    }
+  }
+  _saveRushSession();
+}
+
+const RUSH_MODE_LABEL = { "180": "3 минуты", "300": "5 минут", "survival": "Survival" };
+
+async function enterRushView() {
+  _puzzleViewSnapshotFlipped("rush");
+  if (!state.legalMode) setBoardMode(true);
+  _loadRushSession();
+  _refreshRushLeaderboard();
+  if (!state.rush.active && !state.rush.finished) {
+    renderRushUi();
+  } else if (state.rush.active && state.rush.current) {
+    _restoreRushBoard();
+    renderRushUi();
+    _startRushTimer();
+  } else {
+    renderRushUi();
+  }
+}
+
+function leaveRushView() {
+  _stopRushTimer();
+  _puzzleViewRestoreFlipped("rush");
+  _puzzleResetBoardCommon();
+}
+
+function _resetRushSession() {
+  _stopRushTimer();
+  state.rush.active = false;
+  state.rush.finished = false;
+  state.rush.finishReason = null;
+  state.rush.score = 0;
+  state.rush.mistakes = 0;
+  state.rush.queue = [];
+  state.rush.fetchedTotal = 0;
+  state.rush.current = null;
+  state.rush.moves = [];
+  state.rush.nextIdx = 0;
+  state.rush.side = null;
+  state.rush.fenStart = null;
+  state.rush.startedAt = 0;
+  state.rush.deadlineAt = 0;
+  state.rush.durationSec = 0;
+  state.rush.history = [];
+  state.rush.sessionId = null;
+  state.rush.mode = null;
+}
+
+async function startRush(mode) {
+  if (!["180", "300", "survival"].includes(mode)) return;
+  _resetRushSession();
+  state.rush.mode = mode;
+  state.rush.durationSec = mode === "180" ? 180 : (mode === "300" ? 300 : 0);
+  state.rush.deadlineAt = state.rush.durationSec ? (Date.now() + state.rush.durationSec * 1000) : 0;
+  state.rush.startedAt = Date.now();
+  state.rush.active = true;
+  // Notify backend (best-effort) for session id and bookkeeping.
+  const u = state.user;
+  if (u && u.client_id) {
+    try {
+      const r = await api(`/api/puzzle_rush/start`, {
+        method: "POST",
+        body: JSON.stringify({
+          client_id: u.client_id,
+          mode: mode === "180" ? "3min" : (mode === "300" ? "5min" : "survival"),
+        }),
+      });
+      if (r && r.session_id) state.rush.sessionId = r.session_id;
+    } catch (_) { /* ignore */ }
+  }
+  renderRushUi();
+  await _refillRushQueue();
+  _startRushTimer();
+  _serveNextRushPuzzle();
+}
+
+async function _refillRushQueue() {
+  if (state.rush.queue.length >= 2) return;
+  const params = new URLSearchParams();
+  params.set("min_rating", "800");
+  params.set("max_rating", "2400");
+  params.set("count", String(RUSH_FETCH_BATCH));
+  try {
+    const r = await api(`/api/puzzle/random?${params.toString()}`);
+    let arr;
+    if (Array.isArray(r)) arr = r;
+    else if (r && Array.isArray(r.puzzles)) arr = r.puzzles;
+    else if (r && typeof r === "object") arr = [r];
+    else arr = [];
+    for (const p of arr) {
+      if (p && p.fen && Array.isArray(p.moves) && p.moves.length >= 2) {
+        state.rush.queue.push(p);
+        state.rush.fetchedTotal += 1;
+      }
+    }
+  } catch (_) { /* ignore */ }
+  // If the API doesn't support count param, fall back to single-fetch loop.
+  if (state.rush.queue.length === 0) {
+    for (let i = 0; i < 2; i++) {
+      try {
+        const p = await api(`/api/puzzle/random?min_rating=800&max_rating=2400`);
+        if (p && p.fen && Array.isArray(p.moves) && p.moves.length >= 2) {
+          state.rush.queue.push(p);
+          state.rush.fetchedTotal += 1;
+        }
+      } catch (_) { /* ignore */ }
+    }
+  }
+}
+
+function _serveNextRushPuzzle() {
+  if (!state.rush.active) return;
+  if (state.rush.queue.length === 0) {
+    // Fetch and try again.
+    _refillRushQueue().then(() => _serveNextRushPuzzle());
+    return;
+  }
+  const p = state.rush.queue.shift();
+  // Pre-fetch the next batch in the background as we go.
+  if (state.rush.queue.length < 2) {
+    _refillRushQueue();
+  }
+  state.rush.current = p;
+  state.rush.moves = p.moves.slice();
+  state.rush.fenStart = p.fen;
+  state.rush.side = p.side_to_solve || "w";
+  state.rush.nextIdx = 0;
+  try { loadFen(p.fen); } catch (_) { return; }
+  const wantFlipped = state.rush.side === "b";
+  if (state.flipped !== wantFlipped) state.flipped = wantFlipped;
+  renderBoard();
+  renderRushUi();
+  setTimeout(() => _playRushSetupMove(), 200);
+}
+
+function _playRushSetupMove() {
+  if (!state.rush.active || !state.rush.current) return;
+  const u = state.rush.moves[0];
+  if (!u || u.length < 4) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  let move;
+  try { move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" }); } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.rush.nextIdx = 1;
+}
+
+function _restoreRushBoard() {
+  if (!state.rush.current) return;
+  try { loadFen(state.rush.fenStart); } catch (_) { return; }
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  for (let i = 0; i < state.rush.nextIdx; i++) {
+    const u = state.rush.moves[i];
+    if (!u || u.length < 4) break;
+    try { c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" }); } catch { break; }
+  }
+  loadFen(c.fen());
+  renderBoard();
+}
+
+function tryRushMove(from, to) {
+  if (!state.rush.active || !state.rush.current) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  const moveTo = freeplayCastlingTarget(c, from, to) || to;
+  let move;
+  try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
+  if (!move) {
+    setStatus("Нелегальный ход.", "error");
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  const playedUci = move.from + move.to + (move.promotion || "");
+  const expected = state.rush.moves[state.rush.nextIdx] || "";
+  const sameMove = playedUci === expected
+    || (expected.length >= 4
+        && playedUci.slice(0, 4) === expected.slice(0, 4)
+        && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
+  if (!sameMove) {
+    try { c.undo(); } catch (_) { /* ignore */ }
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    _flashSquare(move.to, "puzzle-flash-bad");
+    state.rush.mistakes += 1;
+    state.rush.history.unshift({
+      id: state.rush.current.id,
+      rating: state.rush.current.rating,
+      outcome: "failed",
+      solveMs: 0,
+    });
+    _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
+    renderBoard();
+    if (state.rush.mistakes >= state.rush.maxMistakes) {
+      finishRush("mistakes");
+      return;
+    }
+    renderRushUi();
+    // Move on to next puzzle.
+    setTimeout(() => _serveNextRushPuzzle(), 380);
+    return;
+  }
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  state.rush.nextIdx += 1;
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
+  _flashSquare(move.to, "puzzle-flash-ok");
+  if (state.rush.nextIdx >= state.rush.moves.length) {
+    state.rush.score += 1;
+    state.rush.history.unshift({
+      id: state.rush.current.id,
+      rating: state.rush.current.rating,
+      outcome: "solved",
+      solveMs: 0,
+    });
+    _reportRushAttempt({ outcome: "solved", solve_ms: 0 });
+    renderRushUi();
+    setTimeout(() => _serveNextRushPuzzle(), 280);
+    return;
+  }
+  // Forced opponent reply.
+  setTimeout(() => _playRushOpponentReply(), 180);
+}
+
+function _playRushOpponentReply() {
+  if (!state.rush.active) return;
+  const u = state.rush.moves[state.rush.nextIdx];
+  if (!u || u.length < 4) return;
+  const c = ensureFreeplayChess();
+  if (!c) return;
+  let move;
+  try { move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" }); } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.rush.nextIdx += 1;
+  if (state.rush.nextIdx >= state.rush.moves.length) {
+    state.rush.score += 1;
+    state.rush.history.unshift({
+      id: state.rush.current.id,
+      rating: state.rush.current.rating,
+      outcome: "solved",
+      solveMs: 0,
+    });
+    _reportRushAttempt({ outcome: "solved", solve_ms: 0 });
+    renderRushUi();
+    setTimeout(() => _serveNextRushPuzzle(), 220);
+  }
+}
+
+async function _reportRushAttempt({ outcome, solve_ms }) {
+  const u = state.user;
+  if (!u || !u.client_id || !state.rush.sessionId || !state.rush.current) return;
+  try {
+    await api(`/api/puzzle_rush/attempt`, {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: state.rush.sessionId,
+        client_id: u.client_id,
+        puzzle_id: String(state.rush.current.id || ""),
+        outcome,
+        solve_ms: solve_ms || 0,
+      }),
+    });
+  } catch (_) { /* ignore */ }
+}
+
+function _startRushTimer() {
+  _stopRushTimer();
+  state.rush.timerHandle = setInterval(_paintRushTimer, 250);
+  _paintRushTimer();
+}
+function _stopRushTimer() {
+  if (state.rush.timerHandle) {
+    clearInterval(state.rush.timerHandle);
+    state.rush.timerHandle = null;
+  }
+}
+function _paintRushTimer() {
+  if (!state.rush.active) return;
+  if (state.rush.deadlineAt && Date.now() >= state.rush.deadlineAt) {
+    finishRush("time");
+    return;
+  }
+  const el = document.getElementById("rush-timer-val");
+  if (!el) return;
+  if (state.rush.deadlineAt) {
+    el.textContent = _fmtMmSs(Math.max(0, state.rush.deadlineAt - Date.now()));
+  } else if (state.rush.startedAt) {
+    el.textContent = _fmtMmSs(Date.now() - state.rush.startedAt);
+  }
+}
+
+async function finishRush(reason) {
+  if (state.rush.finished) return;
+  state.rush.finished = true;
+  state.rush.active = false;
+  state.rush.finishReason = reason || "user-stop";
+  _stopRushTimer();
+  // Update best counters.
+  const m = state.rush.mode;
+  if (m) {
+    state.rush.bestToday[m] = Math.max(state.rush.bestToday[m] || 0, state.rush.score);
+    state.rush.bestEver[m]  = Math.max(state.rush.bestEver[m]  || 0, state.rush.score);
+    _saveRushSession();
+  }
+  // Finalize on backend.
+  const u = state.user;
+  if (u && u.client_id && state.rush.sessionId) {
+    try {
+      const r = await api(`/api/puzzle_rush/finalize`, {
+        method: "POST",
+        body: JSON.stringify({
+          session_id: state.rush.sessionId,
+          client_id: u.client_id,
+        }),
+      });
+      _hydrateRushFromUser(r && r.user ? r.user : r);
+    } catch (_) { /* ignore */ }
+  }
+  spawnPuzzleCelebration(state.rush.score > 0 ? "ok" : "bad");
+  _refreshRushLeaderboard();
+  renderRushUi();
+}
+
+async function _refreshRushLeaderboard() {
+  const m = state.rush.leaderboardMode;
+  const period = state.rush.leaderboardScope;
+  const apiMode = m === "180" ? "3min" : (m === "300" ? "5min" : "survival");
+  try {
+    const r = await api(`/api/puzzle_rush/leaderboard?mode=${apiMode}&period=${period}&limit=20`);
+    state.rush.leaderboard[m] = Array.isArray(r.rows) ? r.rows : [];
+  } catch (_) {
+    state.rush.leaderboard[m] = [];
+  }
+  renderRushLeaderboard();
+}
+
+function renderRushUi() {
+  renderRushStatsBar();
+  renderRushHistory();
+  renderRushLeaderboard();
+  const card = document.getElementById("rush-card");
+  const actions = document.getElementById("rush-actions");
+  if (!card || !actions) return;
+  if (!state.rush.mode || (!state.rush.active && !state.rush.finished)) {
+    // Mode picker.
+    card.innerHTML = `
+      <div class="rush-pick">
+        <h3>Выбери режим</h3>
+        <div class="rush-pick-grid">
+          <button type="button" class="rush-mode-btn" data-mode="180">
+            <span class="rush-mode-label">3 минуты</span>
+            <span class="rush-mode-sub">Best today: ${state.rush.bestToday["180"] || 0} · OAT: ${state.rush.bestEver["180"] || 0}</span>
+          </button>
+          <button type="button" class="rush-mode-btn" data-mode="300">
+            <span class="rush-mode-label">5 минут</span>
+            <span class="rush-mode-sub">Best today: ${state.rush.bestToday["300"] || 0} · OAT: ${state.rush.bestEver["300"] || 0}</span>
+          </button>
+          <button type="button" class="rush-mode-btn" data-mode="survival">
+            <span class="rush-mode-label">Survival</span>
+            <span class="rush-mode-sub">До 3 ошибок · OAT: ${state.rush.bestEver["survival"] || 0}</span>
+          </button>
+        </div>
+        <p class="muted">3 ошибки — конец сессии. Лидерборд: лучший рекорд за сегодня и за всё время.</p>
+      </div>
+    `;
+    actions.innerHTML = "";
+    card.querySelectorAll(".rush-mode-btn").forEach((b) => {
+      b.onclick = () => startRush(b.dataset.mode);
+    });
+    return;
+  }
+  if (state.rush.finished) {
+    const reasonTxt = state.rush.finishReason === "time"
+      ? "Время вышло."
+      : state.rush.finishReason === "mistakes"
+      ? "Достигнут предел ошибок."
+      : "Сессия завершена.";
+    card.innerHTML = `
+      <div class="rush-result">
+        <h3>Результат: ${state.rush.score}</h3>
+        <p class="muted">${reasonTxt} Режим: ${RUSH_MODE_LABEL[state.rush.mode]}.</p>
+        <div class="rush-bests">
+          <span>Best today: <b>${state.rush.bestToday[state.rush.mode] || 0}</b></span>
+          <span>OAT: <b>${state.rush.bestEver[state.rush.mode] || 0}</b></span>
+        </div>
+      </div>
+    `;
+    actions.innerHTML = `
+      <button id="btn-rush-restart" type="button" class="puzzle-primary">Ещё раз</button>
+      <button id="btn-rush-pick" type="button" class="puzzle-secondary">Сменить режим</button>
+    `;
+    document.getElementById("btn-rush-restart").onclick = () => startRush(state.rush.mode);
+    document.getElementById("btn-rush-pick").onclick = () => { _resetRushSession(); renderRushUi(); };
+    return;
+  }
+  const p = state.rush.current;
+  card.innerHTML = `
+    <div class="rush-running">
+      <div class="puzzle-meta">
+        <div class="puzzle-id">Rush · ${escapeHtml(RUSH_MODE_LABEL[state.rush.mode])}</div>
+        <div class="puzzle-rating">★ ${p ? (p.rating || "—") : "—"}</div>
+      </div>
+      <div class="rush-stats">
+        <span>Решено: <b>${state.rush.score}</b></span>
+        <span>Ошибки: <b class="${state.rush.mistakes >= 2 ? "rush-bad" : ""}">${state.rush.mistakes}/${state.rush.maxMistakes}</b></span>
+      </div>
+    </div>
+  `;
+  actions.innerHTML = `<button id="btn-rush-stop" type="button" class="puzzle-secondary">Стоп</button>`;
+  const stop = document.getElementById("btn-rush-stop");
+  if (stop) stop.onclick = () => finishRush("user-stop");
+}
+
+function renderRushStatsBar() {
+  const host = document.getElementById("rush-stats-bar");
+  if (!host) return;
+  const remain = state.rush.deadlineAt ? Math.max(0, state.rush.deadlineAt - Date.now()) : 0;
+  const elapsed = state.rush.startedAt ? (Date.now() - state.rush.startedAt) : 0;
+  const t = state.rush.deadlineAt ? remain : elapsed;
+  host.innerHTML = `
+    <div class="ps-block">
+      <span class="ps-label">Решено</span>
+      <span class="ps-val">${state.rush.score}</span>
+    </div>
+    <div class="ps-divider"></div>
+    <div class="ps-block">
+      <span class="ps-label">Ошибки</span>
+      <span class="ps-val ${state.rush.mistakes >= 2 ? "bad" : ""}">${state.rush.mistakes}/${state.rush.maxMistakes}</span>
+    </div>
+    <div class="ps-divider"></div>
+    <div class="ps-block ps-timer">
+      <span class="ps-label">${state.rush.deadlineAt ? "Осталось" : "Время"}</span>
+      <span class="ps-val" id="rush-timer-val">${_fmtMmSs(t)}</span>
+    </div>
+  `;
+}
+
+function renderRushHistory() {
+  const host = document.getElementById("rush-history");
+  if (!host) return;
+  const items = state.rush.history.slice(0, 12);
+  if (!items.length) { host.innerHTML = ""; return; }
+  host.innerHTML = items.map((h) => {
+    const cls = h.outcome === "solved" ? "h-ok" : "h-bad";
+    const glyph = h.outcome === "solved" ? "✓" : "✕";
+    return `<span class="puzzle-history-pill ${cls}" title="#${escapeHtml(String(h.id))} · ${h.rating || "—"}">${glyph} ${h.rating || "—"}</span>`;
+  }).join("");
+}
+
+function renderRushLeaderboard() {
+  const host = document.getElementById("rush-leaderboard");
+  if (!host) return;
+  const m = state.rush.leaderboardMode;
+  const rows = state.rush.leaderboard[m] || [];
+  const tabs = ["180", "300", "survival"].map((mm) => {
+    const active = mm === m ? " is-active" : "";
+    return `<button type="button" class="lb-tab${active}" data-mode="${mm}">${RUSH_MODE_LABEL[mm]}</button>`;
+  }).join("");
+  const scope = state.rush.leaderboardScope;
+  const scopeTabs = ["today", "alltime"].map((s) => {
+    const active = s === scope ? " is-active" : "";
+    return `<button type="button" class="lb-tab${active}" data-scope="${s}">${s === "today" ? "Сегодня" : "Все время"}</button>`;
+  }).join("");
+  let body;
+  if (!rows.length) {
+    body = `<div class="puzzle-empty">Лидерборд пуст. Сыграй первым!</div>`;
+  } else {
+    body = rows.slice(0, 20).map((r, i) => {
+      const av = escapeHtml(r.avatar || "♟");
+      const nick = escapeHtml(r.nickname || "Гость");
+      const score = r.score != null ? r.score : (r.best || 0);
+      return `<div class="lb-row">
+        <span class="lb-rank">${i + 1}</span>
+        <span class="lb-av">${av}</span>
+        <span class="lb-nick">${nick}</span>
+        <span class="lb-score">${score}</span>
+      </div>`;
+    }).join("");
+  }
+  host.innerHTML = `
+    <div class="lb-title">Лидерборд</div>
+    <div class="lb-tabs">${tabs}</div>
+    <div class="lb-tabs lb-tabs-scope">${scopeTabs}</div>
+    ${body}
+  `;
+  host.querySelectorAll(".lb-tab[data-mode]").forEach((b) => {
+    b.onclick = () => { state.rush.leaderboardMode = b.dataset.mode; _refreshRushLeaderboard(); };
+  });
+  host.querySelectorAll(".lb-tab[data-scope]").forEach((b) => {
+    b.onclick = () => { state.rush.leaderboardScope = b.dataset.scope; _refreshRushLeaderboard(); };
+  });
+}
+
+// =================== Opening Trainer =====================
+
+const OPENING_LS_KEY = "cs.opening.session";
+
+function _loadOpeningSession() {
+  try {
+    const raw = localStorage.getItem(OPENING_LS_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data && typeof data === "object" && data.mastery) {
+      state.opening.mastery = { ...data.mastery };
+    }
+  } catch (_) { /* ignore */ }
+}
+function _saveOpeningSession() {
+  try {
+    localStorage.setItem(OPENING_LS_KEY, JSON.stringify({
+      mastery: state.opening.mastery,
+    }));
+  } catch (_) { /* ignore */ }
+}
+function _hydrateOpeningFromUser(u) {
+  if (!u || typeof u !== "object") return;
+  const ot = (u.stats && u.stats.opening_trainer) || u.opening_trainer;
+  if (!ot || typeof ot !== "object") return;
+  for (const [k, v] of Object.entries(ot)) {
+    if (v && typeof v === "object") {
+      state.opening.mastery[k] = { ...state.opening.mastery[k], ...v };
+    }
+  }
+  _saveOpeningSession();
+}
+
+async function enterOpeningView() {
+  _puzzleViewSnapshotFlipped("opening");
+  if (!state.legalMode) setBoardMode(true);
+  _loadOpeningSession();
+  if (!state.opening.catalog.length) {
+    try {
+      const r = await api(`/api/opening_trainer/list`);
+      state.opening.catalog = Array.isArray(r.openings) ? r.openings : [];
+    } catch (_) {
+      state.opening.catalog = [];
+    }
+  }
+  _resetOpeningBoard();
+  renderOpeningUi();
+}
+
+function leaveOpeningView() {
+  _puzzleViewRestoreFlipped("opening");
+  _puzzleResetBoardCommon();
+}
+
+function _selectedOpening() {
+  return state.opening.catalog.find((o) => o.id === state.opening.selectedId) || null;
+}
+function _selectedOpeningLine() {
+  const op = _selectedOpening();
+  if (!op || !Array.isArray(op.lines)) return null;
+  return op.lines.find((l) => l.id === state.opening.selectedLineId)
+    || op.lines[0] || null;
+}
+
+function _resetOpeningBoard() {
+  state.opening.chess = null;
+  state.opening.moveIdx = 0;
+  state.opening.feedback = null;
+  state.opening.coachMsg = "";
+  try { loadFen(_startposFen()); } catch (_) { /* ignore */ }
+  state.lastMove = null;
+  renderBoard();
+}
+
+function selectOpening(openingId, lineId) {
+  state.opening.selectedId = openingId;
+  state.opening.selectedLineId = lineId || null;
+  state.opening.active = false;
+  _resetOpeningBoard();
+  // Auto-flip board if line is for black.
+  const op = _selectedOpening();
+  if (op && op.color === "black") {
+    if (!state.flipped) { state.flipped = true; renderBoard(); }
+  } else {
+    if (state.flipped) { state.flipped = false; renderBoard(); }
+  }
+  renderOpeningUi();
+}
+
+function setOpeningMode(mode) {
+  state.opening.mode = mode;
+  if (mode === "practice") {
+    startOpeningPractice();
+  } else {
+    state.opening.active = false;
+    _resetOpeningBoard();
+    renderOpeningUi();
+  }
+}
+
+function startOpeningPractice() {
+  const line = _selectedOpeningLine();
+  if (!line) return;
+  state.opening.chess = new Chess();
+  state.opening.moveIdx = 0;
+  state.opening.feedback = null;
+  state.opening.coachMsg = "Сделай первый ход по теории дебюта.";
+  state.opening.active = true;
+  try { loadFen(state.opening.chess.fen()); } catch (_) { /* ignore */ }
+  state.lastMove = null;
+  renderBoard();
+  // If the line starts with the opponent's move, play it for them.
+  const op = _selectedOpening();
+  if (op && op.color === "black") {
+    setTimeout(() => _playOpeningOpponentMove(), 280);
+  }
+  renderOpeningUi();
+}
+
+function _playOpeningOpponentMove() {
+  if (!state.opening.active) return;
+  const line = _selectedOpeningLine();
+  if (!line) return;
+  if (state.opening.moveIdx >= line.moves.length) {
+    _completeOpeningLine();
+    return;
+  }
+  const expectedSan = line.moves[state.opening.moveIdx];
+  const c = state.opening.chess;
+  if (!c) return;
+  let move;
+  try { move = c.move(expectedSan, { sloppy: true }); } catch { move = null; }
+  if (!move) return;
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  state.opening.moveIdx += 1;
+  state.opening.coachMsg = `Соперник: ${move.san}. Твой ход.`;
+  if (state.opening.moveIdx >= line.moves.length) {
+    _completeOpeningLine();
+  }
+  renderOpeningUi();
+}
+
+function tryOpeningMove(from, to) {
+  if (!state.opening.active || !state.opening.chess) {
+    setStatus("Нажми Практика чтобы начать.", "error");
+    return;
+  }
+  const c = state.opening.chess;
+  const moveTo = freeplayCastlingTarget(c, from, to) || to;
+  let move;
+  try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
+  if (!move) {
+    setStatus("Нелегальный ход.", "error");
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  const line = _selectedOpeningLine();
+  const expected = line && line.moves[state.opening.moveIdx];
+  // Compare via SAN (allow chess.js to normalise).
+  if (!expected || move.san !== expected) {
+    // Wrong move.
+    try { c.undo(); } catch (_) { /* ignore */ }
+    state.opening.feedback = "wrong";
+    state.opening.coachMsg = expected
+      ? `Не лучший ход. По теории здесь: ${expected}.`
+      : `Линия закончилась.`;
+    _flashSquare(move.to, "puzzle-flash-bad");
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    _reportOpeningAttempt(false, false);
+    renderOpeningUi();
+    return;
+  }
+  // Correct.
+  loadFen(c.fen());
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
+  _flashSquare(move.to, "puzzle-flash-ok");
+  state.opening.moveIdx += 1;
+  state.opening.feedback = "correct";
+  state.opening.coachMsg = `Верно: ${move.san}.`;
+  if (state.opening.moveIdx >= line.moves.length) {
+    _completeOpeningLine();
+    return;
+  }
+  // Opponent reply.
+  setTimeout(() => _playOpeningOpponentMove(), 280);
+}
+
+function _completeOpeningLine() {
+  state.opening.active = false;
+  state.opening.feedback = "complete";
+  state.opening.coachMsg = "Линия пройдена! Отличная работа.";
+  spawnPuzzleCelebration("ok");
+  _reportOpeningAttempt(true, true);
+  renderOpeningUi();
+}
+
+async function _reportOpeningAttempt(correct, lineCompleted) {
+  const u = state.user;
+  if (!u || !u.client_id) return;
+  const op = _selectedOpening();
+  const line = _selectedOpeningLine();
+  if (!op || !line) return;
+  const ply = state.opening.moveIdx;
+  try {
+    const san = (line.moves[Math.max(0, ply - 1)] || "");
+    const r = await api(`/api/opening_trainer/attempt`, {
+      method: "POST",
+      body: JSON.stringify({
+        client_id: u.client_id,
+        opening_id: op.id,
+        ply,
+        san,
+      }),
+    });
+    if (r && r.user) _hydrateOpeningFromUser(r.user);
+  } catch (_) { /* ignore */ }
+  // Local mastery counter.
+  const key = `${op.id}:${line.id}`;
+  const m = state.opening.mastery[key] || { plays: 0, correct: 0, completed: 0 };
+  m.plays += 1;
+  if (correct) m.correct += 1;
+  if (lineCompleted) m.completed = (m.completed || 0) + 1;
+  state.opening.mastery[key] = m;
+  _saveOpeningSession();
+}
+
+function renderOpeningUi() {
+  const card = document.getElementById("opening-card");
+  const actions = document.getElementById("opening-actions");
+  const stats = document.getElementById("opening-stats-bar");
+  const hist = document.getElementById("opening-history");
+  if (!card || !actions || !stats) return;
+  const op = _selectedOpening();
+  const line = _selectedOpeningLine();
+  // Stats bar — total plays + completed lines.
+  let totalPlays = 0, totalCompleted = 0;
+  for (const v of Object.values(state.opening.mastery)) {
+    if (v && typeof v === "object") {
+      totalPlays += (v.plays || 0);
+      totalCompleted += (v.completed || 0);
+    }
+  }
+  stats.innerHTML = `
+    <div class="ps-block">
+      <span class="ps-label">Дебютов</span>
+      <span class="ps-val">${state.opening.catalog.length}</span>
+    </div>
+    <div class="ps-divider"></div>
+    <div class="ps-block">
+      <span class="ps-label">Попыток</span>
+      <span class="ps-val">${totalPlays}</span>
+    </div>
+    <div class="ps-divider"></div>
+    <div class="ps-block">
+      <span class="ps-label">Линий пройдено</span>
+      <span class="ps-val ok">${totalCompleted}</span>
+    </div>
+  `;
+  if (!state.opening.catalog.length) {
+    card.innerHTML = `<div class="puzzle-empty">Каталог дебютов пуст.</div>`;
+    actions.innerHTML = "";
+    if (hist) hist.innerHTML = "";
+    return;
+  }
+  // Catalog list.
+  const catalog = state.opening.catalog.map((o) => {
+    const cls = o.id === state.opening.selectedId ? " is-active" : "";
+    const colorTag = o.color === "black" ? "♚" : "♔";
+    return `<button type="button" class="opening-cat-item${cls}" data-id="${escapeHtml(o.id)}">
+      <span class="opening-color">${colorTag}</span>
+      <span class="opening-name">${escapeHtml(o.name)}</span>
+      <span class="opening-eco">${escapeHtml(o.eco || "")}</span>
+    </button>`;
+  }).join("");
+  let body = "";
+  if (!op) {
+    body = `<div class="puzzle-empty">Выбери дебют слева, чтобы начать.</div>`;
+  } else {
+    const linesHtml = (op.lines || []).map((ln) => {
+      const cls = ln.id === (line && line.id) ? " is-active" : "";
+      const key = `${op.id}:${ln.id}`;
+      const m = state.opening.mastery[key];
+      const masteryTxt = m
+        ? `<span class="opening-mastery">${m.correct || 0}/${m.plays || 0}${m.completed ? ` · ✓${m.completed}` : ""}</span>`
+        : "";
+      return `<button type="button" class="opening-line-item${cls}" data-line="${escapeHtml(ln.id)}">
+        <span class="opening-line-name">${escapeHtml(ln.name || "Без названия")}</span>
+        ${masteryTxt}
+      </button>`;
+    }).join("");
+    const fbCls = state.opening.feedback === "correct" ? "puzzle-banner-ok"
+      : state.opening.feedback === "wrong" ? "puzzle-banner-bad"
+      : state.opening.feedback === "complete" ? "puzzle-banner-ok" : "";
+    const banner = state.opening.coachMsg
+      ? `<div class="puzzle-banner ${fbCls}">${escapeHtml(state.opening.coachMsg)}</div>`
+      : "";
+    let theory = "";
+    if (state.opening.mode === "theory" && line) {
+      const sansHtml = (line.moves || []).map((s) => `<span class="opening-san">${escapeHtml(s)}</span>`).join(" ");
+      const desc = (line.description || op.description || "");
+      theory = `
+        <div class="opening-theory">
+          <div class="opening-theory-line">${sansHtml}</div>
+          ${desc ? `<p class="muted">${escapeHtml(desc)}</p>` : ""}
+        </div>
+      `;
+    } else if (state.opening.mode === "practice" && line) {
+      const movesShown = (line.moves || []).slice(0, state.opening.moveIdx)
+        .map((s) => `<span class="opening-san">${escapeHtml(s)}</span>`).join(" ");
+      theory = `
+        <div class="opening-theory">
+          <div class="opening-theory-line">${movesShown || `<span class="muted">Сделай первый ход.</span>`}</div>
+        </div>
+      `;
+    }
+    body = `
+      <div class="opening-meta">
+        <h3>${escapeHtml(op.name)}</h3>
+        <div class="muted">${escapeHtml(op.eco || "")} · ${op.color === "black" ? "за чёрных" : "за белых"}</div>
+      </div>
+      <div class="opening-lines">${linesHtml}</div>
+      ${theory}
+      ${banner}
+    `;
+  }
+  card.innerHTML = `
+    <div class="opening-layout">
+      <div class="opening-catalog">${catalog}</div>
+      <div class="opening-detail">${body}</div>
+    </div>
+  `;
+  card.querySelectorAll(".opening-cat-item").forEach((b) => {
+    b.onclick = () => selectOpening(b.dataset.id);
+  });
+  card.querySelectorAll(".opening-line-item").forEach((b) => {
+    b.onclick = () => selectOpening(state.opening.selectedId, b.dataset.line);
+  });
+  // Actions.
+  if (op && line) {
+    const theoryActive  = state.opening.mode === "theory"  ? " is-active" : "";
+    const practiceActive = state.opening.mode === "practice" ? " is-active" : "";
+    actions.innerHTML = `
+      <button id="btn-opening-theory" type="button" class="puzzle-secondary${theoryActive}">Теория</button>
+      <button id="btn-opening-practice" type="button" class="puzzle-primary${practiceActive}">Практика</button>
+      <button id="btn-opening-reset" type="button" class="puzzle-secondary">Сброс</button>
+    `;
+    document.getElementById("btn-opening-theory").onclick   = () => setOpeningMode("theory");
+    document.getElementById("btn-opening-practice").onclick = () => setOpeningMode("practice");
+    document.getElementById("btn-opening-reset").onclick    = () => { state.opening.active = false; _resetOpeningBoard(); renderOpeningUi(); };
+  } else {
+    actions.innerHTML = "";
+  }
+  if (hist) hist.innerHTML = "";
+}
+
 // ---------- Notifications (SSE) + party invitations ----------
 
 function _bootNotifications() {
@@ -6573,6 +8015,61 @@ function handleNotificationEvent(msg) {
   }
 }
 
+// Plays a short attention chime so an off-screen invitation doesn't go
+// unnoticed. We synthesise a two-note beep through WebAudio so we don't
+// need an extra audio asset and so playback is gated by the same user
+// gesture that primes our normal move sounds.
+function _playInvitationChime() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = _playInvitationChime._ctx
+      || (_playInvitationChime._ctx = new Ctx());
+    if (ctx.state === "suspended") { try { ctx.resume(); } catch (_) {} }
+    const now = ctx.currentTime;
+    const playTone = (freq, t0, dur) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, now + t0);
+      g.gain.exponentialRampToValueAtTime(0.18, now + t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + t0 + dur);
+      o.connect(g).connect(ctx.destination);
+      o.start(now + t0);
+      o.stop(now + t0 + dur + 0.05);
+    };
+    playTone(660, 0,    0.22);
+    playTone(880, 0.18, 0.28);
+  } catch (_) { /* ignore */ }
+}
+
+// Browser-level Notification (only fires when the tab is not focused).
+// We request permission lazily on the first invitation that arrives
+// while the page is hidden so we don't spam the user with a prompt.
+function _maybeShowBrowserInviteNotification(inv) {
+  if (typeof Notification === "undefined") return;
+  if (document.visibilityState !== "hidden" && document.hasFocus()) return;
+  const fire = () => {
+    try {
+      const n = new Notification(`${inv.host_nickname || "Гость"} зовёт в пати`, {
+        body: `Код комнаты: ${inv.party_code}`,
+        tag: `party-invite-${inv.id}`,
+        renotify: true,
+        icon: "/static/favicon.ico",
+      });
+      n.onclick = () => { try { window.focus(); n.close(); } catch (_) {} };
+    } catch (_) { /* ignore */ }
+  };
+  if (Notification.permission === "granted") {
+    fire();
+  } else if (Notification.permission === "default") {
+    Notification.requestPermission().then((perm) => {
+      if (perm === "granted") fire();
+    }).catch(() => {});
+  }
+}
+
 function _showInvitationToast(inv) {
   if (!inv || !inv.id) return;
   // Already on screen?
@@ -6604,6 +8101,11 @@ function _showInvitationToast(inv) {
     _declineInvitation(inv.id).catch((e) => _showInfoToast(`Ошибка: ${e.message || e}`));
   });
   stack.appendChild(card);
+
+  // Audible chime — gated by the same sound preference the move sounds use.
+  if (userSettings.soundEnabled !== false) _playInvitationChime();
+  // Native Notification when the tab isn't focused.
+  _maybeShowBrowserInviteNotification(inv);
 }
 
 function _dismissInvitationToast(invId) {
