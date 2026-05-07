@@ -2334,18 +2334,17 @@ if (dropzone) {
   });
 }
 
-// ---------- View tabs (Main / Analysis) ----------
+// ---------- View tabs (Main / Analysis / Puzzle / Daily / Rush / Opening) ----------
+
+const _ALL_VIEWS = ["main", "analysis", "puzzle", "daily", "rush", "opening"];
 
 function setView(view) {
-  let v;
-  if (view === "analysis")    v = "analysis";
-  else if (view === "puzzle") v = "puzzle";
-  else                        v = "main";
+  const v = _ALL_VIEWS.includes(view) ? view : "main";
   const prev = state.view;
   state.view = v;
-  document.body.classList.toggle("view-main",     v === "main");
-  document.body.classList.toggle("view-analysis", v === "analysis");
-  document.body.classList.toggle("view-puzzle",   v === "puzzle");
+  for (const candidate of _ALL_VIEWS) {
+    document.body.classList.toggle(`view-${candidate}`, v === candidate);
+  }
   document.querySelectorAll(".view-tab").forEach((btn) => {
     const isActive = btn.dataset.view === v;
     btn.classList.toggle("is-active", isActive);
@@ -2360,6 +2359,12 @@ function setView(view) {
   } else if (prev === "puzzle" && state.puzzle && state.puzzle.current) {
     leavePuzzleView();
   }
+  // Training views own their own boards / state — wire enter / leave so
+  // network calls only happen when the tab is actually visible.
+  if (v === "daily")  enterDailyView();
+  if (v === "rush")   enterRushView();
+  if (v === "opening") enterOpeningView();
+  if (prev === "rush" && v !== "rush") leaveRushView();
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
@@ -5203,9 +5208,7 @@ function _presenceWsUrl() {
   if (_isHexColor(userSettings.legalDotColor)) {
     u.searchParams.set("legal_color", userSettings.legalDotColor);
   }
-  const r = (state.user && state.user.elo_history && state.user.elo_history.rating)
-    ? state.user.elo_history.rating
-    : (state.sessionRating || 0);
+  const r = state.sessionRating || 0;
   if (r) u.searchParams.set("rating", String(r));
   return u.toString();
 }
@@ -6513,6 +6516,42 @@ window.openPartyResultDetail = openPartyResultDetail;
 
 // ---------- Notifications (SSE) + party invitations ----------
 
+// "Off-screen" alert: when an invitation arrives but the tab isn't
+// focused, ping with a sound and try to show a system-level Browser
+// Notification so the user actually notices. We deliberately keep the
+// sound *and* notification cheap and idempotent (tagged) so multiple
+// duplicate invites don't spam the user.
+let _notifPermAsked = false;
+function _maybeRequestNotifPermission() {
+  if (_notifPermAsked) return;
+  _notifPermAsked = true;
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission === "default") {
+    try { Notification.requestPermission().catch(() => {}); } catch (_) {}
+  }
+}
+function _alertOffscreen({ title, body, tag }) {
+  const offscreen = (typeof document !== "undefined")
+    && (document.hidden || !document.hasFocus());
+  if (!offscreen) return;
+  // Sound — reuse the move-check sample as a generic ping (it's the
+  // most attention-grabbing of the bundled sounds).
+  try { _playWav("move-check"); } catch (_) { /* ignore */ }
+  // Browser Notification (if granted).
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission !== "granted") {
+    _maybeRequestNotifPermission();
+    return;
+  }
+  try {
+    new Notification(title || "Chess Sandbox", {
+      body: body || "",
+      tag: tag || "chess-sandbox",
+      silent: false,
+    });
+  } catch (_) { /* notifications can fail (rate limited, etc.) */ }
+}
+
 function _bootNotifications() {
   if (!state.user.client_id) return;
   _notificationsConnect();
@@ -6578,6 +6617,11 @@ function _showInvitationToast(inv) {
   // Already on screen?
   if (state.notifications.invitations[inv.id]) return;
   state.notifications.invitations[inv.id] = inv;
+  _alertOffscreen({
+    title: `${inv.host_nickname || "Друг"} зовёт в пати`,
+    body: `Код комнаты: ${inv.party_code || ""}`,
+    tag: `invite-${inv.id}`,
+  });
 
   const stack = document.getElementById("toast-stack");
   if (!stack) return;
@@ -7420,6 +7464,1114 @@ function _renderMiniBoardFromFen(fen, player) {
       <div class="mb-corner"></div>
       <div class="mb-files">${files}</div>
     </div>
+  `;
+}
+
+// ===================================================================
+// Training views — Daily Puzzle, Puzzle Rush, Opening Trainer
+// ===================================================================
+//
+// Each of these modes lives on its own top-level tab and renders into
+// its own DOM subtree (`<section.training-view data-view="...">`). A
+// shared MiniBoard class handles rendering and input — it is fully
+// independent of the main board / sandbox state so we don't risk
+// stepping on the analysis flow when switching tabs.
+
+class MiniBoard {
+  constructor(boardEl, ranksEl, filesEl, opts = {}) {
+    this.boardEl = boardEl;
+    this.ranksEl = ranksEl;
+    this.filesEl = filesEl;
+    this.onMove = opts.onMove || (() => {});
+    this.orientation = opts.orientation || "w";
+    this.chess = new Chess();
+    this.selected = null;
+    this.legalTargets = [];
+    this.lastMove = null;
+    this.locked = false;
+    this._handler = (e) => this._onClick(e);
+    this.boardEl.addEventListener("click", this._handler);
+    this._render();
+  }
+  setFen(fen, opts = {}) {
+    try {
+      this.chess = new Chess(fen);
+    } catch (_) {
+      this.chess = new Chess();
+    }
+    this.selected = null;
+    this.legalTargets = [];
+    this.lastMove = opts.lastMove || null;
+    if (opts.orientation) this.orientation = opts.orientation;
+    if (typeof opts.locked === "boolean") this.locked = opts.locked;
+    this._render();
+  }
+  setOrientation(o) { this.orientation = o; this._render(); }
+  setLocked(b) { this.locked = !!b; this._render(); }
+  setLastMove(uci) {
+    if (typeof uci === "string" && uci.length >= 4) {
+      this.lastMove = { from: uci.slice(0, 2), to: uci.slice(2, 4) };
+    } else {
+      this.lastMove = null;
+    }
+    this._render();
+  }
+  applyUci(uci) {
+    if (!uci || uci.length < 4) return null;
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    const promotion = uci.length >= 5 ? uci[4].toLowerCase() : undefined;
+    let result = null;
+    try {
+      result = this.chess.move({ from, to, promotion });
+    } catch (_) { result = null; }
+    if (result) {
+      this.lastMove = { from, to };
+      this.selected = null;
+      this.legalTargets = [];
+      this._render();
+    }
+    return result;
+  }
+  fen() { return this.chess.fen(); }
+  turn() { return this.chess.turn(); }
+  destroy() {
+    if (this._handler) this.boardEl.removeEventListener("click", this._handler);
+  }
+  _renderRanks() {
+    if (this.ranksEl) {
+      const order = this.orientation === "w"
+        ? ["8", "7", "6", "5", "4", "3", "2", "1"]
+        : ["1", "2", "3", "4", "5", "6", "7", "8"];
+      this.ranksEl.innerHTML = order.map((r) => `<span>${r}</span>`).join("");
+    }
+    if (this.filesEl) {
+      const order = this.orientation === "w"
+        ? ["a", "b", "c", "d", "e", "f", "g", "h"]
+        : ["h", "g", "f", "e", "d", "c", "b", "a"];
+      this.filesEl.innerHTML = order.map((f) => `<span>${f}</span>`).join("");
+    }
+  }
+  _render() {
+    this._renderRanks();
+    const cells = [];
+    // chess.js board() returns rank 8..1 (top..bottom of white view).
+    const grid = this.chess.board();
+    const ranksTopToBottom = this.orientation === "w" ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+    const filesLeftToRight = this.orientation === "w" ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+    for (const r of ranksTopToBottom) {
+      for (const f of filesLeftToRight) {
+        const piece = grid[r][f];
+        const file = "abcdefgh"[f];
+        const rank = (8 - r).toString();
+        const sq = file + rank;
+        const isLight = (r + f) % 2 === 0;
+        const isSelected = this.selected === sq;
+        const isTarget = this.legalTargets.includes(sq);
+        const hasPiece = !!piece;
+        const targetCls = isTarget
+          ? (hasPiece ? " legal-capture" : " legal-move")
+          : "";
+        const lmCls = (this.lastMove && (this.lastMove.from === sq || this.lastMove.to === sq))
+          ? " last-move"
+          : "";
+        const selectedCls = isSelected ? " selected" : "";
+        const cls = `square ${isLight ? "light" : "dark"}${selectedCls}${targetCls}${lmCls}`;
+        let pieceHtml = "";
+        if (piece) {
+          const code = (piece.color === "w" ? "w" : "b") + piece.type.toUpperCase();
+          pieceHtml = `<span class="piece"><img src="${pieceSvgUrl(code)}" alt="" /></span>`;
+        }
+        cells.push(`<div class="${cls}" data-sq="${sq}">${pieceHtml}</div>`);
+      }
+    }
+    this.boardEl.innerHTML = cells.join("");
+  }
+  _onClick(e) {
+    if (this.locked) return;
+    const cell = e.target.closest("[data-sq]");
+    if (!cell) return;
+    const sq = cell.dataset.sq;
+    if (this.selected && this.selected !== sq) {
+      const verbose = this.chess.moves({ square: this.selected, verbose: true });
+      const target = verbose.find((m) => m.to === sq);
+      if (target) {
+        const promotion = target.flags && target.flags.includes("p") ? "q" : undefined;
+        let result = null;
+        try {
+          result = this.chess.move({ from: this.selected, to: sq, promotion });
+        } catch (_) { result = null; }
+        if (result) {
+          const uci = this.selected + sq + (promotion || "");
+          this.lastMove = { from: this.selected, to: sq };
+          this.selected = null;
+          this.legalTargets = [];
+          this._render();
+          let inCheck = false;
+          try { inCheck = this.chess.isCheck && this.chess.isCheck(); } catch (_) { inCheck = false; }
+          const key = _moveSoundKey(result, inCheck);
+          if (state.soundOn) _playWav(key);
+          this.onMove(uci, result, this);
+          return;
+        }
+      }
+    }
+    const piece = this.chess.get(sq);
+    if (piece && piece.color === this.chess.turn()) {
+      this.selected = sq;
+      const verbose = this.chess.moves({ square: sq, verbose: true });
+      this.legalTargets = verbose.map((m) => m.to);
+    } else {
+      this.selected = null;
+      this.legalTargets = [];
+    }
+    this._render();
+  }
+}
+
+// Helpers shared across training modes.
+function _trainingClientId() {
+  return state.user && state.user.client_id ? state.user.client_id : null;
+}
+function _trainingUserName(u) {
+  if (!u) return "—";
+  return (u.nickname || u.client_id || "—");
+}
+function _formatMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "—";
+  if (ms < 10000) return `${(ms / 1000).toFixed(1)} с`;
+  return `${Math.round(ms / 1000)} с`;
+}
+function _formatClock(secs) {
+  const s = Math.max(0, Math.floor(secs));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+// -------------------- Daily Puzzle --------------------
+
+state.daily = {
+  loaded: false,
+  loading: false,
+  date: null,
+  puzzle: null,         // { id, fen, moves[], rating }
+  expected: [],         // user-side ply list (uci)
+  played: [],
+  cursor: 0,            // index into `expected`
+  startedAt: 0,
+  outcome: null,        // null | "solved" | "failed"
+  attemptedToday: false,
+  streak: 0,
+  bestStreak: 0,
+  board: null,
+};
+
+function _dailyEnsureBoard() {
+  if (state.daily.board) return state.daily.board;
+  const boardEl = document.getElementById("daily-board");
+  const ranksEl = document.getElementById("daily-board-ranks");
+  const filesEl = document.getElementById("daily-board-files");
+  if (!boardEl) return null;
+  state.daily.board = new MiniBoard(boardEl, ranksEl, filesEl, {
+    onMove: (uci, _result, _b) => _dailyOnMove(uci),
+  });
+  return state.daily.board;
+}
+
+function enterDailyView() {
+  const board = _dailyEnsureBoard();
+  if (!board) return;
+  if (!state.daily.loaded || _dailyDateChanged()) {
+    _dailyLoadToday();
+  } else {
+    _dailyRenderActions();
+  }
+  _dailyLoadLeaderboard();
+}
+
+function _dailyDateChanged() {
+  if (!state.daily.date) return true;
+  const today = new Date().toISOString().slice(0, 10);
+  return state.daily.date !== today;
+}
+
+async function _dailyLoadToday() {
+  const status = document.getElementById("daily-status");
+  if (state.daily.loading) return;
+  state.daily.loading = true;
+  if (status) status.textContent = "Загружаем сегодняшнюю задачу…";
+  try {
+    const cid = _trainingClientId();
+    const url = cid
+      ? `/api/daily/today?client_id=${encodeURIComponent(cid)}`
+      : `/api/daily/today`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.daily.loaded = true;
+    state.daily.date = data.date;
+    state.daily.puzzle = data.puzzle;
+    state.daily.streak = data.streak || 0;
+    state.daily.bestStreak = data.best_streak || 0;
+    state.daily.outcome = data.today_outcome || null;
+    state.daily.attemptedToday = !!data.attempted_today;
+    state.daily.played = [];
+    state.daily.cursor = 0;
+    state.daily.startedAt = 0;
+    _dailyRenderStreak();
+    _dailyRenderSubline();
+    if (data.puzzle) {
+      _dailySetupBoard();
+    } else if (status) {
+      status.textContent = "Сегодня банк пуст — попробуй позже.";
+    }
+    _dailyRenderActions();
+  } catch (e) {
+    if (status) status.textContent = `Не удалось загрузить: ${e.message || e}`;
+  } finally {
+    state.daily.loading = false;
+  }
+}
+
+function _dailyRenderStreak() {
+  const num = document.getElementById("daily-streak-num");
+  const best = document.getElementById("daily-streak-best");
+  if (num) num.textContent = String(state.daily.streak || 0);
+  if (best) best.textContent = `Лучшая: ${state.daily.bestStreak || 0}`;
+}
+
+function _dailyRenderSubline() {
+  const sub = document.getElementById("daily-subline");
+  if (!sub) return;
+  if (!state.daily.puzzle) {
+    sub.textContent = "Один пазл для всех на сегодня — успей в общий лидерборд.";
+    return;
+  }
+  const r = state.daily.puzzle.rating || 1500;
+  const date = state.daily.date || "";
+  sub.textContent = `Пазл дня · рейтинг ${r} · ${date} (UTC)`;
+}
+
+function _dailySetupBoard() {
+  const p = state.daily.puzzle;
+  if (!p || !p.fen || !Array.isArray(p.moves) || p.moves.length < 1) return;
+  const board = _dailyEnsureBoard();
+  if (!board) return;
+  // Lichess convention: the first move in `moves` is the bot's setup
+  // move. Apply it server-style on the local position so the user gets
+  // the puzzle ON their move.
+  board.setFen(p.fen, { locked: true });
+  // Orient to the side the user plays — same as the side-to-move *after*
+  // the bot's first move.
+  const tempChess = new Chess(p.fen);
+  let userColor = tempChess.turn() === "w" ? "b" : "w";
+  board.setOrientation(userColor);
+  // Apply the bot's first move with a tiny delay so it feels alive.
+  setTimeout(() => {
+    if (state.view !== "daily") return;
+    board.applyUci(p.moves[0]);
+    state.daily.expected = p.moves.slice(1).filter((_, i) => i % 2 === 0);
+    state.daily.cursor = 0;
+    state.daily.played = [];
+    state.daily.startedAt = Date.now();
+    if (state.daily.attemptedToday) {
+      board.setLocked(true);
+      const status = document.getElementById("daily-status");
+      if (status) {
+        status.textContent = state.daily.outcome === "solved"
+          ? "Вы уже решили сегодняшнюю задачу. Загляните завтра!"
+          : "Сегодняшняя попытка уже завершилась. До завтра!";
+      }
+    } else {
+      board.setLocked(false);
+      const status = document.getElementById("daily-status");
+      if (status) status.textContent = `Ход ${userColor === "w" ? "белых" : "чёрных"} — найди продолжение.`;
+    }
+  }, 250);
+}
+
+function _dailyRenderActions() {
+  const host = document.getElementById("daily-actions");
+  if (!host) return;
+  const items = [];
+  if (state.daily.attemptedToday) {
+    items.push(`<span class="muted">Завтра — новая задача.</span>`);
+  } else {
+    items.push(`<button id="btn-daily-give-up" type="button" class="puzzle-ghost">Сдаться</button>`);
+  }
+  host.innerHTML = items.join(" ");
+  const give = document.getElementById("btn-daily-give-up");
+  if (give) give.addEventListener("click", () => _dailySubmitAttempt("failed"));
+}
+
+function _dailyOnMove(uci) {
+  if (!state.daily.puzzle || state.daily.attemptedToday) return;
+  const expected = state.daily.expected[state.daily.cursor];
+  if (!expected) return;
+  const status = document.getElementById("daily-status");
+  if (uci.toLowerCase() !== expected.toLowerCase()) {
+    if (status) status.textContent = "Не тот ход — попытка засчитана как провал.";
+    state.daily.played.push(uci);
+    _dailySubmitAttempt("failed");
+    return;
+  }
+  state.daily.played.push(uci);
+  state.daily.cursor += 1;
+  // Apply opponent reply automatically (the next move in the puzzle's
+  // canonical line, if any).
+  const replyIdx = state.daily.cursor * 2; // moves[1] = user1, moves[2] = bot, moves[3] = user2 ...
+  const bot = state.daily.puzzle.moves[replyIdx];
+  const board = state.daily.board;
+  const allDone = state.daily.cursor >= state.daily.expected.length;
+  if (allDone) {
+    if (status) status.textContent = "Идеально! Засчитываем решение…";
+    _dailySubmitAttempt("solved");
+    return;
+  }
+  if (bot && board) {
+    board.setLocked(true);
+    setTimeout(() => {
+      board.applyUci(bot);
+      board.setLocked(false);
+      if (status) status.textContent = "Хорошо! Продолжай.";
+    }, 320);
+  }
+}
+
+async function _dailySubmitAttempt(outcome) {
+  if (state.daily.attemptedToday) return;
+  const cid = _trainingClientId();
+  if (!cid) return;
+  const solveMs = state.daily.startedAt ? Date.now() - state.daily.startedAt : 0;
+  state.daily.attemptedToday = true;
+  if (state.daily.board) state.daily.board.setLocked(true);
+  try {
+    const res = await fetch("/api/daily/attempt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: cid,
+        outcome,
+        solve_ms: solveMs,
+        played_moves: state.daily.played,
+      }),
+    });
+    const data = res.ok ? await res.json() : null;
+    if (data) {
+      state.daily.outcome = data.outcome;
+      state.daily.streak = data.streak || 0;
+      state.daily.bestStreak = data.best_streak || 0;
+    }
+    _dailyRenderStreak();
+    const status = document.getElementById("daily-status");
+    if (status) {
+      status.textContent = (data && data.outcome === "solved")
+        ? `Решено за ${_formatMs(solveMs)}. Серия: ${state.daily.streak} 🔥`
+        : `Сегодня не угадал — серия сброшена.`;
+    }
+    _dailyRenderActions();
+    _dailyLoadLeaderboard();
+  } catch (e) {
+    const status = document.getElementById("daily-status");
+    if (status) status.textContent = `Не удалось засчитать: ${e.message || e}`;
+  }
+}
+
+async function _dailyLoadLeaderboard() {
+  const host = document.getElementById("daily-leaderboard");
+  if (!host) return;
+  host.innerHTML = `<div class="lb-empty">Загрузка…</div>`;
+  try {
+    const res = await fetch("/api/daily/leaderboard");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) {
+      host.innerHTML = `<div class="lb-empty">Сегодня ещё никто не решил.</div>`;
+      return;
+    }
+    const me = _trainingClientId();
+    host.innerHTML = rows.slice(0, 10).map((r, i) => {
+      const meCls = (me && r.client_id === me) ? " is-me" : "";
+      const name = escapeHtml(r.nickname || r.client_id || "—");
+      const av = escapeHtml(r.avatar || "♟");
+      const score = _formatMs(r.solve_ms || 0);
+      return `<div class="lb-row${meCls}">
+        <span class="lb-rank">#${i + 1}</span>
+        <span class="lb-name">${av} ${name}</span>
+        <span class="lb-score">${score}</span>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    host.innerHTML = `<div class="lb-empty">Лидерборд недоступен.</div>`;
+  }
+}
+
+// -------------------- Puzzle Rush --------------------
+
+state.rush = {
+  sessionId: null,
+  duration: 180,
+  endsAt: 0,
+  solved: 0,
+  failed: 0,
+  current: null,        // { id, fen, moves[], rating }
+  expected: [],
+  played: [],
+  cursor: 0,
+  finished: false,
+  board: null,
+  tickerId: null,
+  startedAt: 0,
+};
+
+function _rushEnsureBoard() {
+  if (state.rush.board) return state.rush.board;
+  const boardEl = document.getElementById("rush-board");
+  if (!boardEl) return null;
+  const ranksEl = document.getElementById("rush-board-ranks");
+  const filesEl = document.getElementById("rush-board-files");
+  state.rush.board = new MiniBoard(boardEl, ranksEl, filesEl, {
+    onMove: (uci, _r, _b) => _rushOnMove(uci),
+  });
+  return state.rush.board;
+}
+
+function enterRushView() {
+  // Show pre-game (picker + leaderboards) by default; if a session is
+  // already in progress (e.g. tab toggled and back), keep it.
+  if (!state.rush.sessionId) {
+    _rushShowPre();
+  }
+  _rushLoadLeaderboards();
+  // Wire duration buttons + abort button (idempotent).
+  document.querySelectorAll(".rush-duration-btn").forEach((btn) => {
+    if (btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => _rushStart(parseInt(btn.dataset.duration, 10)));
+  });
+  const abortBtn = document.getElementById("btn-rush-abort");
+  if (abortBtn && abortBtn.dataset.bound !== "1") {
+    abortBtn.dataset.bound = "1";
+    abortBtn.addEventListener("click", () => _rushAbort());
+  }
+}
+
+function leaveRushView() {
+  if (state.rush.tickerId) {
+    clearInterval(state.rush.tickerId);
+    state.rush.tickerId = null;
+  }
+  // If there's an unfinished session, finalize it on the server so the
+  // user's best result is recorded — the timer-based `_finish` path
+  // covers it once `status` is hit, but explicit teardown is cleaner.
+  if (state.rush.sessionId && !state.rush.finished) {
+    fetch(`/api/rush/status/${encodeURIComponent(state.rush.sessionId)}`).catch(() => {});
+  }
+}
+
+function _rushShowPre() {
+  const pre = document.getElementById("rush-pre");
+  const active = document.getElementById("rush-active");
+  const end = document.getElementById("rush-end");
+  const clock = document.getElementById("rush-clock");
+  if (pre) pre.hidden = false;
+  if (active) active.hidden = true;
+  if (end) end.hidden = true;
+  if (clock) clock.hidden = true;
+}
+
+function _rushShowActive() {
+  const pre = document.getElementById("rush-pre");
+  const active = document.getElementById("rush-active");
+  const end = document.getElementById("rush-end");
+  const clock = document.getElementById("rush-clock");
+  if (pre) pre.hidden = true;
+  if (active) active.hidden = false;
+  if (end) end.hidden = true;
+  if (clock) clock.hidden = false;
+}
+
+function _rushShowEnd() {
+  const pre = document.getElementById("rush-pre");
+  const active = document.getElementById("rush-active");
+  const end = document.getElementById("rush-end");
+  const clock = document.getElementById("rush-clock");
+  if (pre) pre.hidden = true;
+  if (active) active.hidden = true;
+  if (end) end.hidden = false;
+  if (clock) clock.hidden = true;
+}
+
+async function _rushStart(durationSec) {
+  const cid = _trainingClientId();
+  if (!cid) {
+    alert("Создай ник, чтобы начать Rush — без аккаунта результаты не записываются.");
+    return;
+  }
+  if (![180, 300].includes(durationSec)) durationSec = 180;
+  try {
+    const res = await fetch("/api/rush/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: cid, duration_sec: durationSec }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.rush.sessionId = data.session_id;
+    state.rush.duration = data.duration_sec;
+    state.rush.endsAt = data.ends_at;
+    state.rush.startedAt = Math.floor(Date.now() / 1000);
+    state.rush.solved = 0;
+    state.rush.failed = 0;
+    state.rush.finished = false;
+    _rushSetCurrent(data.puzzle);
+    _rushShowActive();
+    _rushTick();
+    if (state.rush.tickerId) clearInterval(state.rush.tickerId);
+    state.rush.tickerId = setInterval(_rushTick, 250);
+    _rushUpdateStats();
+  } catch (e) {
+    alert(`Не удалось стартовать Rush: ${e.message || e}`);
+  }
+}
+
+function _rushSetCurrent(p) {
+  state.rush.current = p;
+  state.rush.played = [];
+  state.rush.cursor = 0;
+  if (!p || !p.fen || !Array.isArray(p.moves) || p.moves.length < 1) {
+    return;
+  }
+  const board = _rushEnsureBoard();
+  if (!board) return;
+  board.setFen(p.fen, { locked: true });
+  const tempChess = new Chess(p.fen);
+  const userColor = tempChess.turn() === "w" ? "b" : "w";
+  board.setOrientation(userColor);
+  setTimeout(() => {
+    if (state.view !== "rush" || !state.rush.current || state.rush.current.id !== p.id) return;
+    board.applyUci(p.moves[0]);
+    state.rush.expected = p.moves.slice(1).filter((_, i) => i % 2 === 0);
+    state.rush.cursor = 0;
+    board.setLocked(false);
+    const s = document.getElementById("rush-status");
+    if (s) s.textContent = `Рейтинг ${p.rating || 1200} · ${userColor === "w" ? "ход белых" : "ход чёрных"}`;
+  }, 220);
+}
+
+function _rushOnMove(uci) {
+  if (!state.rush.current || state.rush.finished) return;
+  const expected = state.rush.expected[state.rush.cursor];
+  if (!expected) return;
+  if (uci.toLowerCase() !== expected.toLowerCase()) {
+    state.rush.played.push(uci);
+    _rushSubmit("failed");
+    return;
+  }
+  state.rush.played.push(uci);
+  state.rush.cursor += 1;
+  const allDone = state.rush.cursor >= state.rush.expected.length;
+  if (allDone) {
+    _rushSubmit("solved");
+    return;
+  }
+  const replyIdx = state.rush.cursor * 2;
+  const bot = state.rush.current.moves[replyIdx];
+  const board = state.rush.board;
+  if (bot && board) {
+    board.setLocked(true);
+    setTimeout(() => {
+      board.applyUci(bot);
+      board.setLocked(false);
+    }, 220);
+  }
+}
+
+async function _rushSubmit(outcome) {
+  if (!state.rush.sessionId) return;
+  const sid = state.rush.sessionId;
+  const pid = state.rush.current ? state.rush.current.id : "";
+  const solveMs = Math.max(1, Math.floor((Date.now() / 1000 - state.rush.startedAt) * 1000));
+  try {
+    const res = await fetch("/api/rush/attempt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sid,
+        puzzle_id: pid,
+        outcome,
+        solve_ms: solveMs,
+        played_moves: state.rush.played,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (typeof data.solved === "number") state.rush.solved = data.solved;
+    if (typeof data.failed === "number") state.rush.failed = data.failed;
+    _rushUpdateStats();
+    if (data.finished) {
+      _rushFinish(data);
+      return;
+    }
+    if (data.puzzle) {
+      _rushSetCurrent(data.puzzle);
+    }
+  } catch (e) {
+    _rushFinish({ solved: state.rush.solved, failed: state.rush.failed });
+  }
+}
+
+async function _rushAbort() {
+  if (!state.rush.sessionId || state.rush.finished) {
+    _rushShowPre();
+    return;
+  }
+  // Fastest abort: submit a guaranteed-fail attempt so the server
+  // finishes the session and records the score.
+  await _rushSubmit("failed");
+}
+
+function _rushUpdateStats() {
+  const sNode = document.getElementById("rush-solved");
+  const fNode = document.getElementById("rush-failed");
+  if (sNode) sNode.textContent = String(state.rush.solved);
+  if (fNode) fNode.textContent = String(state.rush.failed);
+}
+
+function _rushTick() {
+  const remain = Math.max(0, state.rush.endsAt - Math.floor(Date.now() / 1000));
+  const t = document.getElementById("rush-clock-time");
+  const wrap = document.getElementById("rush-clock");
+  if (t) t.textContent = _formatClock(remain);
+  if (wrap) wrap.classList.toggle("is-low", remain <= 15);
+  if (remain <= 0 && !state.rush.finished) {
+    // Ask the server to finalize.
+    fetch(`/api/rush/status/${encodeURIComponent(state.rush.sessionId)}`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data && data.finished) _rushFinish(data);
+      }).catch(() => {});
+  }
+}
+
+function _rushFinish(summary) {
+  state.rush.finished = true;
+  if (state.rush.tickerId) {
+    clearInterval(state.rush.tickerId);
+    state.rush.tickerId = null;
+  }
+  const end = document.getElementById("rush-end");
+  if (end) {
+    end.innerHTML = `
+      <h2>Rush окончен</h2>
+      <div class="end-meta">${state.rush.duration === 300 ? "5-минутный" : "3-минутный"} забег</div>
+      <div class="end-score">${summary.solved || 0}</div>
+      <div class="end-meta">решено · ${summary.failed || 0} ошибка</div>
+      <div class="end-actions">
+        <button id="btn-rush-again" type="button" class="puzzle-primary">↻ Ещё раз</button>
+        <button id="btn-rush-leaderboard" type="button" class="puzzle-ghost">К таблице</button>
+      </div>
+    `;
+    const again = document.getElementById("btn-rush-again");
+    if (again) again.addEventListener("click", () => {
+      state.rush.sessionId = null;
+      _rushShowPre();
+      _rushLoadLeaderboards();
+    });
+    const lb = document.getElementById("btn-rush-leaderboard");
+    if (lb) lb.addEventListener("click", () => {
+      state.rush.sessionId = null;
+      _rushShowPre();
+      _rushLoadLeaderboards();
+    });
+  }
+  _rushShowEnd();
+  _rushLoadLeaderboards();
+}
+
+async function _rushLoadLeaderboards() {
+  for (const dur of [180, 300]) {
+    const host = document.getElementById(`rush-leaderboard-${dur}`);
+    if (!host) continue;
+    host.innerHTML = `<div class="lb-empty">Загрузка…</div>`;
+    try {
+      const res = await fetch(`/api/rush/leaderboard?duration_sec=${dur}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const rows = await res.json();
+      if (!Array.isArray(rows) || rows.length === 0) {
+        host.innerHTML = `<div class="lb-empty">Пока никто не играл.</div>`;
+        continue;
+      }
+      const me = _trainingClientId();
+      host.innerHTML = rows.slice(0, 8).map((r, i) => {
+        const meCls = (me && r.client_id === me) ? " is-me" : "";
+        const name = escapeHtml(r.nickname || r.client_id || "—");
+        const av = escapeHtml(r.avatar || "♟");
+        return `<div class="lb-row${meCls}">
+          <span class="lb-rank">#${i + 1}</span>
+          <span class="lb-name">${av} ${name}</span>
+          <span class="lb-score">${r.best_solved || 0}</span>
+        </div>`;
+      }).join("");
+    } catch (e) {
+      host.innerHTML = `<div class="lb-empty">Лидерборд недоступен.</div>`;
+    }
+  }
+}
+
+// -------------------- Opening Trainer --------------------
+
+state.opening = {
+  list: [],
+  current: null,        // full opening payload
+  lineIdx: 0,
+  moveIdx: 0,           // 0..line.moves.length
+  drillSolved: 0,
+  drillFailed: 0,
+  drillStreak: 0,
+  drillBestStreak: 0,
+  drillStartedAt: 0,
+  board: null,
+  pane: "theory",
+};
+
+function _openingEnsureBoard() {
+  if (state.opening.board) return state.opening.board;
+  const boardEl = document.getElementById("opening-board");
+  if (!boardEl) return null;
+  const ranksEl = document.getElementById("opening-board-ranks");
+  const filesEl = document.getElementById("opening-board-files");
+  state.opening.board = new MiniBoard(boardEl, ranksEl, filesEl, {
+    onMove: (uci, _r, _b) => _openingOnMove(uci),
+  });
+  return state.opening.board;
+}
+
+function enterOpeningView() {
+  // Always refresh the picker (so user progress / stats are up to date),
+  // but don't rip away an in-progress drill.
+  _openingLoadList();
+  if (!state.opening.current) _openingShowPicker();
+  // Wire control buttons (idempotent).
+  const back = document.getElementById("btn-opening-back");
+  if (back && back.dataset.bound !== "1") {
+    back.dataset.bound = "1";
+    back.addEventListener("click", () => {
+      state.opening.current = null;
+      _openingShowPicker();
+      _openingLoadList();
+    });
+  }
+  const restart = document.getElementById("btn-opening-restart");
+  if (restart && restart.dataset.bound !== "1") {
+    restart.dataset.bound = "1";
+    restart.addEventListener("click", () => _openingStartLine(state.opening.lineIdx));
+  }
+  const lineBtn = document.getElementById("btn-opening-line");
+  if (lineBtn && lineBtn.dataset.bound !== "1") {
+    lineBtn.dataset.bound = "1";
+    lineBtn.addEventListener("click", () => _openingPickNextLine());
+  }
+  document.querySelectorAll(".opening-tab").forEach((btn) => {
+    if (btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => _openingSetPane(btn.dataset.pane));
+  });
+}
+
+async function _openingLoadList() {
+  try {
+    const cid = _trainingClientId();
+    const url = cid
+      ? `/api/openings?client_id=${encodeURIComponent(cid)}`
+      : "/api/openings";
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.opening.list = await res.json();
+    _openingRenderPicker();
+  } catch (e) {
+    const host = document.getElementById("opening-picker");
+    if (host) host.innerHTML = `<div class="lb-empty">Не удалось загрузить дебюты: ${escapeHtml(e.message || String(e))}</div>`;
+  }
+}
+
+function _openingRenderPicker() {
+  const host = document.getElementById("opening-picker");
+  if (!host) return;
+  if (!Array.isArray(state.opening.list) || state.opening.list.length === 0) {
+    host.innerHTML = `<div class="lb-empty">Список дебютов пуст.</div>`;
+    return;
+  }
+  host.innerHTML = state.opening.list.map((o) => {
+    const sideMark = o.side === "w" ? "♔ за белых" : "♚ за чёрных";
+    const seenBadge = o.theory_seen ? `<span class="seen">✓ изучено</span>` : `<span>не изучено</span>`;
+    const acc = o.drill_attempts ? `${o.accuracy.toFixed(1)}%` : "—";
+    return `
+      <button class="opening-card" type="button" data-id="${escapeHtml(o.id)}">
+        <span class="opening-card-title">
+          ${escapeHtml(o.name || o.id)}
+          ${o.eco ? `<span class="opening-card-eco">${escapeHtml(o.eco)}</span>` : ""}
+        </span>
+        <span class="opening-card-side">${sideMark}</span>
+        <span class="opening-card-desc">${escapeHtml(o.description || "")}</span>
+        <span class="opening-card-moves">${escapeHtml(o.moves_summary || "")}</span>
+        <span class="opening-card-stats">
+          ${seenBadge}
+          <span>${o.drill_solved || 0} / ${o.drill_attempts || 0}</span>
+          <span>точн. ${acc}</span>
+        </span>
+      </button>
+    `;
+  }).join("");
+  host.querySelectorAll(".opening-card").forEach((btn) => {
+    btn.addEventListener("click", () => _openingPick(btn.dataset.id));
+  });
+}
+
+async function _openingPick(id) {
+  try {
+    const cid = _trainingClientId();
+    const url = cid
+      ? `/api/openings/${encodeURIComponent(id)}?client_id=${encodeURIComponent(cid)}`
+      : `/api/openings/${encodeURIComponent(id)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.opening.current = await res.json();
+    state.opening.lineIdx = 0;
+    state.opening.moveIdx = 0;
+    state.opening.drillSolved = 0;
+    state.opening.drillFailed = 0;
+    state.opening.drillStreak = 0;
+    state.opening.drillBestStreak = 0;
+    state.opening.drillStartedAt = Date.now();
+    state.opening.pane = "theory";
+    _openingShowRunner();
+    _openingRenderTheory();
+    _openingMarkTheorySeen();
+    _openingRenderProgress();
+    _openingStartLine(0);
+  } catch (e) {
+    alert(`Не удалось открыть дебют: ${e.message || e}`);
+  }
+}
+
+function _openingShowPicker() {
+  const picker = document.getElementById("opening-picker-wrap");
+  const runner = document.getElementById("opening-runner");
+  if (picker) picker.hidden = false;
+  if (runner) runner.hidden = true;
+}
+
+function _openingShowRunner() {
+  const picker = document.getElementById("opening-picker-wrap");
+  const runner = document.getElementById("opening-runner");
+  if (picker) picker.hidden = true;
+  if (runner) runner.hidden = false;
+  const nameEl = document.getElementById("opening-name");
+  if (nameEl && state.opening.current) {
+    nameEl.textContent = state.opening.current.name + (state.opening.current.eco ? ` (${state.opening.current.eco})` : "");
+  }
+  _openingSetPane(state.opening.pane);
+}
+
+function _openingSetPane(pane) {
+  state.opening.pane = pane === "drill" ? "drill" : "theory";
+  document.querySelectorAll(".opening-tab").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.pane === state.opening.pane);
+  });
+  const t = document.getElementById("opening-pane-theory");
+  const d = document.getElementById("opening-pane-drill");
+  if (t) t.hidden = state.opening.pane !== "theory";
+  if (d) d.hidden = state.opening.pane !== "drill";
+}
+
+function _openingRenderTheory() {
+  const host = document.getElementById("opening-theory");
+  if (!host || !state.opening.current) return;
+  const o = state.opening.current;
+  const lineSummaries = (o.lines || []).map((l, i) => {
+    const moves = (l.moves || []).map((m) => escapeHtml(m.san || m.move || "")).join(" ");
+    return `<div><b>${escapeHtml(l.name || `Вариант ${i + 1}`)}.</b> ${moves}</div>`;
+  }).join("");
+  const theory = (o.theory || "Нет описания.")
+    .split(/\n{2,}/)
+    .map((para) => `<p>${escapeHtml(para).replace(/\n/g, "<br>")}</p>`)
+    .join("");
+  host.innerHTML = `
+    <h4>Идеи дебюта</h4>
+    ${theory}
+    <h4>Основные варианты</h4>
+    ${lineSummaries || "<div class=\"muted\">Нет вариантов.</div>"}
+  `;
+}
+
+function _openingStartLine(lineIdx) {
+  const o = state.opening.current;
+  if (!o) return;
+  const lines = o.lines || [];
+  if (!lines.length) return;
+  state.opening.lineIdx = Math.max(0, Math.min(lineIdx, lines.length - 1));
+  state.opening.moveIdx = 0;
+  const board = _openingEnsureBoard();
+  if (!board) return;
+  const startFen = (lines[state.opening.lineIdx] && lines[state.opening.lineIdx].start_fen)
+    ? lines[state.opening.lineIdx].start_fen
+    : "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+  board.setFen(startFen, { locked: false });
+  board.setOrientation(o.side === "b" ? "b" : "w");
+  _openingCoachReset(`Вариант: ${escapeHtml(lines[state.opening.lineIdx].name || `№${state.opening.lineIdx + 1}`)}. Делай ход.`);
+  // If the user plays Black, the line starts with a White move first.
+  _openingMaybeAutoplayBot();
+  _openingRenderProgress();
+}
+
+function _openingMaybeAutoplayBot() {
+  const o = state.opening.current;
+  if (!o) return;
+  const line = (o.lines || [])[state.opening.lineIdx];
+  if (!line) return;
+  const moves = line.moves || [];
+  if (state.opening.moveIdx >= moves.length) return;
+  const m = moves[state.opening.moveIdx];
+  if (!m) return;
+  const playerColor = o.side === "b" ? "b" : "w";
+  const board = state.opening.board;
+  if (!board) return;
+  if (board.turn() !== playerColor) {
+    // Bot's turn — apply expected move automatically.
+    setTimeout(() => {
+      if (state.view !== "opening") return;
+      board.applyUci(m.move);
+      _openingCoachAdd("info", `Соперник: ${escapeHtml(m.san || m.move)}.`);
+      state.opening.moveIdx += 1;
+      _openingMaybeAutoplayBot();
+    }, 380);
+  }
+}
+
+function _openingOnMove(uci) {
+  const o = state.opening.current;
+  if (!o) return;
+  const line = (o.lines || [])[state.opening.lineIdx];
+  if (!line) return;
+  const moves = line.moves || [];
+  const expected = moves[state.opening.moveIdx];
+  if (!expected) return;
+  if (uci.toLowerCase() === expected.move.toLowerCase()) {
+    state.opening.drillSolved += 1;
+    state.opening.drillStreak += 1;
+    state.opening.drillBestStreak = Math.max(state.opening.drillBestStreak, state.opening.drillStreak);
+    _openingCoachAdd("good", `Верно — ${escapeHtml(expected.san || expected.move)}. ${expected.why ? escapeHtml(expected.why) : ""}`);
+    state.opening.moveIdx += 1;
+    if (state.opening.moveIdx >= moves.length) {
+      _openingCoachAdd("good", "Линия пройдена! Можно перезапустить или сменить вариант.");
+      _openingFinishLine();
+      return;
+    }
+    _openingMaybeAutoplayBot();
+    _openingRenderProgress();
+    return;
+  }
+  // Wrong move. Roll the chess.js position back and try to find a
+  // matching mistake explanation.
+  state.opening.drillFailed += 1;
+  state.opening.drillStreak = 0;
+  const board = state.opening.board;
+  let detected = "";
+  if (Array.isArray(expected.mistakes)) {
+    for (const mk of expected.mistakes) {
+      if ((mk.move || "").toLowerCase() === uci.toLowerCase()) {
+        detected = mk.why || "";
+        break;
+      }
+    }
+  }
+  _openingCoachAdd(
+    "bad",
+    detected
+      ? `Не лучший ход. ${escapeHtml(detected)} Правильно: <b>${escapeHtml(expected.san || expected.move)}</b>.`
+      : `Не лучший. По репертуару тут: <b>${escapeHtml(expected.san || expected.move)}</b>${expected.why ? ` — ${escapeHtml(expected.why)}` : ""}.`,
+  );
+  // Roll back the bad move so the user can try the correct one.
+  if (board) {
+    try {
+      board.chess.undo();
+      board._render();
+    } catch (_) { /* ignore */ }
+  }
+  _openingRenderProgress();
+}
+
+function _openingFinishLine() {
+  const board = state.opening.board;
+  if (board) board.setLocked(true);
+  // Persist to the server.
+  const cid = _trainingClientId();
+  const o = state.opening.current;
+  if (cid && o) {
+    fetch("/api/openings/drill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: cid,
+        opening_id: o.id,
+        solved: state.opening.drillSolved,
+        failed: state.opening.drillFailed,
+        streak: state.opening.drillBestStreak,
+        duration_ms: Date.now() - state.opening.drillStartedAt,
+      }),
+    }).then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data) {
+          // Refresh the picker list so badges/stats update next time.
+          _openingLoadList();
+        }
+      })
+      .catch(() => {});
+  }
+}
+
+function _openingPickNextLine() {
+  const o = state.opening.current;
+  if (!o || !Array.isArray(o.lines) || !o.lines.length) return;
+  const next = (state.opening.lineIdx + 1) % o.lines.length;
+  _openingStartLine(next);
+}
+
+function _openingMarkTheorySeen() {
+  const cid = _trainingClientId();
+  const o = state.opening.current;
+  if (!cid || !o) return;
+  fetch("/api/openings/theory_seen", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: cid, opening_id: o.id }),
+  }).catch(() => {});
+}
+
+function _openingCoachReset(msg) {
+  const host = document.getElementById("opening-coach");
+  if (!host) return;
+  host.innerHTML = `<div class="coach-line is-info">${msg || ""}</div>`;
+}
+
+function _openingCoachAdd(kind, msg) {
+  const host = document.getElementById("opening-coach");
+  if (!host) return;
+  const cls = kind === "good" ? "is-good" : kind === "bad" ? "is-bad" : "is-info";
+  host.insertAdjacentHTML("beforeend", `<div class="coach-line ${cls}">${msg || ""}</div>`);
+  host.scrollTop = host.scrollHeight;
+}
+
+function _openingRenderProgress() {
+  const host = document.getElementById("opening-progress");
+  if (!host) return;
+  host.innerHTML = `
+    <div class="prog-cell"><div class="prog-num">${state.opening.drillSolved}</div><div class="prog-lbl">верно</div></div>
+    <div class="prog-cell"><div class="prog-num">${state.opening.drillFailed}</div><div class="prog-lbl">мимо</div></div>
+    <div class="prog-cell"><div class="prog-num">${state.opening.drillStreak}</div><div class="prog-lbl">серия</div></div>
+    <div class="prog-cell"><div class="prog-num">${state.opening.drillBestStreak}</div><div class="prog-lbl">рекорд</div></div>
   `;
 }
 

@@ -734,9 +734,9 @@ class Party:
         random.shuffle(self.puzzle_queue)
         for m in self.members.values():
             m.puzzle_index = 0
-            p = self._next_puzzle_for(m)
-            if p is not None:
-                payload = _puzzle_payload(p)
+            np = self._next_puzzle_for(m)
+            if np is not None:
+                payload = _puzzle_payload(np)
                 await self._send(
                     m.client_id,
                     {
