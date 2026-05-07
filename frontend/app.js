@@ -472,6 +472,7 @@ const state = {
     pendingNext: null,        // setTimeout handle for auto-next after fail
     needsNextOnReturn: false, // user left mid-pendingNext; advance when they come back
     timerHandle: null,        // setInterval handle for live timer display
+    idle: true,               // gate auto-load behind a "Начать игру" click
   },
 };
 
@@ -3324,8 +3325,15 @@ function enterPuzzleView() {
     loadNextPuzzle();
     return;
   }
-  // Auto-load a puzzle when entering an empty view.
+  // Auto-load a puzzle when entering an empty view — but only if the
+  // user has explicitly clicked "Начать игру". Idle entry shows the
+  // start screen instead so we don't ambush anyone with a puzzle they
+  // didn't ask for.
   if (!state.puzzle.current) {
+    if (state.puzzle.idle) {
+      renderPuzzleUi();
+      return;
+    }
     loadNextPuzzle();
   } else {
     // Replay the current puzzle's start position (in case the user
@@ -3396,6 +3404,9 @@ async function loadNextPuzzle() {
     renderPuzzleStatsBar();
     return;
   }
+  // Any active puzzle load implicitly leaves the idle "Start" screen
+  // — once the user has any puzzle on the board they're committed.
+  state.puzzle.idle = false;
   const card = document.getElementById("puzzle-card");
   const actions = document.getElementById("puzzle-actions");
   if (card)    card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
@@ -3841,6 +3852,25 @@ function renderPuzzleUi() {
   renderPuzzleHistory();
   if (!card || !actions) return;
   const p = state.puzzle.current;
+  // Idle (pre-start) screen — user just opened the puzzle tab and we
+  // don't auto-load; show a single "Начать игру" button instead so
+  // they explicitly opt in to the difficulty bump / rating change.
+  if (!p && state.puzzle.idle) {
+    card.innerHTML = `
+      <div class="puzzle-start-screen">
+        <h3>Готов к пазлам?</h3>
+        <p class="muted">Нажми "Начать игру", чтобы загрузить первую задачу. Сложность подстроится под твой рейтинг.</p>
+        <button id="btn-puzzle-start" type="button" class="puzzle-primary puzzle-start-cta">▶ Начать игру</button>
+      </div>
+    `;
+    actions.innerHTML = "";
+    const startBtn = document.getElementById("btn-puzzle-start");
+    if (startBtn) startBtn.onclick = () => {
+      state.puzzle.idle = false;
+      loadNextPuzzle();
+    };
+    return;
+  }
   if (!p) {
     card.innerHTML = `<div class="puzzle-empty">Загружаем задачу…</div>`;
     actions.innerHTML = "";
@@ -4805,6 +4835,14 @@ async function _bootUser() {
   setInterval(userHeartbeat, 60_000);
   // Start the SSE notifications stream so party invitations pop up live.
   _bootNotifications();
+  // setView() runs synchronously at module-load time, before
+  // _bootUser resolves — so an enterPuzzleView() that ran during
+  // boot will have called presenceConnect() before client_id was
+  // set, silently no-op'ing. Now that identity is ready, retry if
+  // we're sitting on the puzzle tab.
+  if (state.view === "puzzle") {
+    try { presenceConnect(); } catch (_) { /* ignore */ }
+  }
 }
 
 // ---------- Party (co-op puzzles over WebSocket) ----------
