@@ -5177,18 +5177,21 @@ function _installPartyCursorTracking() {
   const onDragStart = (ev) => {
     if (!isPartyActive()) return;
     window.__partyCursorDragging = true;
-    // Try to identify the piece + origin square so spectators can
-    // render the same floating glyph the player is dragging. The
-    // dragstart event is emitted on the .piece <img>, whose parent
-    // .square has data-square="e2" and whose own dataset.piece is
-    // the FEN char (uppercase = white).
-    const pieceEl = ev && ev.target && ev.target.classList && ev.target.classList.contains("piece")
-      ? ev.target
+    // Identify the piece + origin square so spectators can render the
+    // same floating glyph the player is dragging. dragstart can fire
+    // on the .piece span itself, on a child img, or anywhere inside —
+    // closest(".piece") handles all those cases. The .piece carries
+    // dataset.piece (FEN char) and is a direct child of a .square
+    // div whose dataset.square is "e2" / "h7" / etc.
+    const pieceEl = ev && ev.target && ev.target.closest
+      ? ev.target.closest(".piece")
       : null;
     if (pieceEl) {
       const fenChar = pieceEl.dataset && pieceEl.dataset.piece;
       const sqEl = pieceEl.closest(".square");
-      const fromSq = sqEl && sqEl.dataset && sqEl.dataset.square;
+      const fromSq = (sqEl && sqEl.dataset && sqEl.dataset.square)
+        || (pieceEl.dataset && pieceEl.dataset.fromSquare)
+        || "";
       if (fenChar) {
         const color = fenChar === fenChar.toUpperCase() ? "w" : "b";
         window.__partyDragPiece = color + fenChar.toUpperCase();
@@ -5199,6 +5202,22 @@ function _installPartyCursorTracking() {
     } else {
       window.__partyDragPiece = "";
       window.__partyDragFrom = "";
+    }
+    // Push one frame immediately so spectators get the piece info as
+    // soon as the drag starts, not on the next mousemove. Use cursor
+    // coords from the event itself.
+    const board = document.querySelector(".board");
+    if (board) {
+      const s = sample(board, ev);
+      if (s) {
+        const sel = (typeof state.selectedSquare === "string") ? state.selectedSquare : "";
+        _partyReportCursor({
+          x: s.x, y: s.y, flipped: s.flipped, selected: sel,
+          dragging: true,
+          drag_piece: window.__partyDragPiece || "",
+          drag_from: window.__partyDragFrom || "",
+        });
+      }
     }
   };
   const onDragEnd = () => {
@@ -5789,6 +5808,8 @@ function handleSpectatorMessage(msg) {
         flipped: !!msg.flipped,
         selected: typeof msg.selected === "string" ? msg.selected : "",
         dragging: !!msg.dragging,
+        drag_piece: typeof msg.drag_piece === "string" ? msg.drag_piece : "",
+        drag_from: typeof msg.drag_from === "string" ? msg.drag_from : "",
         ts: Date.now(),
       };
       _spectatorRender();
