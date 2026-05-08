@@ -278,6 +278,19 @@ def _summarize(u: dict[str, Any]) -> dict[str, Any]:
     wrong = int(s.get("wrong") or 0)
     skipped = int(s.get("skipped") or 0)
     win_pct = (solved / games * 100.0) if games else 0.0
+    rush = (u.get("puzzle_rush") or {}).get("best") or {}
+    rush_best = 0
+    for mode_key in PUZZLE_RUSH_MODES:
+        cur = rush.get(mode_key) or {}
+        b = int(cur.get("best") or 0)
+        if b > rush_best:
+            rush_best = b
+    dp = u.get("daily_puzzle") or {}
+    daily_attempts = (dp.get("attempts") or {})
+    daily_solved = sum(
+        1 for a in daily_attempts.values()
+        if isinstance(a, dict) and a.get("outcome") == "solved"
+    )
     return {
         "client_id": u.get("client_id"),
         "nickname": u.get("nickname"),
@@ -291,6 +304,11 @@ def _summarize(u: dict[str, Any]) -> dict[str, Any]:
         "best_streak": int(s.get("best_streak") or 0),
         "current_streak": int(s.get("current_streak") or 0),
         "last_seen": int(u.get("last_seen") or 0),
+        "created_at": int(u.get("created_at") or 0),
+        "puzzle_rush_best": rush_best,
+        "daily_best_streak": int(dp.get("best_streak") or 0),
+        "daily_current_streak": int(dp.get("current_streak") or 0),
+        "daily_solved_total": daily_solved,
     }
 
 

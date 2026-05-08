@@ -9548,113 +9548,257 @@ async function _refreshGlobalLeaderboard(force) {
   renderGlobalLeaderboard();
 }
 
-function renderGlobalLeaderboard() {
-  const hosts = [
-    document.getElementById("global-leaderboard-rush"),
-    document.getElementById("global-leaderboard-onevsone"),
-    document.getElementById("global-leaderboard-puzzle"),
-    document.getElementById("global-leaderboard-daily"),
-  ].filter(Boolean);
-  if (!hosts.length) return;
-  const rows = state.globalLeaderboard.rows || [];
+// Per-mode leaderboard configuration. Each mode picks its own sort key
+// + display so the four sidebars (Puzzle / Daily / Rush / 1 vs 1) each
+// rank a different ladder, instead of all four showing the same row.
+const _LB_MODES = {
+  puzzle: {
+    title: "Leaderboard · Puzzle",
+    sortKey: (u) => Number(u.rating || 0),
+    eligible: () => true,
+    score: (u) => (u.rating != null ? u.rating : 1200),
+    scoreLabel: () => "",
+    empty: "Пока никого нет. Реши первый пазл, чтобы появиться здесь.",
+  },
+  daily: {
+    title: "Leaderboard · Daily",
+    sortKey: (u) => Number(u.daily_best_streak || 0) * 10000 + Number(u.daily_solved_total || 0),
+    eligible: (u) => Number(u.daily_solved_total || 0) > 0 || Number(u.daily_best_streak || 0) > 0,
+    score: (u) => `🔥 ${Number(u.daily_best_streak || 0)}`,
+    scoreLabel: (u) => `Решено: ${Number(u.daily_solved_total || 0)}`,
+    empty: "Пока никого нет. Реши сегодняшний дневной пазл, чтобы появиться здесь.",
+  },
+  rush: {
+    title: "Leaderboard · Rush",
+    sortKey: (u) => Number(u.puzzle_rush_best || 0),
+    eligible: (u) => Number(u.puzzle_rush_best || 0) > 0,
+    score: (u) => Number(u.puzzle_rush_best || 0),
+    scoreLabel: () => "",
+    empty: "Пока никого нет. Сыграй Puzzle Rush, чтобы появиться здесь.",
+  },
+  onevsone: {
+    title: "Leaderboard · 1 vs 1",
+    sortKey: (u) => Number(u.rating || 0),
+    eligible: () => true,
+    score: (u) => (u.rating != null ? u.rating : 1200),
+    scoreLabel: () => "",
+    empty: "Пока никого нет.",
+  },
+};
+
+function _renderGlobalLeaderboardInto(host, mode) {
+  const cfg = _LB_MODES[mode] || _LB_MODES.puzzle;
+  const rows = (state.globalLeaderboard.rows || [])
+    .filter(cfg.eligible)
+    .slice()
+    .sort((a, b) => cfg.sortKey(b) - cfg.sortKey(a));
   const list = !rows.length
-    ? `<div class="cc-rush-lb-tab-empty">Пока никого нет. Реши первый пазл, чтобы появиться здесь.</div>`
+    ? `<div class="cc-rush-lb-tab-empty">${escapeHtml(cfg.empty)}</div>`
     : `<div class="gl-list">${rows.slice(0, 30).map((u, i) => {
         const av = avatarHtml(u.avatar);
         const nick = escapeHtml(u.nickname || "Гость");
         const cid = escapeHtml(u.client_id || "");
-        const rating = u.rating != null ? u.rating : 1200;
         const isSelf = u.client_id === state.user.client_id;
+        const score = cfg.score(u);
         return `<div class="gl-row" data-cid="${cid}" data-nick="${nick}">
           <span class="gl-rank">#${i + 1}</span>
           <span class="gl-av">${av}</span>
           <span class="gl-nick">${nick}${isSelf ? ' <span class="muted">(вы)</span>' : ""}</span>
-          <span class="gl-score">${rating}</span>
+          <span class="gl-score">${escapeHtml(String(score))}</span>
         </div>`;
       }).join("")}</div>`;
-  const html = `
+  host.innerHTML = `
     <div class="global-leaderboard">
-      <div class="gl-title">Leaderboard · Global</div>
+      <div class="gl-title">${escapeHtml(cfg.title)}</div>
       ${list}
     </div>
   `;
-  for (const host of hosts) {
-    host.innerHTML = html;
-    host.querySelectorAll(".gl-row[data-cid]").forEach((row) => {
-      row.addEventListener("click", () => {
-        const cid = row.dataset.cid;
-        const nick = row.dataset.nick;
-        if (cid && cid !== state.user.client_id) {
-          openPlayerChallengeProfile({ client_id: cid, nickname: nick });
-        }
-      });
+  host.querySelectorAll(".gl-row[data-cid]").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      const cid = row.dataset.cid;
+      const nick = row.dataset.nick;
+      if (cid && cid !== state.user.client_id) {
+        openPlayerChallengeProfile({ client_id: cid, nickname: nick }, e.currentTarget);
+      }
     });
+  });
+}
+
+function renderGlobalLeaderboard() {
+  const targets = [
+    { id: "global-leaderboard-rush", mode: "rush" },
+    { id: "global-leaderboard-onevsone", mode: "onevsone" },
+    { id: "global-leaderboard-puzzle", mode: "puzzle" },
+    { id: "global-leaderboard-daily", mode: "daily" },
+  ];
+  for (const t of targets) {
+    const host = document.getElementById(t.id);
+    if (!host) continue;
+    _renderGlobalLeaderboardInto(host, t.mode);
   }
 }
 
 // ============================================================
-// Player profile popover (menu2-style) with Challenge button
+// Player profile popover (chess.com #user-popover layout)
 // ============================================================
-async function openPlayerChallengeProfile(player) {
+//
+// Click a player row in any leaderboard / online list → a small popover
+// appears anchored near the clicked element with avatar, nickname,
+// rating, joined date and a green "Challenge" primary button. There's
+// NO "Add Friend" button (per product decision: this is a private app
+// where everyone is already a friend). Clicking the nickname *inside*
+// the popover navigates to the full profile dialog.
+async function openPlayerChallengeProfile(player, anchorEl) {
   if (!player || !player.client_id) return;
   if (player.client_id === state.user.client_id) {
     if (typeof openProfileModal === "function") openProfileModal(state.user.client_id);
     return;
   }
-  let u = { ...player };
+  // Show popover immediately with what we already have so the user
+  // doesn't stare at a blank screen while /api/users/:id resolves.
+  _renderUserPopover({ ...player }, anchorEl);
   try {
     const r = await api(`/api/users/${encodeURIComponent(player.client_id)}`);
-    if (r) u = { ...u, ...r };
+    if (r) _renderUserPopover({ ...player, ...r }, anchorEl);
   } catch (_) { /* ignore */ }
-  _renderProfilePopover(u);
 }
 
-function _renderProfilePopover(u) {
-  let modal = document.getElementById("profile-popover-modal");
-  if (!modal) {
-    modal = document.createElement("div");
-    modal.id = "profile-popover-modal";
-    modal.className = "settings-modal";
-    modal.hidden = true;
-    modal.innerHTML = `<div class="settings-modal-card profile-popover-card"></div>`;
-    document.body.appendChild(modal);
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) { modal.hidden = true; }
-    });
-  }
-  const card = modal.querySelector(".settings-modal-card");
-  const av = avatarHtml(u.avatar);
-  const nick = escapeHtml(u.nickname || "Гость");
-  const rating = u.rating != null ? u.rating : 1200;
-  const games = u.games != null ? u.games : 0;
-  const winPct = u.win_pct != null ? u.win_pct : 0;
-  card.innerHTML = `
-    <div class="profile-popover">
-      <div class="pp-head">
-        <span class="pp-av">${av}</span>
+function _formatJoinedDate(ts) {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return "";
+    const months = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+    return `На сайте с ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+  } catch (_) { return ""; }
+}
+
+function _ensureUserPopoverHost() {
+  let host = document.getElementById("user-popover");
+  if (host) return host;
+  host = document.createElement("div");
+  host.id = "user-popover";
+  host.hidden = true;
+  host.innerHTML = `
+    <div data-cy="user-popover" class="user-popover-wrap">
+      <div id="user-popover-component" class="user-popover-component">
         <div>
-          <div class="pp-nick">${nick}</div>
-          <div class="pp-meta">${u.last_seen ? "Был в сети: " + _formatLastSeen(u.last_seen) : "Игрок"}</div>
+          <div class="user-popover-content"></div>
         </div>
-      </div>
-      <div class="pp-stats">
-        <div class="pp-stat"><div class="pp-stat-val">${rating}</div><div class="pp-stat-lbl">Rating</div></div>
-        <div class="pp-stat"><div class="pp-stat-val">${games}</div><div class="pp-stat-lbl">Games</div></div>
-        <div class="pp-stat"><div class="pp-stat-val">${winPct}%</div><div class="pp-stat-lbl">Win</div></div>
-      </div>
-      <div class="pp-actions">
-        <button type="button" class="pp-close">Закрыть</button>
-        <button type="button" class="pp-challenge primary">⚔️ Челлендж</button>
       </div>
     </div>
   `;
-  modal.hidden = false;
-  card.querySelector(".pp-close").onclick = () => { modal.hidden = true; };
-  card.querySelector(".pp-challenge").onclick = () => {
-    modal.hidden = true;
+  document.body.appendChild(host);
+  // Backdrop click-away: any pointerdown outside the popover content
+  // (and outside an active popover trigger) dismisses the popover.
+  document.addEventListener("pointerdown", (e) => {
+    if (host.hidden) return;
+    if (host.contains(e.target)) return;
+    host.hidden = true;
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    if (!host.hidden && e.key === "Escape") host.hidden = true;
+  });
+  window.addEventListener("resize", () => { host.hidden = true; });
+  return host;
+}
+
+function _positionUserPopover(host, anchorEl) {
+  const popover = host.querySelector("#user-popover-component");
+  if (!popover) return;
+  const margin = 8;
+  // Reset so we can measure
+  popover.style.left = "0px";
+  popover.style.top = "0px";
+  const pw = popover.offsetWidth || 320;
+  const ph = popover.offsetHeight || 200;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left;
+  let top;
+  if (anchorEl && typeof anchorEl.getBoundingClientRect === "function") {
+    const r = anchorEl.getBoundingClientRect();
+    // Prefer placing the popover to the right of the anchor; if it
+    // overflows the viewport, fall back to the left side.
+    left = r.right + margin;
+    if (left + pw > vw - margin) left = Math.max(margin, r.left - pw - margin);
+    top = r.top;
+    if (top + ph > vh - margin) top = Math.max(margin, vh - ph - margin);
+  } else {
+    left = Math.max(margin, (vw - pw) / 2);
+    top = Math.max(margin, (vh - ph) / 2);
+  }
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(top)}px`;
+}
+
+function _renderUserPopover(u, anchorEl) {
+  const host = _ensureUserPopoverHost();
+  const card = host.querySelector(".user-popover-content");
+  const av = avatarHtml(u.avatar);
+  const nick = escapeHtml(u.nickname || "Гость");
+  const rating = u.rating != null ? u.rating : 1200;
+  const joined = _formatJoinedDate(Number(u.created_at || 0));
+  const last = u.last_seen ? "Был в сети: " + _formatLastSeen(u.last_seen) : "Игрок";
+  card.innerHTML = `
+    <div class="user-popover-user-info">
+      <span class="user-popover-avatar" data-cy="user-popover-avatar" role="link" tabindex="0" title="${nick}">${av}</span>
+      <div class="user-popover-about">
+        <div class="user-popover-tagline">
+          <a class="user-popover-username" data-cy="user-popover-username" href="#" role="link">${nick}</a>
+        </div>
+        <div class="user-popover-full-name">${last}</div>
+        <div class="user-popover-ratings">
+          <span class="user-rating-component" data-cy="user-popover-rating">
+            <span class="cc-icon-glyph cc-icon-size-16" aria-hidden="true">
+              <svg viewBox="0 0 24 24" height="16" width="16" xmlns="http://www.w3.org/2000/svg"><path d="M5.77 15c-1.03 0-1.37-.4-1.2-1.4l1.53-10.2C6.27 2.4 6.73 2 7.77 2h5.8c1.03 0 1.33.4 1.07 1.37L11.41 15H5.77zM18.83 9c1.03 0 1.2.33.57 1.13l-9.67 12.73c-1.23 1.63-1.6 1.47-1.27-.57L10.66 8.99 18.83 9z"/></svg>
+            </span>
+            <span class="cc-text-small-bold">${rating}</span>
+          </span>
+          ${joined ? `<span class="user-popover-divider"></span><div class="cc-text-small-bold" data-cy="user-popover-joined-date">${escapeHtml(joined)}</div>` : ""}
+        </div>
+      </div>
+    </div>
+    <div class="user-popover-actions">
+      <div data-cy="user-popover-actions" class="user-popover-actions-component">
+        <div class="user-popover-actions-more">
+          <button class="cc-button-component cc-button-secondary cc-button-medium cc-bg-secondary user-popover-actions-button-more" type="button" data-cy="user-popover-more" aria-label="Ещё">
+            <span aria-hidden="true" class="cc-icon-glyph cc-icon-size-20 cc-button-icon">
+              <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 14.5c-1.34 0-2.5-1.16-2.5-2.5s1.16-2.5 2.5-2.5 2.5 1.16 2.5 2.5-1.16 2.5-2.5 2.5zM4 14.5c-1.34 0-2.5-1.16-2.5-2.5S2.66 9.5 4 9.5s2.5 1.16 2.5 2.5S5.34 14.5 4 14.5zM12 14.5c-1.34 0-2.5-1.16-2.5-2.5s1.16-2.5 2.5-2.5 2.5 1.16 2.5 2.5-1.16 2.5-2.5 2.5z"/></svg>
+            </span>
+          </button>
+        </div>
+        <div class="user-popover-primary-action-button">
+          <button class="cc-button-component cc-button-primary cc-button-medium cc-bg-primary cc-button-full" type="button" data-cy="user-popover-challenge">
+            <span aria-hidden="true" class="cc-icon-glyph cc-icon-size-20 cc-button-icon">
+              <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M6 8H2v4h4V8zm0 0h4V4H6v4zM2 20h4v-4H2v4zm4-4h2.1c-.07.35-.1.68-.1 1 0 1.86.55 3.57 1.5 5H2.67C.67 22 0 21.33 0 19.33V4.66C0 2.66.67 2 2.67 2h14.66C19.33 2 20 2.67 20 4.67v3.84c-.64-.22-1.31-.38-2-.45V4H14v4h-4v4H6v4zM17 24c-3.83 0-7-3.17-7-7 0-3.87 3.17-7 7-7 3.87 0 7 3.13 7 7 0 3.83-3.13 7-7 7zm-1.03-2.97c0 .63.33.97.93.97h.1c.63 0 .97-.33.97-.93v-3.07h3.1c.6 0 .93-.33.93-.97v-.1c0-.6-.33-.93-.97-.93h-3.07v-3.03c0-.63-.33-.97-.93-.97h-.1c-.63 0-.97.33-.97.93v3.07h-3.03c-.6 0-.93.33-.93.97v.1c0 .6.33.93.97.93h3v3.03z"/></svg>
+            </span>
+            <span>Челлендж</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  host.hidden = false;
+  _positionUserPopover(host, anchorEl);
+  const navigateToProfile = (e) => {
+    if (e) e.preventDefault();
+    host.hidden = true;
+    if (typeof openProfileModal === "function") openProfileModal(u.client_id);
+  };
+  card.querySelector(".user-popover-username").addEventListener("click", navigateToProfile);
+  card.querySelector(".user-popover-avatar").addEventListener("click", navigateToProfile);
+  card.querySelector('[data-cy="user-popover-challenge"]').addEventListener("click", () => {
+    host.hidden = true;
     setView("onevsone");
     setTimeout(() => _onevsoneFocusChallengeFor(u), 60);
-  };
+  });
+  card.querySelector('[data-cy="user-popover-more"]').addEventListener("click", () => {
+    // Right now there are no extra actions to show — just bounce to
+    // the full profile dialog so the More button is still useful.
+    host.hidden = true;
+    if (typeof openProfileModal === "function") openProfileModal(u.client_id);
+  });
 }
 
 // ============================================================
