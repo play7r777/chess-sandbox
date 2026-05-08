@@ -9,11 +9,16 @@
   <body>
     <header class="topbar">
       <div class="brand">
-        <span class="brand-piece">♛</span>
-        <span class="brand-name">Chess Sandbox</span>
+        <span class="brand-name">chess sandbox</span>
         <div class="view-tabs" role="tablist" aria-label="Режим интерфейса">
-          <button id="tab-main"     class="view-tab is-active" type="button" role="tab" aria-selected="true"  data-view="main">Main</button>
-          <button id="tab-analysis" class="view-tab"           type="button" role="tab" aria-selected="false" data-view="analysis">Analysis</button>
+          <button id="tab-main"     class="view-tab view-tab-icon is-active" type="button" role="tab" aria-selected="true"  data-view="main" title="Main">
+            <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M52 62H38v16h14V62z" fill="#324660"/><path d="M38 72.5a20.812 20.812 0 0 1 14 0V83H38V72.5z" fill="#486688"/><path d="M84 22H6a6 6 0 0 0-6 6v13a6 6 0 0 0 6 6h78a6 6 0 0 0 6-6V28a6 6 0 0 0-6-6z" fill="#324660"/><path fill-rule="evenodd" clip-rule="evenodd" d="M5.387 22.031A6 6 0 0 0 0 28v13a5.994 5.994 0 0 0 2.64 4.971A16.977 16.977 0 0 0 8 33.591V22H6c-.207 0-.412.01-.613.031zM82 22v11.592c0 4.737 1.976 9.204 5.36 12.38A5.994 5.994 0 0 0 90 41V28a6 6 0 0 0-6-6h-2z" fill="#486688"/><path d="M0 40V28a6 6 0 0 1 6-6h1l-.073.038a10 10 0 0 0-5.217 7.27L0 40zM90 40V28a6 6 0 0 0-6-6h-1l.073.038a10 10 0 0 1 5.217 7.27L90 40z" fill="#749BBF"/><path d="M21.317 82.566a9.854 9.854 0 0 1 6.673-4.512 98.534 98.534 0 0 1 34.02 0 9.854 9.854 0 0 1 6.673 4.512L71 86.302l-6.03 1.229a100 100 0 0 1-39.94 0L19 86.302l2.317-3.736z" fill="#DAD8D6"/><path d="M21.317 82.566a9.853 9.853 0 0 1 6.673-4.512 98.534 98.534 0 0 1 34.02 0 9.853 9.853 0 0 1 6.673 4.512L71 86.302l-3.348-3.339a13.892 13.892 0 0 0-7.543-3.868 92.611 92.611 0 0 0-30.218 0 13.892 13.892 0 0 0-7.543 3.868L19 86.303l2.317-3.737z" fill="#F1F1F1"/><path d="M72 5H18a8 8 0 0 0-8 8v48a8 8 0 0 0 8 8h54a8 8 0 0 0 8-8V13a8 8 0 0 0-8-8z" fill="#E7E6E5"/><path d="M10 37V13a8 8 0 0 1 8-8h44L20.275 6.07a9 9 0 0 0-8.749 8.389L10 37zM80 37v24a8 8 0 0 1-8 8H28l42.636-1.093a8 8 0 0 0 7.776-7.457L80 37z" fill="#F8F8F8"/><path d="M68 13H22a4 4 0 0 0-4 4v40a4 4 0 0 0 4 4h46a4 4 0 0 0 4-4V17a4 4 0 0 0-4-4z" fill="#749BBF"/><path d="M67 16H23a2 2 0 0 0-2 2v38a2 2 0 0 0 2 2h44a2 2 0 0 0 2-2V18a2 2 0 0 0-2-2z" fill="#AED0F0"/><path opacity=".5" d="M21 50.591V18a2 2 0 0 1 2-2h43.312l-33.784 2.103a10 10 0 0 0-9.335 9.049L21 50.592z" fill="#D0E6FB"/><path fill-rule="evenodd" clip-rule="evenodd" d="m31.882 41.646 2.236 1.118a24.333 24.333 0 0 0 21.764 0l2.236-1.118 2.236 4.472-2.236 1.118a29.333 29.333 0 0 1-26.236 0l-2.236-1.118 2.236-4.472zM54.444 36C56.952 36 59 33.767 59 31.001c0-2.765-2.032-5.093-4.556-4.998C52.048 26.003 50 28.236 50 31 50 33.767 51.937 36 54.444 36zm-18.888 0C37.952 36 40 33.767 40 31.001c0-2.765-2.048-5.093-4.444-4.998C33.048 26.003 31 28.236 31 31 31 33.767 33.032 36 35.556 36z" fill="#486688"/></svg>
+            <span>Main</span>
+          </button>
+          <button id="tab-analysis" class="view-tab view-tab-icon"           type="button" role="tab" aria-selected="false" data-view="analysis" title="Analysis">
+            <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M40 75c19.33 0 35-15.67 35-35S59.33 5 40 5 5 20.67 5 40s15.67 35 35 35z" fill="#AED0F0"/><path fill-rule="evenodd" clip-rule="evenodd" d="M65 27.5C65 45.45 50.448 60 32.5 60c-11.297 0-21.248-5.764-27.072-14.511C8.062 62.211 22.538 75 40 75c19.33 0 35-15.67 35-35 0-11.397-5.447-21.521-13.88-27.912A32.356 32.356 0 0 1 65 27.5z" fill="#D0E6FB"/><path fill-rule="evenodd" clip-rule="evenodd" d="M5 40c0 19.314 15.645 34.975 34.953 35H40V40h35C75 20.67 59.33 5 40 5v35H5z" fill="#486688"/><path fill-rule="evenodd" clip-rule="evenodd" d="M32.5 60c2.581 0 5.093-.3 7.5-.87V75h-.074c-17.43-.036-31.868-12.813-34.498-29.512C11.252 54.236 21.203 60 32.5 60zm28.62-47.911C67.428 16.868 72.064 23.735 74 31.66V40H62.51A32.403 32.403 0 0 0 65 27.5a32.356 32.356 0 0 0-3.88-15.411z" fill="#749BBF"/><path fill-rule="evenodd" clip-rule="evenodd" d="M40.066 75C59.366 74.964 75 59.308 75 40H62.632C58.266 49.19 50.014 56.175 40 58.832V75h.066z" fill="#D0E6FB"/><path d="m57.416 67.39 21.06 21.05c1.066 1.118 1.89 1.558 3.225 1.558 1.708 0 3.424-1.266 5.225-3.068 1.887-1.887 3.07-3.739 3.07-5.457 0-.964-.52-2-1.56-2.993l-21.05-21.05" fill="#666564"/><path opacity=".5" fill-rule="evenodd" clip-rule="evenodd" d="M79.423 89.293c.681.496 1.359.705 2.278.705 1.708 0 3.424-1.266 5.225-3.068 1.887-1.887 3.071-3.739 3.071-5.457 0-.964-.52-2-1.56-2.993L71.63 61.675l12.56 16.118c3.625 4.652.365 10.92-4.768 11.5z" fill="#8B8987"/><path fill-rule="evenodd" clip-rule="evenodd" d="M76.51 66.554c-4.682 3.521-6.541 9.641-4.837 15.086L57.416 67.39l9.97-9.96 9.124 9.124z" fill="#4B4847"/><path fill-rule="evenodd" clip-rule="evenodd" d="M40 80c22.091 0 40-17.909 40-40S62.091 0 40 0 0 17.909 0 40s17.909 40 40 40zm0-14c14.36 0 26-11.64 26-26S54.36 14 40 14 14 25.64 14 40s11.64 26 26 26z" fill="#749BBF"/><path fill-rule="evenodd" clip-rule="evenodd" d="M40 80c22.091 0 40-17.909 40-40S62.091 0 40 0 0 17.909 0 40s17.909 40 40 40zm0-10c16.569 0 30-13.431 30-30 0-16.569-13.431-30-30-30-16.569 0-30 13.431-30 30 0 16.569 13.431 30 30 30z" fill="#DAD8D6"/><path fill-rule="evenodd" clip-rule="evenodd" d="M25.277 77.204A39.895 39.895 0 0 0 40 80c15.94 0 29.704-9.325 36.132-22.817C64.954 73.2 44.43 81.349 25.277 77.203z" fill="#BEBDB9"/><path fill-rule="evenodd" clip-rule="evenodd" d="M50.82 1.48A40.034 40.034 0 0 0 40 0C23.706 0 9.688 9.742 3.452 23.72 13.552 8.01 32.432-.678 50.82 1.48z" fill="#F1F1F1"/></svg>
+            <span>Analysis</span>
+          </button>
           <button id="tab-puzzle"   class="view-tab view-tab-icon" type="button" role="tab" aria-selected="false" data-view="puzzle" title="Puzzle">
             <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M67.882 15.1v17.09h7.448c4.475 0 9.67-2.93 9.67-7.92V15.1H67.882zM29.5 20.09v9.17c0 2.797 2.626 3.4 4.83 3.4 5 0 10.91 3.398 10.91 8.95h1V20.09H29.5zM5 50.14v-9.17l39.965 10 39.965-10v9.07c0 1.48-.69 2.96-2.07 4.09l-32.96 27c-1.38 1.13-3.19 1.7-5 1.7s-3.62-.57-5-1.7L7.07 54.23C5.69 53.1 5 51.62 5 50.14z" fill="#A93616"/><path fill-rule="evenodd" clip-rule="evenodd" d="M82.995 40.006a6.786 6.786 0 0 0-3.34 1.84L52.36 69.14a16.743 16.743 0 0 0-4.844 13.278A7.366 7.366 0 0 0 49.9 81.13l32.96-27c1.38-1.13 2.07-2.61 2.07-4.09v-9.17s-.87-.476-1.935-.864z" fill="#DC501D"/><path d="M75.33 7.18c4.673 0 10.164 3.272 9.644 8.56-.523 5.314-6.14 7.24-10.734 7.24-2.432 0-4.824 2.79-2.41 4.75l11.02 9.03c1.385 1.134 2.07 2.57 2.07 4.21 0 1.64-.694 2.854-2.07 3.98l-32.96 27c-1.38 1.13-3.19 1.7-5 1.7s-3.62-.57-5-1.7L7.07 45.06c-1.3-1.065-2.063-2.498-2.063-4.09 0-1.592.604-2.905 2.063-4.1l8.51-6.98c3.3-2.71 8.01-.369 8.01 2.14 0 5.686 5.861 9.19 10.93 9.19 5.101 0 11.02-3.463 10.713-9.19-.29-5.377-6.03-8.55-10.903-8.55-2.172 0-4.802-1.497-4.83-3.48 0-.761.046-1.54 1.04-2.36l9.48-7.77c2.76-2.26 7.24-2.26 10 0l9.87 8.08c1.87 1.53 6.14.77 5.8-2.21-.52-5.293 4.957-8.57 9.64-8.57v.01z" fill="#FA742C"/><path fill-rule="evenodd" clip-rule="evenodd" d="M77.794 49.091 49.89 71.95c-1.38 1.13-3.19 1.7-5 1.7s-3.62-.57-5-1.7L21.834 57.157l18.333 10.336a10 10 0 0 0 10.436-.376L77.794 49.09z" fill="#FFA459"/></svg>
             <span>Puzzle</span>
@@ -26,8 +31,8 @@
             <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M79.4 13.47c-6.77 2.64-12.66 12.72-9.96 17.17.96 1.59 7.63 1.38 7.89 1.38 2.48 0 4.95-.77 6.84-2.32 1.89-1.55 2.83-3.57 2.83-5.6v-9.17s-5.33-2.35-7.6-1.46zM31.31 19.92v9.17c0 2.894 2.819 3.4 5.02 3.4 5 0 10.91 3.398 10.91 8.95h3.481V20.265l-19.41-.345zM81.6 40.7 43 79.5l41.86-25.54c1.609-1 2.07-2.61 2.07-4.09V40.7H81.6z" fill="#99580E"/><path d="M77.33 7.01c4.391 0 9.475 2.8 9.67 7.658.235 5.823-5.926 8.142-10.76 8.142-.87 0-1.74.27-2.41.81-1.33 1.09-1.33 2.86 0 3.94l11.02 9.03c2.76 2.26 2.76 5.93 0 8.19L43.954 78.871c-.698.582-1.747.007-1.632-.894L44.23 63 7.413 84.431c-.948.552-1.965-.605-1.295-1.475L24.591 59 4.602 63.19c-.927.193-1.58-.89-.974-1.619L17.58 44.78l-15.686.093c-.943.006-1.369-1.176-.64-1.773L17.58 29.72c2.465-2.02 8.01-1.1 8.01 2.14 0 5.69 5.86 9.19 10.93 9.19 5.1 0 11.02-3.463 10.712-9.19-.289-5.376-6.029-8.55-10.902-8.55-1.406 0-2.51.134-3.7-.83-1.75-1.44-1.75-3.64-.09-5.01l9.48-7.77c1.38-1.13 3.19-1.7 5-1.7s3.62.57 5 1.7l9.87 8.08c.66.54 1.54.82 2.41.82.87 0 1.74-.27 2.41-.82.74-.61 1.07-1.42.98-2.21C67.17 10.277 72.647 7 77.33 7v.01z" fill="#F7C631"/><path fill-rule="evenodd" clip-rule="evenodd" d="m75.361 52.69-31.407 26.18c-.698.582-1.747.007-1.633-.894L44.23 63 7.413 84.431c-.949.552-1.965-.605-1.295-1.475L24.59 59 4.602 63.19c-.927.193-1.58-.89-.974-1.619L17.58 44.78l-15.686.093c-.942.006-1.368-1.176-.64-1.773L17.58 29.72c.836-.685 2.027-1.032 3.236-1.065C20.02 38.04 26.634 47.27 37 48.5l11 2.334a6.33 6.33 0 0 1 4.99 6.765c-.218 2.413 2.245 4.168 4.454 3.171l17.917-8.08z" fill="#FA742C"/></svg>
             <span>Rush</span>
           </button>
-          <button id="tab-battle" class="view-tab view-tab-icon" type="button" role="tab" aria-selected="false" data-view="battle" title="Puzzle Battle — пати с друзьями">
-            <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M29.652 80.702c.645.552 2.736-1.185 3.614-2.038 2.022-1.985-1.443-7.507-2.824-9.105 0 0-5.225-5.985-9.118-9.28-1.559-1.425-6.99-5.016-9.013-3.031-.878.861-2.655 2.92-2.11 3.58L29.66 80.702h-.008zM14.095 82.347s-.596 3.312-1.887 4.572a6.088 6.088 0 0 1-8.64-.097c-2.363-2.424-2.322-6.304.093-8.666 1.283-1.26 4.598-1.784 4.598-1.784l5.827 5.975h.008z" fill="#666564"/><path d="m23.587 74.506-9.583 7.772-5.827-5.975 7.92-9.407 7.49 7.61z" fill="#666564"/><path d="M23.586 74.507s-2.722-2.512-10.824-3.65l3.334-3.961 7.49 7.611z" fill="#4B4847"/><path d="m39.59 62.773 40.746-39.075c5.802-5.694 5.3-15.52 5.3-15.52s-9.782-.718-15.584 4.977L29.269 52.267l4.994 5.417 5.328 5.089z" fill="#BEBDB9"/><path d="M70.053 13.155c5.802-5.695 15.585-4.978 15.585-4.978L72.992 20.364l-1.201-1.767a4.254 4.254 0 0 0-3.888-1.849l-1.757.154 3.907-3.747z" fill="#E7E6E5"/><path d="M60.35 80.702c-.646.552-2.737-1.185-3.615-2.038-2.022-1.985 1.443-7.507 2.824-9.105 0 0 5.225-5.985 9.118-9.28 1.559-1.425 6.99-5.016 9.013-3.031.878.861 2.655 2.92 2.11 3.58L60.341 80.702h.008zM75.907 82.347s.595 3.312 1.886 4.572a6.089 6.089 0 0 0 8.64-.097c2.363-2.424 2.322-6.304-.093-8.666-1.283-1.26-4.597-1.784-4.597-1.784l-5.828 5.975h-.008z" fill="#666564"/><path d="m66.414 74.506 9.583 7.772 5.827-5.975-7.92-9.407-7.49 7.61z" fill="#666564"/><path d="M66.415 74.507s2.722-2.512 10.824-3.65l-3.335-3.961-7.49 7.611z" fill="#4B4847"/><path d="M50.41 62.773 9.665 23.698c-5.802-5.694-5.3-15.52-5.3-15.52s9.782-.718 15.584 4.977l40.783 39.112-4.993 5.417-5.329 5.089z" fill="#BEBDB9"/><path d="M19.948 13.155C14.145 7.46 4.363 8.177 4.363 8.177l12.646 12.187 1.2-1.767a4.254 4.254 0 0 1 3.889-1.849l1.757.154-3.907-3.747z" fill="#E7E6E5"/><path d="M46.497 5.228a2.377 2.377 0 0 0-2.984-.001c-8.038 6.479-15.95 10.751-26.206 11.307-1.273.07-2.307 1.095-2.307 2.37v24.531c0 18.226 15.006 31.315 28.817 39.84.729.45 1.648.45 2.376-.003 13.793-8.56 28.806-21.596 28.806-39.837v-24.47c0-1.299-1.072-2.333-2.369-2.38-10.211-.37-18.165-4.908-26.133-11.357z" fill="#81B64C"/><path d="M45 22.646c4.09 0 10.698 2.603 10.699 8.198 0 5.729-5.728 6.72-5.758 10.026-.024 2.684 2.835 4.72 5.228 4.8H74.92c-1.163 17.076-15.504 29.396-28.727 37.602a2.256 2.256 0 0 1-2.376.003c-13.24-8.172-27.575-20.54-28.738-37.605h19.539c2.493 0 5.788-1.89 5.724-4.8-.07-3.237-6.042-4.27-6.042-10.026 0-5.595 6.609-8.198 10.7-8.198z" fill="#45753C"/></svg>
+          <button id="tab-battle" class="view-tab view-tab-icon" type="button" role="tab" aria-selected="false" data-view="battle" title="Puzzle Battle">
+            <svg class="view-tab-svg" width="22" height="22" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M29.652 80.702c.645.552 2.736-1.185 3.614-2.038 2.022-1.985-1.443-7.507-2.824-9.105 0 0-5.225-5.985-9.118-9.28-1.559-1.425-6.99-5.016-9.013-3.031-.878.861-2.655 2.92-2.11 3.58L29.66 80.702h-.008zM14.095 82.347s-.596 3.312-1.887 4.572a6.088 6.088 0 0 1-8.64-.097c-2.363-2.424-2.322-6.304.093-8.666 1.283-1.26 4.598-1.784 4.598-1.784l5.827 5.975h.008z" fill="#666564"/><path d="m23.587 74.506-9.583 7.772-5.827-5.975 7.92-9.407 7.49 7.61z" fill="#666564"/><path d="M23.586 74.507s-2.722-2.512-10.824-3.65l3.334-3.961 7.49 7.611z" fill="#4B4847"/><path d="m39.59 62.773 40.746-39.075c5.802-5.694 5.3-15.52 5.3-15.52s-9.782-.718-15.584 4.977L29.269 52.267l4.994 5.417 5.328 5.089z" fill="#BEBDB9"/><path d="M70.053 13.155c5.802-5.695 15.585-4.978 15.585-4.978L72.992 20.364l-1.201-1.767a4.254 4.254 0 0 0-3.888-1.849l-1.757.154 3.907-3.747z" fill="#E7E6E5"/><path d="M60.35 80.702c-.646.552-2.737-1.185-3.615-2.038-2.022-1.985 1.443-7.507 2.824-9.105 0 0 5.225-5.985 9.118-9.28 1.559-1.425 6.99-5.016 9.013-3.031.878.861 2.655 2.92 2.11 3.58L60.341 80.702h.008zM75.907 82.347s.595 3.312 1.886 4.572a6.089 6.089 0 0 0 8.64-.097c2.363-2.424 2.322-6.304-.093-8.666-1.283-1.26-4.597-1.784-4.597-1.784l-5.828 5.975h-.008z" fill="#666564"/><path d="m66.414 74.506 9.583 7.772 5.827-5.975-7.92-9.407-7.49 7.61z" fill="#666564"/><path d="M66.415 74.507s2.722-2.512 10.824-3.65l-3.335-3.961-7.49 7.611z" fill="#4B4847"/><path d="M50.41 62.773 9.665 23.698c-5.802-5.694-5.3-15.52-5.3-15.52s9.782-.718 15.584 4.977l40.783 39.112-4.993 5.417-5.329 5.089z" fill="#BEBDB9"/><path d="M19.948 13.155C14.145 7.46 4.363 8.177 4.363 8.177l12.646 12.187 1.2-1.767a4.254 4.254 0 0 1 3.889-1.849l1.757.154-3.907-3.747z" fill="#E7E6E5"/></svg>
             <span>Battle</span>
           </button>
           <button id="tab-opening" class="view-tab view-tab-icon" type="button" role="tab" aria-selected="false" data-view="opening" title="Opening Trainer">
@@ -77,21 +82,35 @@
 
     <main class="layout">
       <section class="board-area">
-        <div class="board-frame">
-          <div id="player-top" class="player-strip" data-view="analysis" hidden></div>
-          <div class="board-with-coords">
-            <div id="eval-bar" class="eval-bar" data-view="analysis" hidden>
-              <div class="eval-bar-black"></div>
-              <div class="eval-bar-white"></div>
-              <div class="eval-bar-label" id="eval-bar-label">0.0</div>
+        <!--
+          .board-scale-host pads the document for scaled-up boards
+          (so the meta row never sits under a board scaled > 1).
+          .board-scale-wrap is the actual transform target — its
+          --board-scale CSS var is driven by the three drag handles
+          below (right edge, bottom edge, bottom-right corner).
+        -->
+        <div class="board-scale-host" id="board-scale-host">
+          <div class="board-scale-wrap" id="board-scale-wrap">
+            <div class="board-frame">
+              <div id="player-top" class="player-strip" data-view="analysis" hidden></div>
+              <div class="board-with-coords">
+                <div id="eval-bar" class="eval-bar" data-view="analysis" hidden>
+                  <div class="eval-bar-black"></div>
+                  <div class="eval-bar-white"></div>
+                  <div class="eval-bar-label" id="eval-bar-label">0.0</div>
+                </div>
+                <div id="board-ranks" class="board-ranks" aria-hidden="true"></div>
+                <div id="board" class="board" aria-label="Chess board"></div>
+              </div>
+              <div class="board-files-row">
+                <div id="board-files" class="board-files" aria-hidden="true"></div>
+              </div>
+              <div id="player-bottom" class="player-strip" data-view="analysis" hidden></div>
             </div>
-            <div id="board-ranks" class="board-ranks" aria-hidden="true"></div>
-            <div id="board" class="board" aria-label="Chess board"></div>
+            <div class="board-scale-handle h-right"  data-axis="x"  title="Перетащи, чтобы изменить размер доски"></div>
+            <div class="board-scale-handle h-bottom" data-axis="y"  title="Перетащи, чтобы изменить размер доски"></div>
+            <div class="board-scale-handle h-corner" data-axis="xy" title="Перетащи, чтобы изменить размер доски"></div>
           </div>
-          <div class="board-files-row">
-            <div id="board-files" class="board-files" aria-hidden="true"></div>
-          </div>
-          <div id="player-bottom" class="player-strip" data-view="analysis" hidden></div>
         </div>
         <div class="board-nav" id="board-nav">
           <button id="nav-first" type="button" title="В начало партии" disabled>
@@ -235,7 +254,7 @@
         </section>
 
         <section class="panel" id="panel-battle" data-view="battle">
-          <h2>Puzzle Battle <span class="puzzle-h-sub">— пати с друзьями, ELO-сет</span></h2>
+          <h2>Puzzle Battle</h2>
           <div id="battle-body" class="party-body"></div>
         </section>
 

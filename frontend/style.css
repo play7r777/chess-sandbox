@@ -27,8 +27,28 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 14px;
+  /* Inter is the default chess.com / lichess body font; we ship the
+     full system stack so when Inter is unavailable we fall back to a
+     properly hinted UI sans serif rather than the thin "Segoe UI"
+     light weight that browsers used to pick. */
+  font-family: "Inter", "Inter Variable", "SF Pro Text", -apple-system,
+    BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 14.5px;
+  font-weight: 450;
+  line-height: 1.45;
+  letter-spacing: 0.005em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+h1, h2, h3, h4, h5, h6 { font-weight: 650; letter-spacing: -0.005em; }
+strong, b { font-weight: 600; }
+code, kbd, samp, pre {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono",
+    Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  font-size: 0.93em;
+  font-feature-settings: "ss02";
 }
 button, input, select, textarea {
   font: inherit;
@@ -172,27 +192,125 @@ body.mode-legal .mode-toggle { display: none !important; }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 500px;
-  gap: 24px;
-  max-width: 1500px;
+  /* The board area gets a generous min so it stays large; the right
+     sidebar gets a fixed lane. Larger max-width lets the board grow
+     toward the centre/right of the viewport on big screens. */
+  grid-template-columns: minmax(560px, 1fr) 520px;
+  gap: 28px;
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 28px 32px;
 }
-@media (max-width: 1100px) {
+@media (max-width: 1180px) {
   .layout { grid-template-columns: 1fr; }
 }
 
-.board-area { min-width: 0; }
+.board-area {
+  min-width: 0;
+  /* Push the board towards the centre/right of its column so it
+     visually leads the layout. The sidebar still sits on the right;
+     the board breathes in the middle of the screen. */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  /* User-controlled scale knob: dragging the board edges updates
+     --board-scale (see app.js board-scale handles). Defaults to 1
+     and ranges 0.6 .. 1.6 so the board can be shrunk on small
+     screens or expanded to fill big ones. */
+  --board-scale: 1;
+}
+/* Wrapper around the board so its scale doesn't disturb sibling
+   layout (board-meta, etc.). */
+.board-scale-wrap {
+  position: relative;
+  width: min(86vh, 100%, 820px);
+  aspect-ratio: 1 / 1;
+  margin-left: clamp(0px, calc((100% - min(86vh, 100%, 820px)) * 0.4), 220px);
+  /* Apply user-driven scale around the top-left so the right edge
+     handle "grows out" instead of pulling the whole board off-screen. */
+  transform-origin: top left;
+  transform: scale(var(--board-scale, 1));
+  transition: transform 60ms ease-out;
+  will-change: transform;
+}
+/* Reserve the post-scale space so siblings (meta row, FEN box) don't
+   overlap when the scale is > 1. */
+.board-scale-wrap::after {
+  content: "";
+  display: block;
+  width: 0; height: 0;
+  margin-left: calc(min(86vh, 100%, 820px) * (var(--board-scale, 1) - 1));
+}
+.board-scale-host {
+  position: relative;
+  /* Account for the scaled width *and* a bit of bottom padding so the
+     meta row (FEN, status) never overlaps a scaled-up board. */
+  margin-bottom: calc(min(86vh, 100%, 820px) * max(var(--board-scale, 1) - 1, 0));
+}
+/* Edge handles for live scaling. Right + bottom + corner. They sit
+   *outside* the board so the SVG arrows / piece grid stays clickable.
+   When the user starts dragging, app.js writes the new scale into
+   --board-scale on .board-area. */
+.board-scale-handle {
+  position: absolute;
+  background: transparent;
+  z-index: 5;
+  user-select: none;
+  touch-action: none;
+}
+.board-scale-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 2px;
+  background: rgba(110, 167, 255, 0);
+  transition: background 120ms ease;
+}
+.board-scale-handle:hover::after,
+.board-scale-handle.is-dragging::after {
+  background: rgba(110, 167, 255, 0.45);
+}
+.board-scale-handle.h-right {
+  top: 6%; bottom: 6%; right: -8px; width: 10px;
+  cursor: ew-resize;
+}
+.board-scale-handle.h-bottom {
+  left: 6%; right: 6%; bottom: -8px; height: 10px;
+  cursor: ns-resize;
+}
+.board-scale-handle.h-corner {
+  right: -10px; bottom: -10px; width: 18px; height: 18px;
+  cursor: nwse-resize;
+}
+.board-scale-handle.h-corner::after {
+  border: 2px solid rgba(110, 167, 255, 0.55);
+  background: rgba(110, 167, 255, 0.12);
+}
+.board-scale-handle.h-corner:hover::after,
+.board-scale-handle.h-corner.is-dragging::after {
+  border-color: rgba(110, 167, 255, 0.95);
+  background: rgba(110, 167, 255, 0.35);
+}
+body.is-board-resizing { cursor: nwse-resize; }
+body.is-board-resizing * { user-select: none !important; }
+
 .board {
-  width: min(80vh, 100%);
+  width: 100%;
+  height: 100%;
   aspect-ratio: 1 / 1;
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   grid-template-rows: repeat(8, 1fr);
   border: 3px solid #2a2017;
-  border-radius: 4px;
+  border-radius: 6px;
   user-select: none;
   position: relative;
+  /* Subtle outer glow so the board doesn't look pasted onto the dark
+     background once it's been scaled up. */
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 18px 36px -22px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(0, 0, 0, 0.45);
   /* Image-backed board themes (e.g. preset "#1") set --board-image to a
      full 8x8 sprite that we stretch behind the (transparent) squares. */
   background-image: var(--board-image, none);

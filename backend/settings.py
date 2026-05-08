@@ -18,15 +18,6 @@ class Settings(BaseSettings):
     stockfish_default_movetime_ms: int = 1000
     stockfish_default_skill_level: int = 20
 
-    # Ollama (local LLM) integration for the Opening Trainer AI coach.
-    # Set CHESS_OLLAMA_BASE_URL / CHESS_OLLAMA_MODEL in the env or .env to
-    # point at a running Ollama daemon. Empty string disables AI coach
-    # gracefully — endpoints fall back to canned coach feedback.
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = "qwen2.5:7b"
-    ollama_timeout_s: float = 60.0
-    ollama_num_predict: int = 320
-
     host: str = "127.0.0.1"
     port: int = 8000
 

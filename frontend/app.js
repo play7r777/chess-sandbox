@@ -217,6 +217,107 @@ function applyBoardTheme() {
 }
 applyBoardTheme();
 
+// ---------- Board scaling ----------
+// The board sits inside `.board-scale-wrap` and is scaled via the
+// `--board-scale` CSS custom property on `.board-area`. Three drag
+// handles (right edge, bottom edge, bottom-right corner) let the user
+// resize the board live. We persist the chosen scale per session in
+// localStorage so it survives reloads.
+const BOARD_SCALE_MIN = 0.6;
+const BOARD_SCALE_MAX = 1.6;
+const BOARD_SCALE_STORAGE_KEY = "chess-sandbox.board-scale";
+function _clampBoardScale(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(BOARD_SCALE_MIN, Math.min(BOARD_SCALE_MAX, n));
+}
+function _loadBoardScale() {
+  try {
+    const raw = localStorage.getItem(BOARD_SCALE_STORAGE_KEY);
+    if (raw == null) return 1;
+    return _clampBoardScale(parseFloat(raw));
+  } catch (_) { return 1; }
+}
+function _saveBoardScale(v) {
+  try { localStorage.setItem(BOARD_SCALE_STORAGE_KEY, String(_clampBoardScale(v))); }
+  catch (_) { /* private mode: ignore */ }
+}
+function applyBoardScale(v) {
+  const s = _clampBoardScale(v);
+  const area = document.querySelector(".board-area");
+  if (!area) return;
+  area.style.setProperty("--board-scale", String(s));
+  _saveBoardScale(s);
+}
+function _initBoardScaleHandles() {
+  const wrap = document.getElementById("board-scale-wrap");
+  if (!wrap) return;
+  applyBoardScale(_loadBoardScale());
+  const handles = wrap.querySelectorAll(".board-scale-handle");
+  if (!handles.length) return;
+  // We measure base (unscaled) size of the wrap *once* per drag, then
+  // compute the new scale from the dragged delta vs. that base. Using
+  // getBoundingClientRect would conflate the scaled width and produce
+  // runaway growth.
+  const baseSize = () => {
+    const cs = getComputedStyle(wrap);
+    // The wrap has `width: min(...)` and aspect-ratio 1, so the
+    // computed width equals the unscaled side. We still divide by the
+    // current scale defensively, just in case the layout changes.
+    const w = parseFloat(cs.width) || 0;
+    const cur = _clampBoardScale(getComputedStyle(document.querySelector(".board-area")).getPropertyValue("--board-scale"));
+    return cur > 0 ? w / cur : w;
+  };
+  handles.forEach((h) => {
+    h.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      const axis = h.dataset.axis || "xy";
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+      const base = baseSize();
+      if (base <= 0) return;
+      const startScale = _clampBoardScale(getComputedStyle(document.querySelector(".board-area")).getPropertyValue("--board-scale"));
+      h.classList.add("is-dragging");
+      document.body.classList.add("is-board-resizing");
+      try { h.setPointerCapture(ev.pointerId); } catch (_) { /* ignore */ }
+      const onMove = (mv) => {
+        const dx = mv.clientX - startX;
+        const dy = mv.clientY - startY;
+        // Convert pixel delta to scale delta. A 1:1 mapping (delta /
+        // base) feels right — dragging the right edge by 100px on a
+        // 600px board grows the scale by ~0.16, which is responsive
+        // but not jumpy.
+        let delta;
+        if (axis === "x") delta = dx / base;
+        else if (axis === "y") delta = dy / base;
+        else delta = Math.max(dx, dy) / base; // corner: follow whichever axis grows more
+        applyBoardScale(startScale + delta);
+      };
+      const onUp = () => {
+        h.classList.remove("is-dragging");
+        document.body.classList.remove("is-board-resizing");
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    });
+    // Double-click resets the scale to 1 — handy escape hatch when the
+    // user drags too far in one direction.
+    h.addEventListener("dblclick", (ev) => {
+      ev.preventDefault();
+      applyBoardScale(1);
+    });
+  });
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", _initBoardScaleHandles, { once: true });
+} else {
+  _initBoardScaleHandles();
+}
+
 // ----- Move sounds (real .wav assets shipped under /static/sounds) -----
 //
 // Mirrors chess.com semantics: each chess event (plain move, capture,
@@ -326,6 +427,10 @@ function makePieceImg(piece, options = {}) {
   }
   return img;
 }
+
+// Crossed-swords inline SVG used everywhere we used to put a 🎉 emoji
+// next to the word "Party". The Battle tab is the same icon at 22px.
+const BATTLE_SWORDS_SVG = `<svg width="18" height="18" viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M29.652 80.702c.645.552 2.736-1.185 3.614-2.038 2.022-1.985-1.443-7.507-2.824-9.105 0 0-5.225-5.985-9.118-9.28-1.559-1.425-6.99-5.016-9.013-3.031-.878.861-2.655 2.92-2.11 3.58L29.66 80.702h-.008zM14.095 82.347s-.596 3.312-1.887 4.572a6.088 6.088 0 0 1-8.64-.097c-2.363-2.424-2.322-6.304.093-8.666 1.283-1.26 4.598-1.784 4.598-1.784l5.827 5.975h.008z" fill="#666564"/><path d="m23.587 74.506-9.583 7.772-5.827-5.975 7.92-9.407 7.49 7.61z" fill="#666564"/><path d="M23.586 74.507s-2.722-2.512-10.824-3.65l3.334-3.961 7.49 7.611z" fill="#4B4847"/><path d="m39.59 62.773 40.746-39.075c5.802-5.694 5.3-15.52 5.3-15.52s-9.782-.718-15.584 4.977L29.269 52.267l4.994 5.417 5.328 5.089z" fill="#BEBDB9"/><path d="M70.053 13.155c5.802-5.695 15.585-4.978 15.585-4.978L72.992 20.364l-1.201-1.767a4.254 4.254 0 0 0-3.888-1.849l-1.757.154 3.907-3.747z" fill="#E7E6E5"/><path d="M60.35 80.702c-.646.552-2.737-1.185-3.615-2.038-2.022-1.985 1.443-7.507 2.824-9.105 0 0 5.225-5.985 9.118-9.28 1.559-1.425 6.99-5.016 9.013-3.031.878.861 2.655 2.92 2.11 3.58L60.341 80.702h.008zM75.907 82.347s.595 3.312 1.886 4.572a6.089 6.089 0 0 0 8.64-.097c2.363-2.424 2.322-6.304-.093-8.666-1.283-1.26-4.597-1.784-4.597-1.784l-5.828 5.975h-.008z" fill="#666564"/><path d="m66.414 74.506 9.583 7.772 5.827-5.975-7.92-9.407-7.49 7.61z" fill="#666564"/><path d="M66.415 74.507s2.722-2.512 10.824-3.65l-3.335-3.961-7.49 7.611z" fill="#4B4847"/><path d="M50.41 62.773 9.665 23.698c-5.802-5.694-5.3-15.52-5.3-15.52s9.782-.718 15.584 4.977l40.783 39.112-4.993 5.417-5.329 5.089z" fill="#BEBDB9"/><path d="M19.948 13.155C14.145 7.46 4.363 8.177 4.363 8.177l12.646 12.187 1.2-1.767a4.254 4.254 0 0 1 3.889-1.849l1.757.154-3.907-3.747z" fill="#E7E6E5"/></svg>`;
 
 const PIECE_TYPES_WHITE = ["K", "Q", "R", "B", "N", "P"];
 const PIECE_TYPES_BLACK = ["k", "q", "r", "b", "n", "p"];
@@ -2640,12 +2745,30 @@ document.getElementById("btn-review-import").addEventListener("click", async () 
     review.game = r;
     review.analysis = null;
     review.clocks = parsePgnClocks(r.pgn || "");
+    // Reset side-pick state every time a new game is loaded so we always
+    // ask which colour the user played for *this* game (don't reuse the
+    // previous game's answer).
+    review.userSide = null;
+    review.sideAsked = false;
+    review.filter.clear();
+    review.activeIdx = -1;
     document.getElementById("review-progress").textContent =
-      `${r.headers.White || "?"} vs ${r.headers.Black || "?"} — ${r.moves_uci.length} полуходов. Жми «Анализировать».`;
+      `${r.headers.White || "?"} vs ${r.headers.Black || "?"} — ${r.moves_uci.length} полуходов. Спрашиваем…`;
     document.getElementById("btn-review-analyse").disabled = false;
     renderPlayerStrips();
     renderReviewMoves();
     document.getElementById("review-summary").innerHTML = "";
+    // Ask immediately so the analysis is correctly oriented and labelled
+    // before the user even clicks «Анализировать».
+    review.sideAsked = true;
+    const picked = await askUserSide();
+    review.userSide = picked || null;
+    if (picked === "b" && !state.flipped) state.flipped = true;
+    if (picked === "w" && state.flipped) state.flipped = false;
+    renderBoard();
+    renderPlayerStrips();
+    document.getElementById("review-progress").textContent =
+      `${r.headers.White || "?"} vs ${r.headers.Black || "?"} — ${r.moves_uci.length} полуходов. Жми «Анализировать».`;
   } catch (err) {
     document.getElementById("review-progress").textContent = "Ошибка: " + err.message;
   } finally {
@@ -2769,6 +2892,10 @@ function renderReviewSummary(s) {
     </div>`;
 
   // Build per-classification rows with clickable filter behaviour.
+  // The filter set stores per-side keys: `${cls}:w` and `${cls}:b`.
+  // Clicking the white-count cell toggles only the white side; the
+  // black-count cell toggles only the black side; the centre icon
+  // toggles both at once. Empty filter == "show all".
   const rowsHtml = REVIEW_ORDER.map((k) => {
     const n = counts[k] || 0;
     // Backend doesn't currently split counts per side; we derive it by
@@ -2785,14 +2912,17 @@ function renderReviewSummary(s) {
       nW = n;
       nB = 0;
     }
-    const isActive = review.filter.has(k);
+    const wActive = review.filter.has(`${k}:w`);
+    const bActive = review.filter.has(`${k}:b`);
+    const bothActive = wActive && bActive;
+    const anyActive = wActive || bActive;
     const isOff = n === 0;
     const color = REVIEW_COLOR[k];
-    return `<div class="gr-row gr-row-cls cls-${k}${isOff ? " is-off" : ""}${isActive ? " is-active" : ""}" data-cls="${k}" style="--cls-color:${color}">
+    return `<div class="gr-row gr-row-cls cls-${k}${isOff ? " is-off" : ""}${anyActive ? " is-active" : ""}" data-cls="${k}" style="--cls-color:${color}">
       <div class="gr-cell gr-label">${REVIEW_LABELS[k]}</div>
-      <div class="gr-cell gr-side-w gr-count" style="color:${color}">${nW}</div>
-      <div class="gr-cell gr-icon">${REVIEW_BADGE_SVG[k] || ""}</div>
-      <div class="gr-cell gr-side-b gr-count" style="color:${color}">${nB}</div>
+      <div class="gr-cell gr-side-w gr-count gr-side-pick${wActive ? " is-active" : ""}" data-cls="${k}" data-side="w" style="color:${color}">${nW}</div>
+      <div class="gr-cell gr-icon gr-side-pick${bothActive ? " is-active" : ""}" data-cls="${k}" data-side="both">${REVIEW_BADGE_SVG[k] || ""}</div>
+      <div class="gr-cell gr-side-b gr-count gr-side-pick${bActive ? " is-active" : ""}" data-cls="${k}" data-side="b" style="color:${color}">${nB}</div>
     </div>`;
   }).join("");
 
@@ -2837,13 +2967,34 @@ function renderReviewSummary(s) {
     });
   });
 
-  // Wire row click → filter toggle.
-  root.querySelectorAll(".gr-row-cls").forEach((row) => {
-    if (row.classList.contains("is-off")) return;
-    row.addEventListener("click", () => {
-      const k = row.dataset.cls;
-      if (review.filter.has(k)) review.filter.delete(k);
-      else review.filter.add(k);
+  // Wire per-side click → filter toggle. Each row has 3 click zones:
+  // white-count, icon (both sides), black-count. The icon toggles
+  // the row as a whole (both sides at once).
+  root.querySelectorAll(".gr-side-pick").forEach((cell) => {
+    cell.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const row = cell.closest(".gr-row-cls");
+      if (row && row.classList.contains("is-off")) return;
+      const k = cell.dataset.cls;
+      const side = cell.dataset.side;
+      const wKey = `${k}:w`;
+      const bKey = `${k}:b`;
+      if (side === "w") {
+        if (review.filter.has(wKey)) review.filter.delete(wKey);
+        else review.filter.add(wKey);
+      } else if (side === "b") {
+        if (review.filter.has(bKey)) review.filter.delete(bKey);
+        else review.filter.add(bKey);
+      } else {
+        // both — if either is on, clear both; otherwise add both.
+        if (review.filter.has(wKey) || review.filter.has(bKey)) {
+          review.filter.delete(wKey);
+          review.filter.delete(bKey);
+        } else {
+          review.filter.add(wKey);
+          review.filter.add(bKey);
+        }
+      }
       renderReviewSummary(s);
       renderReviewMoves();
     });
@@ -4460,7 +4611,7 @@ function renderReviewMoves() {
     const li = document.createElement("li");
     li.className = `cls-${m.classification || "good"}`;
     if (idx === review.activeIdx) li.classList.add("is-active");
-    if (review.filter.size > 0 && !review.filter.has(m.classification)) {
+    if (review.filter.size > 0 && !review.filter.has(`${m.classification}:${m.side}`)) {
       li.classList.add("is-hidden");
     }
     const moveNum = Math.ceil(m.ply / 2) + ".";
@@ -4617,19 +4768,261 @@ function renderBoardHint() {
       }).join("");
     pvLine = `<div class="pv-line"><span class="pv-label">Лучшая линия:</span>${sansHtml}</div>`;
   }
-  // AI coach (Ollama + Stockfish 18) — replaces the previous hardcoded
-  // "💡 coach" blurb. Streams a chess.com-style explanation of why the
-  // move got its classification, falling back to a canned summary when
-  // Ollama is offline.
-  const aiPanel = _renderAnalysisAiCoachPanel(m);
-  host.innerHTML = main + pvLine + aiPanel;
-  _attachAnalysisAiCoachHandlers();
-  if (review.aiCoach.status === null) _probeAnalysisCoach();
+  // Hardcoded coach panel — a deterministic, chess.com-flavoured
+  // explanation of why the move earned its classification. We don't
+  // talk to any external service; everything is generated locally
+  // from the engine numbers we already have.
+  const coachPanel = renderHardcodedCoachPanel(m);
+  host.innerHTML = main + pvLine + coachPanel;
 }
 
-// ---------- Analysis AI coach (Ollama + Stockfish 18) ----------
+// ---------- Hardcoded analysis coach (no AI) ----------
+//
+// `renderHardcodedCoachPanel` emits a chess.com-style explanation of a
+// single ply using only data we already have (classification, eval
+// delta, best move, side). The previous build streamed text from
+// Ollama; that's gone, so we lean on a wide pool of canned phrases
+// keyed by classification + situation. Each ply renders identically
+// across re-paints because we hash on `ply` to pick a phrase variant.
+
+// Quick stable PRNG — same input always returns the same value, so the
+// same ply always shows the same canned phrase even after re-renders.
+function _coachPick(arr, key) {
+  if (!arr || !arr.length) return "";
+  let h = 2166136261 >>> 0;
+  const s = String(key);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return arr[h % arr.length];
+}
+
+// Verdict text for the bold headline (per classification, several
+// variants). Chess.com-flavoured and short enough to fit one line.
+const COACH_HEADLINES = {
+  brilliant: [
+    "Бриллиантовый ход.",
+    "Бриллиант — это жертва!",
+    "Редкая комбинация, бриллиант.",
+    "Блестяще: отдаёшь материал ради победы.",
+  ],
+  great: [
+    "Великолепный ход.",
+    "Сильнейший ход, найти непросто.",
+    "Грейт! Находка уровня мастера.",
+    "Отличный выбор — видят единицы.",
+  ],
+  best: [
+    "Лучший ход по Stockfish.",
+    "Точно первая линия движка.",
+    "Без вариантов, сильнейшее.",
+    "Оптимально — движок брал бы то же.",
+  ],
+  excellent: [
+    "Отличный ход.",
+    "На уровне движка — практически без потерь.",
+    "Сильный выбор, разница мизерная.",
+    "Практически идеальный ход.",
+  ],
+  good: [
+    "Хороший ход.",
+    "Нормальный солидный ход.",
+    "Разумный выбор.",
+    "Без претензий — надёжно.",
+  ],
+  book: [
+    "Точно по теории.",
+    "Книжный ход — это дебют.",
+    "Работает теория.",
+    "Дебютная линия — по книге.",
+  ],
+  forced: [
+    "Единственный разумный ход.",
+    "Вынужденно — выбора не было.",
+    "Иначе позиция рушится.",
+    "Ситуация диктовала этот ход.",
+  ],
+  inaccuracy: [
+    "Неточность.",
+    "Стоит оценку на немного хуже.",
+    "Не лучший выбор, но не провал.",
+    "Можно было точнее.",
+  ],
+  mistake: [
+    "Ошибка.",
+    "Оценка заметно ухудшилась.",
+    "Промах — было сильнее.",
+    "Серьёзная ошибка.",
+  ],
+  blunder: [
+    "Грубая ошибка.",
+    "Зевок — позиция развалилась.",
+    "Бландер! Соперник получил подарок.",
+    "Критический промах.",
+  ],
+  miss: [
+    "Упускаешь выигрыш.",
+    "Проходит мимо сильнейшего хода.",
+    "Мисс — была выигрывающая возможность.",
+    "Перевес в руках растаял.",
+  ],
+};
+
+// Idea text (sub-line, italicised). Same key -> 6+ variants per
+// classification. We pick by ply hash so it's stable.
+const COACH_IDEAS = {
+  brilliant: [
+    "Ты отдаёшь материал ради решающей атаки — и это работает.",
+    "Жертва вскрывает линии к королю и окупается матом или перевесом.",
+    "Цель — получить инициативу, которую материальный размен не покажет.",
+    "Расчёт на несколько ходов: инициатива > материала.",
+    "Неочевидная жертва, которую не видят 99% игроков.",
+    "Связь и открытая диагональ или вертикаль — движок видит это в глубине.",
+  ],
+  great: [
+    "Это единственный ход, держащий перевес — остальные проигрывают инициативу.",
+    "Точно выбрана редкая линия, которую трудно увидеть.",
+    "Сильнейший ресурс в позиции, решающий исход.",
+    "Этот ход из серии «видим на 5 ходов вперёд».",
+    "Остальные приличные ходы теряют оценку — этот держит.",
+    "Отличный расчёт: перевес сохранён, инициатива растёт.",
+  ],
+  best: [
+    "Движок выбрал бы то же самое — тебя не выбьешь из лучшей линии.",
+    "Идеальный выбор — разница с альтернативами ощутима.",
+    "Ты сыграл лучший ход в позиции. Продолжай в том же духе.",
+    "Сильнейшее продолжение — прямо из первой линии Stockfish.",
+    "Точно по движку — хорошая привычка.",
+    "Никакой ход рядом не приближается к этой оценке.",
+  ],
+  excellent: [
+    "Очень хороший ход, практически на уровне лучшего.",
+    "Потеря в оценке мизерная, продолжай в таком же духе.",
+    "Неплохо разобрался в позиции — выбор почти оптимальный.",
+    "Разница с топ-ходом символическая.",
+    "Это «вторая линия движка» — вполне достойно.",
+    "Проверено: ход держит оценку практически на максимуме.",
+  ],
+  good: [
+    "Нормальный принципиальный ход — позиция развивается.",
+    "Разумный выбор без явных минусов.",
+    "Движок бы поиграл ярче, но оценка практически не пострадала.",
+    "Солидный ход, держит рисунок игры.",
+    "Без блеска, но надёжно.",
+    "Ничего плохого — продолжаем.",
+  ],
+  book: [
+    "Это ещё теория, ход из дебютных книг.",
+    "Работает подготовка: всё по линии.",
+    "Теоретическое продолжение — это плюс к времени на часах.",
+    "Аккуратно по дебютной базе.",
+    "Общепринятая линия — хорошо известна.",
+    "Дебют идёт по рельсам.",
+  ],
+  forced: [
+    "Альтернативы резко плохи, выбора не было.",
+    "Единственный ход, который не проигрывает фигуру или партию.",
+    "Позиция диктует этот ответ — иначе всё разваливается.",
+    "Героический спасительный ход в одном варианте.",
+    "Движок не оставил вариантов.",
+    "Иначе — сразу решающий перевес соперника.",
+  ],
+  inaccuracy: [
+    "Небольшая неточность — видимо, было более активное продолжение.",
+    "Стоит поработать над выбором хода в этой структуре.",
+    "Не критично, но инициатива притормозилась.",
+    "Небольшой минус от лучшего хода.",
+    "Просто не попал в топ-1; позиция всё ещё в порядке.",
+    "Неплохо, но было решение ярче.",
+  ],
+  mistake: [
+    "Оценка ухудшилась ощутимо — соперник получил фору.",
+    "Было заметно сильнее продолжение.",
+    "Промах — разбери вариант внимательно.",
+    "Позиция стала проблемнее — выигрыш уже сложнее.",
+    "Не фатально, но инициатива потеряна.",
+    "Стоило вспомнить принцип «сначала безопасность короля» — или «вражебных фигур в ряд».",
+  ],
+  blunder: [
+    "Грубая ошибка: соперник получает выигрывающую позицию.",
+    "Зевок материала или решающих линий.",
+    "Бландер — стоит разобрать эту позицию в тренировке.",
+    "Проигрывают фигуру или качество — видят в варианте.",
+    "Перевес резко ушёл к сопернику.",
+    "Стоит всегда проверять «что было бы, если я этот ход не играю?» — это отличный фильтр бландеров.",
+  ],
+  miss: [
+    "Была выигрывающая идея — находится в лучшей линии движка.",
+    "Мисс — не увидел решающий ресурс в позиции.",
+    "Перевес был под рукой, но выбрано другое.",
+    "Из-за этого хода позиция вернулась к равенству.",
+    "Движок рекомендует другой замысел — была форсированная линия.",
+    "Атака остановилась на полуходе — поиск форсированных вариантов важен.",
+  ],
+};
+
+// Build the canned coach text for a single move object.
+function buildHardcodedCoach(m) {
+  if (!m) return { headline: "", idea: "", evalText: "", bestSan: "", tone: "" };
+  const cls = m.classification || "good";
+  const headline = _coachPick(COACH_HEADLINES[cls] || COACH_HEADLINES.good, `h:${cls}:${m.ply}`);
+  const idea = _coachPick(COACH_IDEAS[cls] || COACH_IDEAS.good, `i:${cls}:${m.ply}`);
+  let tone = "info";
+  if (["brilliant", "great", "best", "excellent", "good", "book"].includes(cls)) tone = "good";
+  else if (cls === "forced") tone = "info";
+  else if (cls === "inaccuracy") tone = "warn";
+  else tone = "bad";
+  // Eval line — prefer m.eval_after_cp from white's POV when known.
+  let evalText = "";
+  if (Number.isFinite(m.eval_after_cp)) {
+    const cp = m.eval_after_cp;
+    if (cp >= 99000) evalText = `Оценка: M${100000 - cp}`;
+    else if (cp <= -99000) evalText = `Оценка: −M${cp + 100000}`;
+    else evalText = `Оценка: ${(cp / 100).toFixed(2)}`;
+  }
+  const bestSan = m.best_move_san || "";
+  return { headline, idea, evalText, bestSan, tone };
+}
+
+function renderHardcodedCoachPanel(m) {
+  const data = buildHardcodedCoach(m);
+  if (!data.headline && !data.idea) return "";
+  const toneCls = data.tone ? ` opening-ai-verdict-${data.tone}` : "";
+  const evalLine = (data.evalText || data.bestSan)
+    ? `<div class="opening-ai-evalrow">${
+        data.evalText ? `<span class="opening-ai-eval">${escapeHtml(data.evalText)}</span>` : ""
+      }${
+        data.bestSan ? `<span class="opening-ai-best">Лучше: <code>${escapeHtml(data.bestSan)}</code></span>` : ""
+      }</div>`
+    : "";
+  return `
+    <div class="opening-ai-panel review-ai-panel">
+      <div class="opening-ai-header">
+        <strong>Тренер</strong>
+      </div>
+      <div class="opening-ai-text">
+        ${data.headline ? `<div class="opening-ai-verdict${toneCls}">${escapeHtml(data.headline)}</div>` : ""}
+        ${evalLine}
+        ${data.idea ? `<div class="opening-ai-idea">${escapeHtml(data.idea)}</div>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+// ---------- Legacy AI coach — hardcoded no-op shim ----------
+//
+// All callers below are kept (some still hand-wired to the opening UI)
+// but the implementations are now stubs that never make a network
+// request. Removing the names entirely would require touching dozens
+// of callsites; the shim preserves binary compatibility while doing
+// nothing.
 
 function _renderAnalysisAiCoachPanel(m) {
+  return renderHardcodedCoachPanel(m);
+}
+
+function _renderAnalysisAiCoachPanel_unused(m) {
   const ai = review.aiCoach;
   const ply = review.activeIdx;
   const cls = m && m.classification;
@@ -5630,7 +6023,7 @@ function openPartyModal() {
   }
   body.innerHTML = `
     <header class="party-header">
-      <h2>🎉 Party</h2>
+      <h2><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle</h2>
       <p class="muted">Каждому участнику даётся 10 минут на свой поток пазлов; в конце — общий лидерборд.</p>
     </header>
 
@@ -6255,7 +6648,7 @@ function renderPartyLobby() {
     : "";
   body.innerHTML = `
     <header class="party-header">
-      <h2>🎉 Party — лобби</h2>
+      <h2><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle — лобби</h2>
       <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code> ${avgRatingPill}</p>
     </header>
     <ul class="party-members">${memberRows || `<li class="party-empty">Пока никого…</li>`}</ul>
@@ -6417,7 +6810,7 @@ function _partyRenderScoreboard() {
     : "";
   host.innerHTML = `
     <header class="party-side-header">
-      <span class="party-side-title">🎉 Party</span>
+      <span class="party-side-title"><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle</span>
       <span class="party-side-timer">${timer}</span>
     </header>
     ${avgRatingLine}
@@ -8371,83 +8764,47 @@ function _verdictTone(headline, explicit) {
   return "";
 }
 
+// General opening-trainer tips that aren't tied to any specific line.
+// Picked deterministically per opening+line so the same selection
+// always shows the same tip — no flicker on re-render.
+const OPENING_TIPS = [
+  "Дебют — это про развитие фигур и контроль центра. Каждый ход должен помогать одному из этих принципов.",
+  "Не делай два хода одной фигурой подряд без причины — это теряет темп.",
+  "Рокируй пораньше: безопасность короля важнее симпатичной атаки на королевском фланге.",
+  "Не выводи ферзя слишком рано — соперник нападает на него лёгкими фигурами с темпом.",
+  "Слон обычно сильнее коня в открытых позициях; конь — в закрытых.",
+  "Контроль центральной диагонали и вертикали важнее, чем взятие пешки на краю.",
+  "В дебюте каждый ход — это инвестиция: думай не о текущей выгоде, а о позиции через 5 ходов.",
+  "Если вышел из теории — продолжай по принципам: развитие, центр, безопасность короля.",
+  "Связки и пешечные цепи — основа структуры. Ломая их, ты ломаешь и план соперника.",
+  "Не торопись брать центральные пешки — иногда напряжение в центре выгоднее размена.",
+  "Запоминай не только ходы, но и идеи: куда пойдут ферзь, ладьи, какую структуру строишь.",
+  "Открытая линия — повод поставить туда ладью. Полуоткрытая — повод подумать о давлении.",
+  "Слабые поля в лагере соперника — это будущие посадочные площадки для коней.",
+  "Делай ход, после которого у соперника становится меньше хороших ответов, а не больше.",
+  "В симметричных позициях темп особенно ценен — каждый отыгранный ход меняет оценку.",
+  "Чем активнее твои фигуры в дебюте, тем спокойнее эндшпиль.",
+];
+
 function _renderOpeningAiCoachPanel() {
-  const ai = state.opening.aiCoach;
-  let statusBadge = "";
-  let helpText = "";
-  if (ai.status === null || ai.status === "checking") {
-    statusBadge = `<span class="opening-ai-badge opening-ai-badge-checking">проверяем Ollama…</span>`;
-  } else if (ai.status === true) {
-    statusBadge = `<span class="opening-ai-badge opening-ai-badge-ok">Ollama on · ${escapeHtml(ai.model || "")}</span>`;
-  } else {
-    statusBadge = `<span class="opening-ai-badge opening-ai-badge-off">Ollama off</span>`;
-    helpText = `
-      <div class="opening-ai-help muted">
-        Запусти локально: <code>ollama serve</code> и поставь модель
-        <code>ollama pull qwen2.5:7b</code>. Можно сменить через
-        <code>CHESS_OLLAMA_MODEL</code>.
-      </div>`;
-  }
-  const sfBadge = ai.stockfishRunning
-    ? `<span class="opening-ai-badge opening-ai-badge-sf">Stockfish 18 on</span>`
-    : `<span class="opening-ai-badge opening-ai-badge-sf-off">Stockfish off</span>`;
-  const btnDisabled = ai.streaming ? "disabled" : "";
-  const btnLabel = ai.streaming ? "Тренер думает…" : "🧠 Подробнее от тренера";
-  const formatted = _formatCoachText(ai.text);
-  const tone = _verdictTone(formatted.headline, formatted.tone);
-  const toneCls = tone ? ` opening-ai-verdict-${tone}` : "";
-  let textBlock;
-  if (ai.error) {
-    textBlock = `<div class="opening-ai-text is-error">${escapeHtml(ai.error)}</div>`;
-  } else if (ai.text || ai.streaming) {
-    // Hybrid coach output: deterministic headline + Stockfish eval line +
-    // optional best-move chip + LLM idea sentence. Only render the parts
-    // we actually have, so a partial stream (streaming = headline first)
-    // doesn't draw empty boxes.
-    const evalLine = formatted.evalText || formatted.bestSan
-      ? `<div class="opening-ai-evalrow">${
-          formatted.evalText ? `<span class="opening-ai-eval">${escapeHtml(formatted.evalText)}</span>` : ""
-        }${
-          formatted.bestSan ? `<span class="opening-ai-best">Лучше: <code>${escapeHtml(formatted.bestSan)}</code></span>` : ""
-        }</div>`
-      : "";
-    const ideaLine = formatted.idea
-      ? `<div class="opening-ai-idea">${escapeHtml(formatted.idea)}</div>`
-      : (ai.streaming ? `<div class="opening-ai-idea muted">…</div>` : "");
-    textBlock = `
-      <div class="opening-ai-text">
-        ${formatted.headline ? `<div class="opening-ai-verdict${toneCls}">${escapeHtml(formatted.headline)}</div>` : ""}
-        ${evalLine}
-        ${ideaLine}
-      </div>`;
-  } else {
-    textBlock = `<div class="opening-ai-text muted">Нажми «Подробнее от тренера» — ИИ объяснит ход и план дебюта на основании Stockfish.</div>`;
-  }
-  const depth = _readCoachDepth();
-  const multipv = _readCoachMultipv();
+  const op = _selectedOpening();
+  const line = _selectedOpeningLine();
+  if (!op || !line) return "";
+  const key = `${op.id}:${line.id}:${state.opening.moveIdx || 0}`;
+  const tip = _coachPick(OPENING_TIPS, key);
+  // Optional: if the opening has its own description, show it as a
+  // muted secondary line under the tip — gives both the dynamic
+  // hint and the canonical theory sentence.
+  const desc = (line.description || op.description || "").trim();
   return `
     <div class="opening-ai-panel">
       <div class="opening-ai-header">
-        <strong>AI-тренер</strong>
-        ${statusBadge}
-        ${sfBadge}
+        <strong>Тренер</strong>
       </div>
-      <div class="opening-ai-tuning">
-        <label title="Stockfish depth — глубина расчёта. chess.com Game Review ≈ 22. Больше = точнее, но медленнее.">
-          Глубина:
-          <input id="opening-ai-depth" type="number" min="6" max="40" value="${depth}" />
-        </label>
-        <label title="Сколько лучших линий показать тренеру (multipv). 1 = только лучшая, 2-3 = с альтернативами.">
-          Линий:
-          <input id="opening-ai-multipv" type="number" min="1" max="4" value="${multipv}" />
-        </label>
+      <div class="opening-ai-text">
+        <div class="opening-ai-verdict opening-ai-verdict-info">${escapeHtml(tip)}</div>
+        ${desc ? `<div class="opening-ai-idea">${escapeHtml(desc)}</div>` : ""}
       </div>
-      <div class="opening-ai-actions">
-        <button id="btn-opening-ai-coach" type="button" class="puzzle-secondary" ${btnDisabled}>${btnLabel}</button>
-        <button id="btn-opening-ai-recheck" type="button" class="puzzle-secondary" title="Переподключиться к Ollama">↻</button>
-      </div>
-      ${textBlock}
-      ${helpText}
     </div>
   `;
 }
@@ -8477,36 +8834,14 @@ function _saveCoachMultipvFromInput(el) {
   localStorage.setItem("chess.coachMultipv", String(v));
 }
 
-function _attachOpeningAiCoachHandlers() {
-  const askBtn = document.getElementById("btn-opening-ai-coach");
-  if (askBtn) askBtn.onclick = () => requestOpeningCoach();
-  const recheck = document.getElementById("btn-opening-ai-recheck");
-  if (recheck) recheck.onclick = () => _probeOpeningCoach();
-  const depthInput = document.getElementById("opening-ai-depth");
-  if (depthInput) depthInput.onchange = () => _saveCoachDepthFromInput(depthInput);
-  const mpvInput = document.getElementById("opening-ai-multipv");
-  if (mpvInput) mpvInput.onchange = () => _saveCoachMultipvFromInput(mpvInput);
-}
+// All three handlers below used to stream AI coach text from Ollama.
+// We dropped the AI integration; these are kept as no-ops so the
+// callsites don't have to be rewired (the canned panel above already
+// renders without any of this).
+function _attachOpeningAiCoachHandlers() { /* no-op since AI coach removed */ }
+async function _probeOpeningCoach() { /* no-op since AI coach removed */ }
 
-async function _probeOpeningCoach() {
-  state.opening.aiCoach.status = "checking";
-  // Avoid re-rendering the whole opening UI here to prevent input
-  // focus/scroll churn while the user is reading — the badge will
-  // refresh on the next renderOpeningUi() call (e.g. after a move).
-  try {
-    const r = await api(`/api/opening_trainer/coach/status`);
-    state.opening.aiCoach.status = !!(r && r.available);
-    state.opening.aiCoach.model = (r && r.model) || "";
-    state.opening.aiCoach.baseUrl = (r && r.base_url) || "";
-    state.opening.aiCoach.installedModels = (r && r.installed_models) || [];
-    state.opening.aiCoach.stockfishRunning = !!(r && r.stockfish_running);
-  } catch (_e) {
-    state.opening.aiCoach.status = false;
-  }
-  renderOpeningUi();
-}
-
-async function requestOpeningCoach() {
+async function requestOpeningCoach_unused() {
   const op = _selectedOpening();
   const line = _selectedOpeningLine();
   if (!op || !line) {
