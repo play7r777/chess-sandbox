@@ -888,7 +888,10 @@ async def analysis_coach_status() -> dict[str, Any]:
 class PartyCreateRequest(BaseModel):
     client_id: str = Field(..., min_length=4, max_length=64)
     nickname: str = Field(default="Гость", max_length=32)
-    avatar: str = Field(default="♟", max_length=8)
+    # `avatar` may be a glyph (e.g. "♟") or a URL pointing at the static
+    # avatars mount (e.g. "/api/avatars/<cid>.png?v=<ts>"), so the cap
+    # mirrors UserUpsertRequest at 256 chars.
+    avatar: str = Field(default="♟", max_length=256)
 
 
 @app.post("/api/party/create")
