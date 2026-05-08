@@ -6220,88 +6220,361 @@ function openPartyModal() {
     renderPartyLobby();
     return;
   }
+  // Chess.com-style sidebar landing for Battle: header + Players /
+  // Top Score tiles + Play / Watch tabs. The Play tab shows a list of
+  // players with green Invite buttons (online or offline filtered via
+  // pill toggle); the big "Играть" CTA at the bottom creates a fresh
+  // room. The Watch tab shows currently-running parties / solo
+  // players to spectate (the existing flow). The "Войти по коду"
+  // fallback survives as a collapsible details block.
+  _renderBattleSidebar(body);
+}
+
+// Renders the chess.com-style Battle landing into the supplied host
+// (`body` = #battle-body or #party-body fallback). Stat tiles show
+// "Players" (count of registered users) and a personal "Top Score"
+// (max party 'score' the user ever achieved), so the layout matches
+// the chess.com Puzzle Battle landing card. Online/Offline pill is
+// preserved inside the Play tab — toggling it filters the player
+// list and persists via `_battleSidebarState.presence`.
+function _renderBattleSidebar(body) {
+  if (!body) return;
+  const tab = _battleSidebarState.tab || "play";
+  const myStats = (state.user && state.user.stats) || {};
+  const myParties = (state.user && Array.isArray(state.user.parties)) ? state.user.parties : [];
+  const myTop = myParties.reduce((acc, p) => Math.max(acc, Number(p.score || 0)), 0);
+  const myRating = state.user && Number(state.user.rating) ? state.user.rating : 1200;
   body.innerHTML = `
-    <header class="party-header">
-      <h2><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle</h2>
-      <p class="muted">Каждому участнику даётся 10 минут на свой поток пазлов; в конце — общий лидерборд.</p>
-    </header>
-
-    <div class="party-tabs" role="tablist">
-      <button type="button" class="party-tab is-active" data-tab="online" role="tab" aria-selected="true">Онлайн</button>
-      <button type="button" class="party-tab" data-tab="offline" role="tab" aria-selected="false">Оффлайн</button>
-    </div>
-
-    <section class="party-tab-panel" data-panel="online">
-      <div class="party-section-title">
-        Открытые пати
-        <button id="btn-party-open-refresh" type="button" class="puzzle-ghost party-refresh-btn" title="Обновить">⟳</button>
+    <div class="cc-sidebar">
+      <div class="cc-sidebar-head">
+        <span class="cc-sidebar-glyph">${CC_BATTLE_SVG}</span>
+        <div class="cc-sidebar-title">Puzzle Battle</div>
       </div>
-      <div id="party-open-list" class="party-open-list">
-        <div class="party-open-empty">Загружаю…</div>
-      </div>
-
-      <div class="party-actions" style="margin-top: 14px;">
-        <button id="btn-party-create" type="button" class="puzzle-primary">Создать комнату и пригласить</button>
-      </div>
-
-      <details class="party-fallback" style="margin-top: 14px;">
-        <summary class="muted" style="cursor: pointer;">Войти по коду (старый способ)</summary>
-        <div class="party-actions" style="margin-top: 8px;">
-          <input id="party-join-code" type="text" maxlength="8" placeholder="КОД" class="party-code-input" />
-          <button id="btn-party-join" type="button" class="puzzle-secondary">Войти</button>
+      <div class="cc-sidebar-stats">
+        <div class="cc-sidebar-stat">
+          <span class="cc-stat-label">Мой рейтинг</span>
+          <span class="cc-stat-value">${myRating}</span>
         </div>
-      </details>
-    </section>
-
-    <section class="party-tab-panel" data-panel="offline" hidden>
-      <div class="party-section-title">
-        Игроки соло-пазлов
-        <button id="btn-presence-refresh" type="button" class="puzzle-ghost party-refresh-btn" title="Обновить">⟳</button>
+        <div class="cc-sidebar-stat">
+          <span class="cc-stat-label">Лучший результат</span>
+          <span class="cc-stat-value">${myTop} <small>pts</small></span>
+        </div>
       </div>
-      <p class="muted" style="font-size: 12px; margin: 4px 0 8px;">
-        Игроки решают пазлы на настоящие эло. Кликни по карточке, чтобы наблюдать за их доской в реальном времени.
-      </p>
-      <div id="presence-open-list" class="party-open-list">
-        <div class="party-open-empty">Загружаю…</div>
+      <div class="cc-sidebar-tabs" role="tablist">
+        <button type="button" class="cc-tab ${tab === "play" ? "is-active" : ""}" data-cc-tab="play">Играть</button>
+        <button type="button" class="cc-tab ${tab === "watch" ? "is-active" : ""}" data-cc-tab="watch">Наблюдать</button>
       </div>
-    </section>
 
-    <div id="party-error" class="party-error" hidden></div>
+      <div class="cc-sidebar-body" data-cc-tab-pane="play" ${tab === "play" ? "" : "hidden"}>
+        <div class="cc-toggle" role="tablist" aria-label="Фильтр игроков">
+          <button type="button" class="cc-toggle-btn ${_battleSidebarState.presence === "online" ? "is-active" : ""}" data-toggle="online">
+            <span class="cc-dot"></span>Онлайн
+          </button>
+          <button type="button" class="cc-toggle-btn ${_battleSidebarState.presence === "offline" ? "is-active" : ""}" data-toggle="offline">
+            <span class="cc-dot"></span>Оффлайн
+          </button>
+        </div>
+        <div class="cc-sidebar-section-title">
+          Игроки
+          <button type="button" id="btn-cc-players-refresh" title="Обновить">⟳</button>
+        </div>
+        <div id="cc-player-list" class="cc-player-list">
+          <div class="cc-empty">Загружаю…</div>
+        </div>
+        <details class="cc-code-fallback">
+          <summary>Войти по коду</summary>
+          <div class="cc-code-join">
+            <input id="party-join-code" type="text" maxlength="8" placeholder="КОД" />
+            <button id="btn-party-join" type="button">Войти</button>
+          </div>
+        </details>
+      </div>
+
+      <div class="cc-sidebar-body" data-cc-tab-pane="watch" ${tab === "watch" ? "" : "hidden"}>
+        <div class="cc-sidebar-section-title">
+          Открытые пати
+          <button type="button" id="btn-cc-watch-refresh" title="Обновить">⟳</button>
+        </div>
+        <div id="cc-open-parties" class="cc-player-list">
+          <div class="cc-empty">Загружаю…</div>
+        </div>
+        <div class="cc-sidebar-section-title">Соло-пазлы</div>
+        <p class="muted" style="font-size: 12px; margin: -2px 0 4px;">Игроки решают на настоящие эло. Клик — наблюдать в реальном времени.</p>
+        <div id="cc-presence-list" class="cc-player-list">
+          <div class="cc-empty">Загружаю…</div>
+        </div>
+      </div>
+
+      <div class="cc-sidebar-cta">
+        <button type="button" id="btn-cc-battle-play" class="cc-play-btn" title="Создать комнату и пригласить">▶ Играть</button>
+        <span class="muted" style="font-size: 11px; text-align: center;">Создать новую комнату — или нажми «Пригласить» рядом с игроком.</span>
+      </div>
+
+      <div id="party-error" class="party-error" hidden></div>
+    </div>
   `;
-  body.querySelector("#btn-party-create").addEventListener("click", () => {
+  // Tab switching.
+  body.querySelectorAll("[data-cc-tab]").forEach((t) => {
+    t.addEventListener("click", () => {
+      _battleSidebarState.tab = t.dataset.ccTab;
+      body.querySelectorAll("[data-cc-tab]").forEach((x) => {
+        x.classList.toggle("is-active", x.dataset.ccTab === _battleSidebarState.tab);
+      });
+      body.querySelectorAll("[data-cc-tab-pane]").forEach((p) => {
+        p.hidden = p.dataset.ccTabPane !== _battleSidebarState.tab;
+      });
+      if (_battleSidebarState.tab === "watch") {
+        _renderCcOpenParties().catch(() => {});
+        _renderCcPresenceList().catch(() => {});
+      }
+    });
+  });
+  // Online/Offline pill — filters the player list. We keep both lists
+  // populated from /api/users and just split them by `last_seen` so
+  // there's no second backend call needed. Default = online.
+  body.querySelectorAll("[data-toggle]").forEach((t) => {
+    t.addEventListener("click", () => {
+      _battleSidebarState.presence = t.dataset.toggle;
+      body.querySelectorAll("[data-toggle]").forEach((x) => {
+        x.classList.toggle("is-active", x.dataset.toggle === _battleSidebarState.presence);
+      });
+      _renderCcPlayerList().catch(() => {});
+    });
+  });
+  // Big green Play CTA → create-and-invite (existing party-create flow).
+  body.querySelector("#btn-cc-battle-play")?.addEventListener("click", () => {
     partyCreateAndInvite().catch((e) => _partyShowError(e));
   });
-  body.querySelector("#btn-party-open-refresh")?.addEventListener("click", () => {
-    _renderOpenPartiesList().catch(() => {});
-  });
-  body.querySelector("#btn-party-join").addEventListener("click", () => {
-    const code = (body.querySelector("#party-join-code").value || "").trim().toUpperCase();
+  // "Войти по коду" fallback.
+  body.querySelector("#btn-party-join")?.addEventListener("click", () => {
+    const code = (body.querySelector("#party-join-code")?.value || "").trim().toUpperCase();
     if (!code) return;
     partyJoin(code).catch((e) => _partyShowError(e));
   });
-  body.querySelector("#party-join-code").addEventListener("keydown", (e) => {
+  body.querySelector("#party-join-code")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") body.querySelector("#btn-party-join").click();
   });
-  // Tab switcher.
-  body.querySelectorAll(".party-tab").forEach((btn) => {
+  // Refresh buttons.
+  body.querySelector("#btn-cc-players-refresh")?.addEventListener("click", () => {
+    _renderCcPlayerList().catch(() => {});
+  });
+  body.querySelector("#btn-cc-watch-refresh")?.addEventListener("click", () => {
+    _renderCcOpenParties().catch(() => {});
+    _renderCcPresenceList().catch(() => {});
+  });
+  // Initial fills.
+  _renderCcPlayerList().catch(() => {});
+  if (tab === "watch") {
+    _renderCcOpenParties().catch(() => {});
+    _renderCcPresenceList().catch(() => {});
+  }
+}
+
+// Fills #cc-player-list with the registered-users roster from
+// /api/users, filtered by `_battleSidebarState.presence` (online =
+// last_seen within 5 min, offline = the rest). Each row has a green
+// "Пригласить" button — clicking lazily creates a party (if none
+// exists) and POSTs /api/party/invite to ping the target player.
+async function _renderCcPlayerList() {
+  const host = document.getElementById("cc-player-list");
+  if (!host) return;
+  host.innerHTML = `<div class="cc-empty">Загружаю…</div>`;
+  let users = [];
+  try {
+    const res = await fetch("/api/users");
+    const data = await res.json();
+    users = (data.users || []).filter((u) => u.client_id !== state.user.client_id);
+  } catch (_) {
+    host.innerHTML = `<div class="cc-empty">Не удалось загрузить</div>`;
+    return;
+  }
+  if (!users.length) {
+    host.innerHTML = `<div class="cc-empty">Пока нет других игроков. Поделись ссылкой на сервер.</div>`;
+    return;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const isOnline = (u) => (now - Number(u.last_seen || 0)) < 300;
+  const filter = _battleSidebarState.presence === "offline"
+    ? ((u) => !isOnline(u))
+    : isOnline;
+  const filtered = users.filter(filter)
+    .sort((a, b) => (Number(b.last_seen || 0)) - (Number(a.last_seen || 0)));
+  if (!filtered.length) {
+    host.innerHTML = `<div class="cc-empty">${_battleSidebarState.presence === "offline" ? "Все игроки сейчас онлайн." : "Сейчас никто не онлайн. Переключи на «Оффлайн»."}</div>`;
+    return;
+  }
+  host.innerHTML = filtered.map((u) => {
+    const online = isOnline(u);
+    return `
+      <div class="cc-player-row" data-cid="${escapeHtml(u.client_id)}">
+        <span class="cc-player-av">${avatarHtml(u.avatar)}</span>
+        <span class="cc-player-info">
+          <span class="cc-player-name">${escapeHtml(u.nickname || "Гость")}</span>
+          <span class="cc-player-meta">
+            <span class="${online ? "cc-online-dot" : "cc-offline-dot"}"></span>
+            ${online ? "онлайн" : "оффлайн"} · ${Number(u.rating || 1500)} elo
+          </span>
+        </span>
+        <button type="button" class="cc-invite-btn" data-cid="${escapeHtml(u.client_id)}">Пригласить</button>
+      </div>
+    `;
+  }).join("");
+  host.querySelectorAll(".cc-invite-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const tab = btn.dataset.tab;
-      body.querySelectorAll(".party-tab").forEach((b) => {
-        const active = b.dataset.tab === tab;
-        b.classList.toggle("is-active", active);
-        b.setAttribute("aria-selected", active ? "true" : "false");
-      });
-      body.querySelectorAll(".party-tab-panel").forEach((p) => {
-        p.hidden = p.dataset.panel !== tab;
-      });
-      if (tab === "offline") _renderPresenceList().catch(() => {});
+      _ccInviteUser(btn.dataset.cid, btn).catch(() => {});
     });
   });
-  body.querySelector("#btn-presence-refresh")?.addEventListener("click", () => {
-    _renderPresenceList().catch(() => {});
+}
+
+// Fires an invite to `targetId`. If the user has no active party we
+// create one first (lazy create), so clicking "Пригласить" from the
+// chess.com-style landing works without first requiring the user to
+// hit the big green "Играть" button. The target receives the same
+// /api/party/invite payload the lobby's friend picker emits.
+async function _ccInviteUser(targetId, btn) {
+  if (!targetId) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Отправляю…";
+  }
+  let code = state.party.code;
+  try {
+    if (!state.party.active || !code) {
+      const res = await fetch("/api/party/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: state.user.client_id,
+          nickname: state.user.nickname,
+          avatar: state.user.avatar,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      code = data.code;
+      // Connect so the host's WS is live before we redirect into the
+      // lobby; the invite POST fires concurrently below.
+      partyConnect(code);
+    }
+    const r = await fetch("/api/party/invite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: state.user.client_id,
+        target_id: targetId,
+        code,
+      }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (btn) {
+      btn.textContent = "✔ Отправлено";
+      btn.classList.add("is-sent");
+    }
+  } catch (e) {
+    if (btn) {
+      btn.textContent = "Ошибка";
+      btn.classList.remove("is-sent");
+      setTimeout(() => {
+        btn.textContent = "Пригласить";
+        btn.disabled = false;
+      }, 1800);
+    }
+    _partyShowError(e);
+  }
+}
+
+// Watch tab — open parties (joinable / spectatable).
+async function _renderCcOpenParties() {
+  const host = document.getElementById("cc-open-parties");
+  if (!host) return;
+  host.innerHTML = `<div class="cc-empty">Загружаю…</div>`;
+  let parties = [];
+  try {
+    const res = await fetch("/api/party/list");
+    const data = await res.json();
+    parties = (data.parties || []).filter((p) => p.host_id !== state.user.client_id);
+  } catch (_) {
+    host.innerHTML = `<div class="cc-empty">Не удалось загрузить</div>`;
+    return;
+  }
+  if (!parties.length) {
+    host.innerHTML = `<div class="cc-empty">Сейчас нет открытых пати</div>`;
+    return;
+  }
+  host.innerHTML = parties.map((p) => {
+    const playing = p.status === "playing";
+    const status = playing ? "Идёт" : "Лобби";
+    const cls = playing ? " is-playing" : "";
+    return `
+      <div class="cc-party-row" data-code="${escapeHtml(p.code)}">
+        <span class="cc-player-av">${avatarHtml(p.host_avatar)}</span>
+        <span class="cc-party-info">
+          <span class="cc-party-host">${escapeHtml(p.host_nickname || "Гость")}</span>
+          <span class="cc-party-meta">${p.members} игроков${p.spectator_count ? ` · ${p.spectator_count} наблюдателей` : ""} · код ${escapeHtml(p.code)}</span>
+        </span>
+        <span class="cc-party-status${cls}">${status}</span>
+        ${playing
+          ? `<button type="button" class="cc-spectate-btn btn-cc-spectate-party">Наблюдать</button>`
+          : `<button type="button" class="cc-join-btn btn-cc-join-party">Войти</button>`}
+      </div>
+    `;
+  }).join("");
+  host.querySelectorAll(".cc-party-row").forEach((row) => {
+    const code = row.dataset.code;
+    row.querySelector(".btn-cc-join-party")?.addEventListener("click", () => {
+      partyJoin(code).catch((e) => _partyShowError(e));
+    });
+    row.querySelector(".btn-cc-spectate-party")?.addEventListener("click", () => {
+      spectatorConnect(code);
+      closePartyModal();
+    });
   });
-  // Async fills.
-  _renderOpenPartiesList().catch(() => {});
+}
+
+// Watch tab — solo players to spectate (presence list).
+async function _renderCcPresenceList() {
+  const host = document.getElementById("cc-presence-list");
+  if (!host) return;
+  host.innerHTML = `<div class="cc-empty">Загружаю…</div>`;
+  let players = [];
+  try {
+    const res = await fetch("/api/presence/list");
+    const data = await res.json();
+    players = (data.players || []).filter(
+      (p) => p.client_id !== state.user.client_id,
+    );
+  } catch (_) {
+    host.innerHTML = `<div class="cc-empty">Не удалось загрузить</div>`;
+    return;
+  }
+  if (!players.length) {
+    host.innerHTML = `<div class="cc-empty">Сейчас никто не решает соло-пазлы</div>`;
+    return;
+  }
+  host.innerHTML = players.map((p) => {
+    const rating = p.rating ? `${p.rating}` : "—";
+    const puzzleRating = p.puzzle_rating ? `пазл ${p.puzzle_rating}` : "";
+    const streak = p.streak ? `🔥 ${p.streak}` : "";
+    const meta = [puzzleRating, streak].filter(Boolean).join(" · ");
+    return `
+      <div class="cc-player-row" data-cid="${escapeHtml(p.client_id)}">
+        <span class="cc-player-av">${avatarHtml(p.avatar)}</span>
+        <span class="cc-player-info">
+          <span class="cc-player-name">${escapeHtml(p.nickname || "Гость")}</span>
+          <span class="cc-player-meta">${escapeHtml(rating)} elo${meta ? ` · ${escapeHtml(meta)}` : ""}</span>
+        </span>
+        <button type="button" class="cc-spectate-btn btn-cc-presence-spectate">Наблюдать</button>
+      </div>
+    `;
+  }).join("");
+  host.querySelectorAll(".cc-player-row").forEach((row) => {
+    const cid = row.dataset.cid;
+    if (!cid) return;
+    row.querySelector(".btn-cc-presence-spectate")?.addEventListener("click", () => {
+      presenceSpectatorConnect(cid);
+      closePartyModal();
+    });
+  });
 }
 
 function _partyShowError(e) {
@@ -8599,6 +8872,132 @@ async function _refreshRushLeaderboard() {
   renderRushLeaderboard();
 }
 
+// SVG glyphs for the chess.com-style sidebar headers. Inline so they
+// inherit `currentColor` (the .cc-sidebar-glyph rule sets the colour).
+const CC_RUSH_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M13.5 3 6 13h5l-1.5 8L17 11h-5l1.5-8z" fill="#f7c66c"/></svg>`;
+const CC_BATTLE_SVG = BATTLE_SWORDS_SVG.replace('width="18" height="18"', 'width="22" height="22"');
+const CC_TROPHY_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M7 4h10v2h3v3a4 4 0 0 1-4 4h-.4A5 5 0 0 1 13 16v2h3v3H8v-3h3v-2a5 5 0 0 1-2.6-3H8a4 4 0 0 1-4-4V6h3V4z" fill="#f7c66c"/></svg>`;
+
+// Holds the in-memory selection for the rush picker so the sidebar
+// remembers which mode the user clicked between re-renders. Defaults
+// to "180" (3 min) — same as the legacy mode picker order.
+const _rushSidebarState = {
+  selectedMode: "180",
+  tab: "play", // "play" | "leaderboard"
+};
+
+// Holds the in-memory tab + filter state for the battle sidebar so
+// switching online/offline / Play / Watch persists across re-renders
+// triggered by presence updates and refreshes.
+const _battleSidebarState = {
+  tab: "play",       // "play" | "watch"
+  presence: "online", // "online" | "offline" — preserved old toggle
+};
+
+// Renders the chess.com-style picker sidebar inside the rush card +
+// actions slots. Header / two-tile stats / Play+Leaderboard tabs /
+// 3 mode rows / big green Play button. The leaderboard tab simply
+// reveals the existing #rush-leaderboard host (already populated by
+// renderRushLeaderboard()) so we don't duplicate that data.
+function _renderRushSidebar(card, actions) {
+  const sel = _rushSidebarState.selectedMode || "180";
+  const tab = _rushSidebarState.tab || "play";
+  const bestToday = Math.max(
+    state.rush.bestToday["180"] || 0,
+    state.rush.bestToday["300"] || 0,
+    state.rush.bestToday["survival"] || 0,
+  );
+  const bestEverAll = Math.max(
+    state.rush.bestEver["180"] || 0,
+    state.rush.bestEver["300"] || 0,
+    state.rush.bestEver["survival"] || 0,
+  );
+  const modes = [
+    { id: "180", icon: "⏱", name: "3 минуты", sub: "Реши максимум за 3 минуты", bestKey: "180" },
+    { id: "300", icon: "⏱", name: "5 минут", sub: "Реши максимум за 5 минут", bestKey: "300" },
+    { id: "survival", icon: "❤", name: "Survival", sub: "Без таймера, до 3 ошибок", bestKey: "survival" },
+  ];
+  const modeRows = modes.map((m) => {
+    const active = m.id === sel ? " is-active" : "";
+    const best = state.rush.bestEver[m.bestKey] || 0;
+    return `
+      <button type="button" class="cc-mode-row${active}" data-mode="${m.id}">
+        <span class="cc-mode-icon">${m.icon}</span>
+        <span class="cc-mode-text">
+          <span class="cc-mode-name">${escapeHtml(m.name)}</span>
+          <span class="cc-mode-sub">${escapeHtml(m.sub)}</span>
+        </span>
+        <span class="cc-mode-best" title="Лучший результат за всё время">${best > 0 ? `★ ${best}` : ""}</span>
+      </button>
+    `;
+  }).join("");
+  card.innerHTML = `
+    <div class="cc-sidebar">
+      <div class="cc-sidebar-head">
+        <span class="cc-sidebar-glyph">${CC_RUSH_SVG}</span>
+        <div class="cc-sidebar-title">Puzzle Rush</div>
+      </div>
+      <div class="cc-sidebar-stats">
+        <div class="cc-sidebar-stat">
+          <span class="cc-stat-label">Best Today</span>
+          <span class="cc-stat-value">${bestToday}</span>
+        </div>
+        <div class="cc-sidebar-stat">
+          <span class="cc-stat-label">Top Score</span>
+          <span class="cc-stat-value">${bestEverAll}</span>
+        </div>
+      </div>
+      <div class="cc-sidebar-tabs" role="tablist">
+        <button type="button" class="cc-tab ${tab === "play" ? "is-active" : ""}" data-cc-tab="play">Играть</button>
+        <button type="button" class="cc-tab ${tab === "leaderboard" ? "is-active" : ""}" data-cc-tab="leaderboard">Лидерборд</button>
+      </div>
+      <div class="cc-sidebar-body" data-cc-tab-pane="play" ${tab === "play" ? "" : "hidden"}>
+        <div class="cc-sidebar-section-title">Выбери режим</div>
+        <div class="cc-mode-list">${modeRows}</div>
+      </div>
+      <div class="cc-sidebar-body" data-cc-tab-pane="leaderboard" ${tab === "leaderboard" ? "" : "hidden"}>
+        <div class="cc-sidebar-section-title">Лидерборд <span class="muted" style="font-size:11px;">ниже на странице</span></div>
+        <p class="muted" style="margin: 0 0 4px;">Полная таблица рендерится прямо под этим блоком. Переключай режим / период там же.</p>
+      </div>
+    </div>
+  `;
+  // The big Play button lives in #rush-actions so the rest of the
+  // page (history, leaderboard) sits below it in the natural flow.
+  actions.innerHTML = `
+    <div class="cc-sidebar-cta" style="width:100%;">
+      <button type="button" id="btn-cc-rush-play" class="cc-play-btn">▶ Играть</button>
+    </div>
+  `;
+  // Mode row clicks update the selection (no auto-start — keep parity
+  // with chess.com's UI where the Play button starts the chosen mode).
+  card.querySelectorAll(".cc-mode-row").forEach((b) => {
+    b.addEventListener("click", () => {
+      _rushSidebarState.selectedMode = b.dataset.mode;
+      card.querySelectorAll(".cc-mode-row").forEach((x) => {
+        x.classList.toggle("is-active", x.dataset.mode === b.dataset.mode);
+      });
+    });
+  });
+  card.querySelectorAll("[data-cc-tab]").forEach((t) => {
+    t.addEventListener("click", () => {
+      _rushSidebarState.tab = t.dataset.ccTab;
+      card.querySelectorAll("[data-cc-tab]").forEach((x) => {
+        x.classList.toggle("is-active", x.dataset.ccTab === _rushSidebarState.tab);
+      });
+      card.querySelectorAll("[data-cc-tab-pane]").forEach((p) => {
+        p.hidden = p.dataset.ccTabPane !== _rushSidebarState.tab;
+      });
+    });
+  });
+  const playBtn = actions.querySelector("#btn-cc-rush-play");
+  if (playBtn) {
+    playBtn.addEventListener("click", () => {
+      const mode = _rushSidebarState.selectedMode || "180";
+      startRush(mode);
+    });
+  }
+}
+
 function renderRushUi() {
   renderRushStatsBar();
   renderRushHistory();
@@ -8607,31 +9006,11 @@ function renderRushUi() {
   const actions = document.getElementById("rush-actions");
   if (!card || !actions) return;
   if (!state.rush.mode || (!state.rush.active && !state.rush.finished)) {
-    // Mode picker.
-    card.innerHTML = `
-      <div class="rush-pick">
-        <h3>Выбери режим</h3>
-        <div class="rush-pick-grid">
-          <button type="button" class="rush-mode-btn" data-mode="180">
-            <span class="rush-mode-label">3 минуты</span>
-            <span class="rush-mode-sub">Best today: ${state.rush.bestToday["180"] || 0} · OAT: ${state.rush.bestEver["180"] || 0}</span>
-          </button>
-          <button type="button" class="rush-mode-btn" data-mode="300">
-            <span class="rush-mode-label">5 минут</span>
-            <span class="rush-mode-sub">Best today: ${state.rush.bestToday["300"] || 0} · OAT: ${state.rush.bestEver["300"] || 0}</span>
-          </button>
-          <button type="button" class="rush-mode-btn" data-mode="survival">
-            <span class="rush-mode-label">Survival</span>
-            <span class="rush-mode-sub">До 3 ошибок · OAT: ${state.rush.bestEver["survival"] || 0}</span>
-          </button>
-        </div>
-        <p class="muted">3 ошибки — конец сессии. Лидерборд: лучший рекорд за сегодня и за всё время.</p>
-      </div>
-    `;
-    actions.innerHTML = "";
-    card.querySelectorAll(".rush-mode-btn").forEach((b) => {
-      b.onclick = () => startRush(b.dataset.mode);
-    });
+    // Chess.com-style picker sidebar: header + Best Today / Top Score
+    // tiles + tabs (Play / Leaderboard) + clickable mode rows + a big
+    // green Play button. The leaderboard tab reuses #rush-leaderboard
+    // which is already populated by renderRushLeaderboard() above.
+    _renderRushSidebar(card, actions);
     return;
   }
   if (state.rush.finished) {
