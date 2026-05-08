@@ -4147,13 +4147,19 @@ function _playPuzzleOpponentReply() {
     move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" });
   } catch { move = null; }
   if (!move) return;
+  // Keep the green-check badge from the player's correct move so they
+  // still see "Хороший ход" while thinking about the next move. loadFen()
+  // unconditionally nulls state.reviewBadge — snapshot it here and
+  // restore on the same square afterwards. If the bot recaptures on the
+  // player's destination square, the badge would visually attach to the
+  // bot's piece (misleading), so drop it in that case.
+  const keepBadge = (state.reviewBadge && state.reviewBadge.square !== move.to)
+    ? state.reviewBadge
+    : null;
   loadFen(c.fen());
   _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
-  // Keep the green-check badge on the player's previous destination so
-  // they can still see "Хороший ход" while thinking about the next move.
-  // Matches Analysis tab: the badge sticks to the played square through
-  // the opponent's reply and is overwritten only by the next user move.
+  state.reviewBadge = keepBadge;
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.puzzle.nextIdx += 1;
@@ -8348,8 +8354,15 @@ function _playDailyOpponentReply() {
   let move;
   try { move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" }); } catch { move = null; }
   if (!move) return;
+  // See _playPuzzleOpponentReply for rationale. loadFen() nulls
+  // state.reviewBadge — snapshot it so the green check stays on the
+  // player's previous destination across the bot's reply (drop on recapture).
+  const keepBadge = (state.reviewBadge && state.reviewBadge.square !== move.to)
+    ? state.reviewBadge
+    : null;
   loadFen(c.fen());
   state.lastMove = { from: move.from, to: move.to };
+  state.reviewBadge = keepBadge;
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.daily.nextIdx += 1;
@@ -8792,8 +8805,15 @@ function _playRushOpponentReply() {
   let move;
   try { move = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || "q" }); } catch { move = null; }
   if (!move) return;
+  // See _playPuzzleOpponentReply for rationale. loadFen() nulls
+  // state.reviewBadge — snapshot it so the green check stays on the
+  // player's previous destination across the bot's reply (drop on recapture).
+  const keepBadge = (state.reviewBadge && state.reviewBadge.square !== move.to)
+    ? state.reviewBadge
+    : null;
   loadFen(c.fen());
   state.lastMove = { from: move.from, to: move.to };
+  state.reviewBadge = keepBadge;
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.rush.nextIdx += 1;
