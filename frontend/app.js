@@ -4085,12 +4085,18 @@ function tryPuzzleMove(from, to) {
     state.puzzle.attempts = 1;
     state.selectedSquare = null;
     state.legalTargets = [];
+    // Reuse the Analysis badge system: red "miss" cross in the
+    // top-right corner of the destination square + same pinkish tint
+    // on origin/dest. The reviewBadge has to be set *before*
+    // renderBoard, since renderBoard is what mounts the SVG.
+    state.reviewBadge = { square: move.to, classification: "miss" };
+    state.lastMove = { from: move.from, to: move.to };
+    renderBoard();
     const cell = boardEl && boardEl.querySelector(`.square[data-square="${move.to}"]`);
     if (cell) {
       cell.classList.add("puzzle-flash-bad");
       setTimeout(() => cell.classList.remove("puzzle-flash-bad"), 700);
     }
-    _showBoardBadge("bad", "Упущенная победа");
     finalizePuzzle("failed");
     // Auto-advance after a short beat so the user sees the red flash
     // and the rating delta before the next puzzle loads.
@@ -4105,7 +4111,9 @@ function tryPuzzleMove(from, to) {
   loadFen(c.fen());
   _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
-  state.reviewBadge = { square: move.to, classification: "best" };
+  // Same green check ("Хороший ход") that the Analysis page paints
+  // in the corner of the played square — chess.com-style.
+  state.reviewBadge = { square: move.to, classification: "good" };
   state.bestArrow = null;
   state.bestPv = null;
   state.puzzle.feedback = "correct";
@@ -4118,7 +4126,6 @@ function tryPuzzleMove(from, to) {
     okCell.classList.add("puzzle-flash-ok");
     setTimeout(() => okCell.classList.remove("puzzle-flash-ok"), 500);
   }
-  _showBoardBadge("ok", "Хороший");
   // Check if puzzle is fully solved.
   if (state.puzzle.nextIdx >= state.puzzle.moves.length) {
     finalizePuzzle("solved");
@@ -4290,39 +4297,18 @@ function finalizePuzzle(result) {
   renderPuzzleHistory();
 }
 
-// Center-of-board check/cross popups were too loud and would sometimes
-// pop unexpectedly. Per-product decision: replace them with a corner
-// badge (`_showBoardBadge`) so feedback lives in the top-right of the
-// board and never covers the pieces. The `spawnPuzzleCelebration`
-// signature is kept as a no-op so existing callsites stay valid.
-function spawnPuzzleCelebration(_kind) { /* no-op (replaced by _showBoardBadge) */ }
-
-// Mounts a small "Хороший" / "Упущенная победа" badge in the top-right
-// corner of the chessboard. Used by puzzles, rush and party-battle to
-// show move feedback in a unified, unobtrusive way. Calling again
-// before the previous badge fades replaces it.
+// Centred check/cross popups were too loud and would sometimes pop
+// unexpectedly over the pieces. Move feedback now lives in the
+// top-right corner of the *played square* via the same Analysis
+// badge system (`state.reviewBadge` + `makeReviewBadge`):
 //
-//   _showBoardBadge("ok",   "Хороший")
-//   _showBoardBadge("bad",  "Упущенная победа")
+//   correct → classification "good"  (green ✓, like Analysis)
+//   wrong   → classification "miss"  (red  ✕, "Упущенная победа")
 //
-// Pass `null` to clear immediately.
-function _showBoardBadge(kind, text) {
-  if (!boardEl) return;
-  // Drop any previous badge so two rapid moves don't stack.
-  const prev = boardEl.querySelector(".board-badge");
-  if (prev) prev.remove();
-  if (!kind) return;
-  const cls = kind === "ok" ? "board-badge-ok" : "board-badge-bad";
-  const glyph = kind === "ok" ? "✓" : "✕";
-  const el = document.createElement("div");
-  el.className = `board-badge ${cls}`;
-  el.innerHTML = `<span class="board-badge-glyph">${glyph}</span><span class="board-badge-text">${escapeHtml(text || "")}</span>`;
-  boardEl.appendChild(el);
-  // Auto-clear after a short beat so it never lingers across moves.
-  setTimeout(() => {
-    if (el.parentNode === boardEl) el.remove();
-  }, 1500);
-}
+// `spawnPuzzleCelebration` is kept as a no-op so legacy callsites
+// (opening trainer completion, finalizePuzzle) stay valid without
+// having to be touched.
+function spawnPuzzleCelebration(_kind) { /* no-op */ }
 
 function renderPuzzleStatsBar() {
   const host = document.getElementById("puzzle-stats-bar");
@@ -8275,6 +8261,9 @@ function startDailyPuzzle() {
   try { loadFen(state.daily.fenStart); } catch (_) { return; }
   const wantFlipped = state.daily.side === "b";
   if (state.flipped !== wantFlipped) state.flipped = wantFlipped;
+  // Drop any leftover good/miss badge from a prior attempt.
+  state.reviewBadge = null;
+  state.lastMove = null;
   renderBoard();
   renderDailyUi();
   setTimeout(() => _playDailySetupMove(), 220);
@@ -8324,14 +8313,17 @@ function tryDailyMove(from, to) {
     state.daily.attemptsToday += 1;
     state.selectedSquare = null;
     state.legalTargets = [];
-    _flashSquare(move.to, "puzzle-flash-bad");
+    state.reviewBadge = { square: move.to, classification: "miss" };
+    state.lastMove = { from: move.from, to: move.to };
     state.daily.feedback = "wrong";
     renderBoard();
+    _flashSquare(move.to, "puzzle-flash-bad");
     renderDailyUi();
     return;
   }
   loadFen(c.fen());
   state.lastMove = { from: move.from, to: move.to };
+  state.reviewBadge = { square: move.to, classification: "good" };
   state.daily.feedback = "correct";
   state.daily.nextIdx += 1;
   renderBoard();
@@ -8373,11 +8365,9 @@ async function finalizeDailyPuzzle(result) {
   if (result === "solved") {
     state.daily.solvedToday = true;
     state.daily.feedback = "solved";
-    _showBoardBadge("ok", "Хороший");
   } else {
     state.daily.failed = true;
     state.daily.feedback = "shown";
-    _showBoardBadge("bad", "Упущенная победа");
   }
   renderDailyUi();
   // Submit to backend.
@@ -8679,6 +8669,10 @@ function _serveNextRushPuzzle() {
   try { loadFen(p.fen); } catch (_) { return; }
   const wantFlipped = state.rush.side === "b";
   if (state.flipped !== wantFlipped) state.flipped = wantFlipped;
+  // Drop any leftover correct/wrong badge from the previous puzzle so
+  // it doesn't bleed onto the new position.
+  state.reviewBadge = null;
+  state.lastMove = null;
   renderBoard();
   renderRushUi();
   setTimeout(() => _playRushSetupMove(), 200);
@@ -8738,7 +8732,6 @@ function tryRushMove(from, to) {
     try { c.undo(); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
-    _flashSquare(move.to, "puzzle-flash-bad");
     state.rush.mistakes += 1;
     state.rush.history.unshift({
       id: state.rush.current.id,
@@ -8746,9 +8739,14 @@ function tryRushMove(from, to) {
       outcome: "failed",
       solveMs: 0,
     });
-    _showBoardBadge("bad", "Упущенная победа");
+    // Mount the analysis-style "miss" badge on the destination square
+    // *before* renderBoard wipes the cells — otherwise the SVG never
+    // reaches the DOM (this was the Rush bug).
+    state.reviewBadge = { square: move.to, classification: "miss" };
+    state.lastMove = { from: move.from, to: move.to };
     _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
     renderBoard();
+    _flashSquare(move.to, "puzzle-flash-bad");
     if (state.rush.mistakes >= state.rush.maxMistakes) {
       finishRush("mistakes");
       return;
@@ -8760,11 +8758,12 @@ function tryRushMove(from, to) {
   }
   loadFen(c.fen());
   state.lastMove = { from: move.from, to: move.to };
+  // Green-check analysis badge on the played square.
+  state.reviewBadge = { square: move.to, classification: "good" };
   state.rush.nextIdx += 1;
   renderBoard();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");
-  _showBoardBadge("ok", "Хороший");
   if (state.rush.nextIdx >= state.rush.moves.length) {
     state.rush.score += 1;
     state.rush.history.unshift({
@@ -8880,10 +8879,8 @@ async function finishRush(reason) {
       _hydrateRushFromUser(r && r.user ? r.user : r);
     } catch (_) { /* ignore */ }
   }
-  // Final result — keep the corner badge subtle so the in-card summary
-  // and finish modal own the spotlight.
-  _showBoardBadge(state.rush.score > 0 ? "ok" : "bad",
-    state.rush.score > 0 ? "Хороший" : "Упущенная победа");
+  // No final board badge — the in-card summary and finish modal own
+  // the spotlight when Rush ends.
   _refreshRushLeaderboard();
   renderRushUi();
 }
@@ -9378,10 +9375,12 @@ function tryOpeningMove(from, to) {
     state.opening.coachMsg = expected
       ? `Не лучший ход. По теории здесь: ${expected}.`
       : `Линия закончилась.`;
-    _flashSquare(move.to, "puzzle-flash-bad");
+    state.reviewBadge = { square: move.to, classification: "miss" };
+    state.lastMove = { from: move.from, to: move.to };
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
+    _flashSquare(move.to, "puzzle-flash-bad");
     _reportOpeningAttempt(false, false);
     renderOpeningUi();
     return;
@@ -9389,6 +9388,7 @@ function tryOpeningMove(from, to) {
   // Correct.
   loadFen(c.fen());
   state.lastMove = { from: move.from, to: move.to };
+  state.reviewBadge = { square: move.to, classification: "good" };
   renderBoard();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");

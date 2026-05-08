@@ -831,9 +831,10 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 
 /* Legacy centred celebration glyph — kept for `drill-burst-finish`
-   (the trophy that pops on opening-trainer completion) but the OK/BAD
-   variants are no-ops now: feedback lives in `.board-badge` (top-right
-   corner of the board) so we never cover the pieces. */
+   (the trophy that pops on opening-trainer completion). The OK/BAD
+   variants are no-ops now: per-move feedback lives in the top-right
+   corner of the *played square* via `.review-badge` (the same badge
+   the Analysis page uses) so we never cover the pieces. */
 .drill-burst {
   position: absolute;
   left: 50%; top: 50%;
@@ -850,62 +851,6 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .drill-burst.drill-burst-finish {
   font-size: 120px;
   animation: drillBurstFinish 1.6s ease-out forwards;
-}
-
-/* Top-right corner badge: "Хороший" on a correct move, "Упущенная
-   победа" on a wrong move. Used by puzzles, rush and battle so move
-   feedback stays out of the centre of the board. */
-.board-badge {
-  position: absolute;
-  top: 10px; right: 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.2px;
-  pointer-events: none;
-  z-index: 30;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  box-shadow: 0 6px 18px -10px rgba(0, 0, 0, 0.6),
-              0 0 0 1px rgba(0, 0, 0, 0.25) inset;
-  animation: boardBadgePop 0.32s ease-out both, boardBadgeFade 1.5s ease-out forwards;
-}
-.board-badge .board-badge-glyph {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 18px; height: 18px;
-  border-radius: 50%;
-  font-size: 12px;
-  font-weight: 900;
-  line-height: 1;
-}
-.board-badge.board-badge-ok {
-  background: rgba(76, 175, 109, 0.92);
-  color: #f4fff7;
-}
-.board-badge.board-badge-ok .board-badge-glyph {
-  background: rgba(255, 255, 255, 0.18);
-  color: #f4fff7;
-}
-.board-badge.board-badge-bad {
-  background: rgba(204, 76, 84, 0.94);
-  color: #fff5f5;
-}
-.board-badge.board-badge-bad .board-badge-glyph {
-  background: rgba(255, 255, 255, 0.18);
-  color: #fff5f5;
-}
-@keyframes boardBadgePop {
-  0%   { opacity: 0; transform: translateY(-6px) scale(0.92); }
-  70%  { opacity: 1; transform: translateY(0)    scale(1.04); }
-  100% { opacity: 1; transform: translateY(0)    scale(1.0);  }
-}
-@keyframes boardBadgeFade {
-  0%, 75% { opacity: 1; }
-  100%    { opacity: 0; }
 }
 @keyframes drillBurstPop {
   0%   { opacity: 0;   transform: translate(-50%, -50%) scale(0.4); }
