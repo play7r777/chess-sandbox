@@ -190,6 +190,12 @@ def _ensure_extra_fields(u: dict[str, Any]) -> None:
         u["daily_puzzle"].setdefault("last_solved_date", None)
     if "opening_trainer" not in u or not isinstance(u.get("opening_trainer"), dict):
         u["opening_trainer"] = {}
+    # Migrate avatars that an older client truncated to 8 chars from a
+    # ``/api/avatars/...`` URL (would otherwise render as the literal
+    # text "/api/ava" everywhere).
+    av = u.get("avatar")
+    if isinstance(av, str) and av.startswith("/api/") and not av.startswith("/api/avatars/"):
+        u["avatar"] = "♟"
 
 
 def _normalize_avatar(avatar: str) -> str:

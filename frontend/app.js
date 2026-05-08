@@ -422,6 +422,15 @@ function _isAvatarImageUrl(s) {
       || t.startsWith("data:image/");
 }
 
+// Drop avatar values that look like a URL prefix that an older client
+// truncated (e.g. "/api/ava"). Without this they'd render as plain
+// text and read like garbage on every scoreboard / leaderboard row.
+function _looksLikeTruncatedAvatarUrl(s) {
+  if (!s) return false;
+  const t = String(s);
+  return t.startsWith("/api/") && !t.startsWith("/api/avatars/");
+}
+
 // Returns an HTML string suitable for inlining into a template literal.
 // `extraClass` is appended onto the wrapper (img or span). `fallback`
 // is the glyph drawn for empty / non-URL avatars.
@@ -434,7 +443,8 @@ function avatarHtml(avatar, opts) {
     const sizeStyle = sizePx ? ` style="width:${sizePx}px;height:${sizePx}px"` : "";
     return `<img src="${escapeHtml(avatar)}" alt="" class="avatar-img ${extraClass}"${sizeStyle} referrerpolicy="no-referrer">`;
   }
-  return `<span class="avatar-glyph ${extraClass}">${escapeHtml(avatar || fallback)}</span>`;
+  const safe = _looksLikeTruncatedAvatarUrl(avatar) ? fallback : (avatar || fallback);
+  return `<span class="avatar-glyph ${extraClass}">${escapeHtml(safe)}</span>`;
 }
 
 function pieceSvgUrl(piece, overrideSet) {
@@ -7269,7 +7279,16 @@ async function _partyShareToDiscord(results, meta, btn) {
 }
 
 function _partyShowResults() {
-  const body = _partyEnsureModal({ results: true });
+  // The match just ended (or we're rendering the post-match snapshot
+  // after re-entering Battle). If the user was peeking at another tab
+  // when the timer ran out, force a switch back to Battle so the
+  // results panel actually mounts somewhere visible — otherwise the
+  // table renders into `#battle-body` while another view sits on top
+  // of it and nothing pops up at all.
+  if (state.view !== "battle") {
+    try { setView("battle"); } catch (_) { /* fall through */ }
+  }
+  const body = _partyEnsureModal({ results: true, useModal: state.view !== "battle" });
   if (!body) return;
   _partyUnmountSidePanel();
   const list = Array.isArray(state.party.finalResults) ? state.party.finalResults : [];

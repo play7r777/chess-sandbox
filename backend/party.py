@@ -70,6 +70,27 @@ _SQUARE_RE = re.compile(r"^[a-h][1-8]$")
 _PIECE_RE = re.compile(r"^[wb][KQRBNP]$")
 
 
+def _norm_avatar(s: Any) -> str:
+    """Trim and bound the avatar string for in-memory party state.
+
+    Mirrors :func:`backend.users._normalize_avatar` so a user with an
+    uploaded photo (URL like ``/api/avatars/<cid>.png?v=...``) shows the
+    full URL on the scoreboard / spectator list / invitation toast
+    instead of being truncated to 8 chars (which used to render as the
+    text "/api/ava" everywhere).
+    """
+    t = (s or "").strip() if isinstance(s, str) else ""
+    if not t:
+        return "♟"
+    if t.startswith("/api/avatars/"):
+        return t[:256]
+    if t.startswith("/api/"):
+        # Looks like a URL prefix that got truncated by an older client
+        # — drop it rather than show garbled text.
+        return "♟"
+    return t[:8]
+
+
 def _sanitize_hex_color(s: Any) -> str:
     """Returns ``s`` lowercased iff it's a syntactically valid hex
     colour (#rgb or #rrggbb), otherwise the empty string. Used to
@@ -432,7 +453,7 @@ class Party:
             existing = Member(
                 client_id=client_id,
                 nickname=nickname[:32] or "Гость",
-                avatar=avatar[:8] or "♟",
+                avatar=_norm_avatar(avatar),
                 ws=ws,
                 is_host=(client_id == self.host_id),
                 theme=(theme or "")[:32],
@@ -446,7 +467,7 @@ class Party:
             if nickname:
                 existing.nickname = nickname[:32]
             if avatar:
-                existing.avatar = avatar[:8]
+                existing.avatar = _norm_avatar(avatar)
             if theme:
                 existing.theme = theme[:32]
             if pieces:
@@ -536,7 +557,7 @@ class Party:
             existing = Spectator(
                 client_id=client_id,
                 nickname=nickname[:32] or "Гость",
-                avatar=avatar[:8] or "♟",
+                avatar=_norm_avatar(avatar),
                 ws=ws,
             )
             self.spectators[client_id] = existing
@@ -546,7 +567,7 @@ class Party:
             if nickname:
                 existing.nickname = nickname[:32]
             if avatar:
-                existing.avatar = avatar[:8]
+                existing.avatar = _norm_avatar(avatar)
 
         # Snapshot the room for the new spectator.
         await self._send_spectator(
@@ -986,7 +1007,7 @@ async def create_party(host_id: str, host_nickname: str, host_avatar: str) -> Pa
         party.members[host_id] = Member(
             client_id=host_id,
             nickname=host_nickname[:32] or "Гость",
-            avatar=host_avatar[:8] or "♟",
+            avatar=_norm_avatar(host_avatar),
             ws=None,
             is_host=True,
         )

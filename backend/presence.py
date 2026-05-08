@@ -59,6 +59,20 @@ _PRESENCES: dict[str, Presence] = {}
 _LOCK = asyncio.Lock()
 
 
+def _norm_avatar(s: Any) -> str:
+    """Trim/bound an avatar string. Accepts a glyph (≤8 chars) or an
+    uploaded-image URL (``/api/avatars/<cid>.png?v=...``, ≤256 chars).
+    Truncated ``/api/...`` stubs from older clients fall back to ♟."""
+    t = (s or "").strip() if isinstance(s, str) else ""
+    if not t:
+        return "♟"
+    if t.startswith("/api/avatars/"):
+        return t[:256]
+    if t.startswith("/api/"):
+        return "♟"
+    return t[:8]
+
+
 def _public_state(p: Presence) -> dict[str, Any]:
     """Snapshot used both for the discovery list and as the initial
     ``presence_state`` payload sent to a new spectator."""
@@ -149,7 +163,7 @@ async def attach_player(
             existing = Presence(
                 client_id=client_id,
                 nickname=(nickname or "Гость")[:32],
-                avatar=(avatar or "♟")[:8],
+                avatar=_norm_avatar(avatar),
                 ws=ws,
                 theme=(theme or "")[:32],
                 pieces=(pieces or "")[:32],
@@ -165,7 +179,7 @@ async def attach_player(
             if nickname:
                 existing.nickname = nickname[:32]
             if avatar:
-                existing.avatar = avatar[:8]
+                existing.avatar = _norm_avatar(avatar)
             if theme:
                 existing.theme = theme[:32]
             if pieces:
