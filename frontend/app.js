@@ -594,6 +594,15 @@ const state = {
     movetimeMs: 1000,
     history: [],        // SAN strings
     stopRequested: false,
+    // Premove queue: [{ from, to, promotion }]. Unlimited length.
+    // Filled while it's the engine's turn; drained one ply at a time
+    // each time control returns to the player. An illegal premove
+    // plays the illegal sound and clears the entire queue.
+    premoves: [],
+    // Speculative chess.js position used to validate premoves at queue
+    // time and to compute legal targets while opponent thinks. Reset
+    // after every drain.
+    premoveChess: null,
   },
   engine: {
     running: false,
@@ -1141,6 +1150,14 @@ function renderBoard() {
       if (state.selectedSquare === sqName) cell.classList.add("selected");
       if (state.legalTargets.includes(sqName)) {
         cell.classList.add(piece ? "legal-capture" : "legal-move");
+      }
+      // Highlight queued premoves (any number) on both endpoints.
+      if (state.game && state.game.active && state.game.premoves && state.game.premoves.length) {
+        for (const pm of state.game.premoves) {
+          if (pm.from === sqName || pm.to === sqName) {
+            cell.classList.add("premove");
+          }
+        }
       }
       if (state.lastMove && (state.lastMove.from === sqName || state.lastMove.to === sqName)) {
         // When we have a classification for the last move, tint
@@ -2236,9 +2253,95 @@ document.getElementById("btn-play-stop").addEventListener("click", () => stopGam
 function stopGame() {
   state.game.stopRequested = true;
   state.game.active = false;
+  state.game.premoves = [];
+  state.game.premoveChess = null;
   document.getElementById("btn-play-stop").disabled = true;
   document.getElementById("btn-play-start").disabled = false;
   document.getElementById("play-status").textContent = "Игра остановлена.";
+}
+
+// ---------- Premoves (Play vs Stockfish) ----------
+
+// Returns a chess.js instance reflecting the current real position
+// plus every queued premove. Used both to validate a *new* premove
+// at queue time and to compute legal targets while the engine thinks.
+function _premoveSpeculativeChess() {
+  if (!state.game.chess) return null;
+  const c = new Chess(state.game.chess.fen());
+  for (const pm of state.game.premoves) {
+    try {
+      const m = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
+      if (!m) return null;
+    } catch (_) {
+      return null;
+    }
+  }
+  return c;
+}
+
+// Queue a player move as a premove. Returns true if the move was
+// legal in the speculative position and got queued, false otherwise.
+function _queuePremove(from, to) {
+  const c = _premoveSpeculativeChess();
+  if (!c) return false;
+  if (c.turn() !== state.game.playerColor) return false;
+  // Resolve king-on-rook castle drag: the king moves to g/c, not the rook.
+  const moveTo = castlingTargetIfKingOnRook(from, to) || to;
+  let move;
+  try {
+    move = c.move({ from, to: moveTo, promotion: "q" });
+  } catch {
+    move = null;
+  }
+  if (!move) return false;
+  state.game.premoves.push({ from, to: moveTo, promotion: "q" });
+  state.game.premoveChess = c;
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  renderBoard();
+  return true;
+}
+
+// After the engine moves, attempt to apply the next queued premove.
+// Recurses while it's still our turn and the queue has more moves.
+// On the first illegal premove (e.g. piece got captured / square
+// blocked), play the illegal sound and clear the entire queue.
+function _drainPremoves() {
+  const myGame = state.game;
+  if (!myGame || !myGame.active) return;
+  if (!myGame.premoves.length) {
+    myGame.premoveChess = null;
+    return;
+  }
+  const c = myGame.chess;
+  if (!c || c.turn() !== myGame.playerColor) {
+    // Not our turn yet; wait. Premoves remain visualised.
+    return;
+  }
+  const pm = myGame.premoves.shift();
+  let move;
+  try {
+    move = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
+  } catch {
+    move = null;
+  }
+  if (!move) {
+    // Illegal premove — clear queue and play illegal feedback.
+    myGame.premoves = [];
+    myGame.premoveChess = null;
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    playIllegalSound();
+    setStatus("Премув нелегален. Очередь сброшена.", "error");
+    renderBoard();
+    return;
+  }
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  applyChessMoveToBoard(move);
+  playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
+  if (checkGameOver()) return;
+  setTimeout(() => engineMove().then(() => _drainPremoves()), 50);
 }
 
 function renderHistory() {
@@ -2294,6 +2397,8 @@ async function engineMove() {
     if (checkGameOver()) return;
     if (myGame.chess.turn() === myGame.playerColor) {
       document.getElementById("play-status").textContent += " Ваш ход.";
+      // Engine just played; if premoves are queued we apply the next one.
+      if (myGame.premoves.length) _drainPremoves();
     }
   } catch (err) {
     if (myGame !== state.game) return;
@@ -2335,8 +2440,12 @@ function checkGameOver() {
 }
 
 function handleGameSquareClick(squareName) {
-  const c = state.game.chess;
-  if (c.turn() !== state.game.playerColor) return;
+  // Speculative position: real game position with all queued premoves
+  // applied. While it's the engine's turn, this lets the player keep
+  // chaining premoves (unlimited) from their pieces' new locations.
+  const realChess = state.game.chess;
+  const c = _premoveSpeculativeChess() || realChess;
+  const ourTurn = c.turn() === state.game.playerColor;
   const piece = c.get(squareName);
   if (state.selectedSquare) {
     if (state.selectedSquare === squareName) {
@@ -2353,7 +2462,7 @@ function handleGameSquareClick(squareName) {
       tryMakePlayerMove(state.selectedSquare, squareName);
       return;
     }
-    if (piece && piece.color === state.game.playerColor) {
+    if (piece && piece.color === state.game.playerColor && ourTurn) {
       selectSquare(squareName);
       return;
     }
@@ -2362,14 +2471,15 @@ function handleGameSquareClick(squareName) {
     renderBoard();
     return;
   }
-  if (piece && piece.color === state.game.playerColor) {
+  if (piece && piece.color === state.game.playerColor && ourTurn) {
     selectSquare(squareName);
   }
 }
 
 function selectSquare(squareName) {
   state.selectedSquare = squareName;
-  const moves = state.game.chess.moves({ square: squareName, verbose: true });
+  const c = _premoveSpeculativeChess() || state.game.chess;
+  const moves = c.moves({ square: squareName, verbose: true });
   const targets = moves.map((m) => m.to);
   // Also let the user drop the king onto the rook to castle.
   for (const m of moves) {
@@ -2386,7 +2496,23 @@ function selectSquare(squareName) {
 function tryMakePlayerMove(from, to) {
   if (!state.game.active) return;
   const c = state.game.chess;
-  if (c.turn() !== state.game.playerColor) return;
+  // Engine's turn → queue this as a premove instead of rejecting it.
+  // Premoves are validated against the speculative position so we can
+  // chain unlimited moves while the engine thinks.
+  if (c.turn() !== state.game.playerColor) {
+    if (!_queuePremove(from, to)) {
+      // Even at queue time the move isn't legal in the speculative
+      // position — play illegal sound and clear the queue.
+      state.game.premoves = [];
+      state.game.premoveChess = null;
+      state.selectedSquare = null;
+      state.legalTargets = [];
+      playIllegalSound();
+      setStatus("Премув нелегален. Очередь сброшена.", "error");
+      renderBoard();
+    }
+    return;
+  }
   const moveTo = castlingTargetIfKingOnRook(from, to) || to;
   let move;
   try {
@@ -2600,7 +2726,7 @@ if (dropzone) {
 // ---------- View tabs (Main / Analysis) ----------
 
 function setView(view) {
-  const allowed = ["main", "analysis", "puzzle", "daily", "rush", "battle", "opening"];
+  const allowed = ["main", "analysis", "puzzle", "daily", "rush", "battle", "opening", "onevsone"];
   const v = allowed.includes(view) ? view : "main";
   const prev = state.view;
   state.view = v;
@@ -2622,11 +2748,13 @@ function setView(view) {
   if (prev === "daily" && v !== "daily") leaveDailyView();
   if (prev === "opening" && v !== "opening") leaveOpeningView();
   if (prev === "battle" && v !== "battle") leaveBattleView();
+  if (prev === "onevsone" && v !== "onevsone" && typeof leaveOneVsOneView === "function") leaveOneVsOneView();
   if (v === "puzzle")       enterPuzzleView();
   else if (v === "daily")   enterDailyView();
   else if (v === "rush")    enterRushView();
   else if (v === "battle")  enterBattleView();
   else if (v === "opening") enterOpeningView();
+  else if (v === "onevsone" && typeof enterOneVsOneView === "function") enterOneVsOneView();
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
