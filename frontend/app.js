@@ -3682,7 +3682,7 @@ function renderDrillUi() {
     const bonus = streak >= 5 ? " · Огонь! Серия ×" + streak
                  : streak >= 3 ? " · Серия ×" + streak
                  : "";
-    feedback = `<div class="drill-msg drill-ok">✓ Верно! Лучший ход — <b>${escapeHtml(state.drill.expectedSan)}</b>${bonus}</div>`;
+    feedback = `<div class="drill-msg drill-ok">✓ Хороший ход — <b>${escapeHtml(state.drill.expectedSan)}</b>${bonus}</div>`;
   } else if (state.drill.feedback === "wrong") {
     const tip = state.drill.attempts >= 2
       ? "Нажми <b>Подсказку</b>, чтобы увидеть фигуру."
@@ -4090,6 +4090,7 @@ function tryPuzzleMove(from, to) {
       cell.classList.add("puzzle-flash-bad");
       setTimeout(() => cell.classList.remove("puzzle-flash-bad"), 700);
     }
+    _showBoardBadge("bad", "Упущенная победа");
     finalizePuzzle("failed");
     // Auto-advance after a short beat so the user sees the red flash
     // and the rating delta before the next puzzle loads.
@@ -4117,6 +4118,7 @@ function tryPuzzleMove(from, to) {
     okCell.classList.add("puzzle-flash-ok");
     setTimeout(() => okCell.classList.remove("puzzle-flash-ok"), 500);
   }
+  _showBoardBadge("ok", "Хороший");
   // Check if puzzle is fully solved.
   if (state.puzzle.nextIdx >= state.puzzle.moves.length) {
     finalizePuzzle("solved");
@@ -4288,16 +4290,38 @@ function finalizePuzzle(result) {
   renderPuzzleHistory();
 }
 
-function spawnPuzzleCelebration(kind) {
+// Center-of-board check/cross popups were too loud and would sometimes
+// pop unexpectedly. Per-product decision: replace them with a corner
+// badge (`_showBoardBadge`) so feedback lives in the top-right of the
+// board and never covers the pieces. The `spawnPuzzleCelebration`
+// signature is kept as a no-op so existing callsites stay valid.
+function spawnPuzzleCelebration(_kind) { /* no-op (replaced by _showBoardBadge) */ }
+
+// Mounts a small "Хороший" / "Упущенная победа" badge in the top-right
+// corner of the chessboard. Used by puzzles, rush and party-battle to
+// show move feedback in a unified, unobtrusive way. Calling again
+// before the previous badge fades replaces it.
+//
+//   _showBoardBadge("ok",   "Хороший")
+//   _showBoardBadge("bad",  "Упущенная победа")
+//
+// Pass `null` to clear immediately.
+function _showBoardBadge(kind, text) {
   if (!boardEl) return;
-  let glyph, cls;
-  if (kind === "ok")  { glyph = "✔"; cls = "drill-burst-ok"; }
-  else                { glyph = "✖"; cls = "drill-burst-bad"; }
+  // Drop any previous badge so two rapid moves don't stack.
+  const prev = boardEl.querySelector(".board-badge");
+  if (prev) prev.remove();
+  if (!kind) return;
+  const cls = kind === "ok" ? "board-badge-ok" : "board-badge-bad";
+  const glyph = kind === "ok" ? "✓" : "✕";
   const el = document.createElement("div");
-  el.className = `drill-burst ${cls}`;
-  el.textContent = glyph;
+  el.className = `board-badge ${cls}`;
+  el.innerHTML = `<span class="board-badge-glyph">${glyph}</span><span class="board-badge-text">${escapeHtml(text || "")}</span>`;
   boardEl.appendChild(el);
-  setTimeout(() => el.remove(), 900);
+  // Auto-clear after a short beat so it never lingers across moves.
+  setTimeout(() => {
+    if (el.parentNode === boardEl) el.remove();
+  }, 1500);
 }
 
 function renderPuzzleStatsBar() {
@@ -8349,11 +8373,11 @@ async function finalizeDailyPuzzle(result) {
   if (result === "solved") {
     state.daily.solvedToday = true;
     state.daily.feedback = "solved";
-    spawnPuzzleCelebration("ok");
+    _showBoardBadge("ok", "Хороший");
   } else {
     state.daily.failed = true;
     state.daily.feedback = "shown";
-    spawnPuzzleCelebration("bad");
+    _showBoardBadge("bad", "Упущенная победа");
   }
   renderDailyUi();
   // Submit to backend.
@@ -8722,6 +8746,7 @@ function tryRushMove(from, to) {
       outcome: "failed",
       solveMs: 0,
     });
+    _showBoardBadge("bad", "Упущенная победа");
     _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
     renderBoard();
     if (state.rush.mistakes >= state.rush.maxMistakes) {
@@ -8739,6 +8764,7 @@ function tryRushMove(from, to) {
   renderBoard();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");
+  _showBoardBadge("ok", "Хороший");
   if (state.rush.nextIdx >= state.rush.moves.length) {
     state.rush.score += 1;
     state.rush.history.unshift({
@@ -8854,7 +8880,10 @@ async function finishRush(reason) {
       _hydrateRushFromUser(r && r.user ? r.user : r);
     } catch (_) { /* ignore */ }
   }
-  spawnPuzzleCelebration(state.rush.score > 0 ? "ok" : "bad");
+  // Final result — keep the corner badge subtle so the in-card summary
+  // and finish modal own the spotlight.
+  _showBoardBadge(state.rush.score > 0 ? "ok" : "bad",
+    state.rush.score > 0 ? "Хороший" : "Упущенная победа");
   _refreshRushLeaderboard();
   renderRushUi();
 }
