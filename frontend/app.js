@@ -4150,11 +4150,13 @@ function _playPuzzleOpponentReply() {
   loadFen(c.fen());
   _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
-  state.reviewBadge = null;
+  // Keep the green-check badge on the player's previous destination so
+  // they can still see "Хороший ход" while thinking about the next move.
+  // Matches Analysis tab: the badge sticks to the played square through
+  // the opponent's reply and is overwritten only by the next user move.
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.puzzle.nextIdx += 1;
-  // Clear the per-move "correct" feedback once the opponent has moved.
   state.puzzle.feedback = null;
   renderPuzzleUi();
   if (state.puzzle.nextIdx >= state.puzzle.moves.length) {
