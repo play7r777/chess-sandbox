@@ -504,11 +504,19 @@ const state = {
     finalMeta: null,     // { duration_sec, started_at, ended_at, party_id }
     selfScore: 0,
     countdownInterval: null,
-    // Host-picked match length (sec). Default 600 (= 10 min). Sent
-    // with the WS "start" frame; the server validates against an
-    // allow-list before honouring it.
-    durationSec: 600,
-    allowedDurations: [120, 180, 300, 600],
+    // Match length (sec) — fixed at 180 (3 min) chess.com Battle style.
+    // The host doesn't pick it any more; the field stays here so the
+    // legacy "start" / "match_state" / "finish" handlers that read
+    // ``state.party.durationSec`` keep working.
+    durationSec: 180,
+    allowedDurations: [180],
+    // Number of lives each player starts with — mirrored from the
+    // server (`lives_per_player` in the lobby state). Used to size
+    // the "lives row" of the streak-grid scoreboard.
+    livesPerPlayer: 3,
+    // Cells per vertical column in the streak grid; new column opens
+    // every Nth solved/failed puzzle.
+    gridColHeight: 10,
   },
   // Spectator session (view-only, separate from `party`).
   spectator: {
@@ -6304,10 +6312,11 @@ function partyConnect(code) {
   state.party.finalMeta = null;
   state.party.scoreboard = [];
   state.party.members = [];
-  // Reset host-picked duration to 10 min default — the lobby selector
-  // will overwrite it as soon as the host clicks a different option.
-  state.party.durationSec = 600;
-  state.party.allowedDurations = [120, 180, 300, 600];
+  // Match length is fixed at 3 min (chess.com Puzzle Battle style);
+  // the duration selector is gone but we keep the field around so
+  // legacy code paths reading state.party.durationSec still work.
+  state.party.durationSec = 180;
+  state.party.allowedDurations = [180];
   const ws = new WebSocket(_partyWsUrl(code));
   state.party.ws = ws;
   ws.onmessage = (ev) => {
@@ -6345,6 +6354,12 @@ function handlePartyMessage(msg) {
       }
       if (Array.isArray(msg.allowed_durations_sec) && msg.allowed_durations_sec.length) {
         state.party.allowedDurations = msg.allowed_durations_sec.map((n) => Math.floor(Number(n) || 0)).filter((n) => n > 0);
+      }
+      if (Number.isFinite(msg.lives_per_player) && msg.lives_per_player > 0) {
+        state.party.livesPerPlayer = Math.floor(msg.lives_per_player);
+      }
+      if (Number.isFinite(msg.grid_col_height) && msg.grid_col_height > 0) {
+        state.party.gridColHeight = Math.floor(msg.grid_col_height);
       }
       state.party.members = Array.isArray(msg.members) ? msg.members : [];
       if (Number.isFinite(msg.avg_rating)) state.party.avgRating = Math.floor(msg.avg_rating);
@@ -6778,29 +6793,21 @@ function renderPartyLobby() {
       ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
     </li>
   `).join("");
-  const allowed = (m.allowedDurations && m.allowedDurations.length)
-    ? m.allowedDurations
-    : [120, 180, 300, 600];
-  // The selector is the host's only way to set match length; non-hosts
-  // see the same value read-only so everyone agrees on what's about to
-  // happen before the start button gets pressed.
-  const durationButtons = allowed.map((sec) => {
-    const isActive = Number(m.durationSec) === Number(sec);
-    return `<button type="button" class="party-duration-opt ${isActive ? "is-active" : ""}" data-sec="${sec}" ${isHost ? "" : "disabled"}>${_partyDurationLabel(sec)}</button>`;
-  }).join("");
-  const startLabel = `Начать матч (${_partyDurationLabel(m.durationSec || 600)})`;
+  const startLabel = "Начать матч";
   const avgRatingPill = Number.isFinite(m.avgRating) && m.avgRating > 0
     ? `<span class="party-avg-pill" title="средний ELO лобби — под эту отметку подбираются пазлы">ср. ELO ${m.avgRating}</span>`
     : "";
+  const livesN = Math.max(1, Math.floor(m.livesPerPlayer || 3));
   body.innerHTML = `
     <header class="party-header">
       <h2><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle — лобби</h2>
       <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code> ${avgRatingPill}</p>
     </header>
     <ul class="party-members">${memberRows || `<li class="party-empty">Пока никого…</li>`}</ul>
-    <section class="party-duration-section">
-      <div class="party-duration-label">Длительность матча${isHost ? "" : " <span class=\"muted\">(выбирает хост)</span>"}</div>
-      <div class="party-duration-options" role="radiogroup" aria-label="Длительность матча">${durationButtons}</div>
+    <section class="party-rules">
+      <div class="party-rule"><span class="party-rule-key">Длительность</span><span class="party-rule-val">3 мин</span></div>
+      <div class="party-rule"><span class="party-rule-key">Жизни</span><span class="party-rule-val">${livesN}</span></div>
+      <div class="party-rule party-rule-note">Матч заканчивается, когда у одного из игроков заканчиваются жизни — иначе по таймеру.</div>
     </section>
     ${isHost ? `
     <section class="party-invite-section">
@@ -6829,16 +6836,6 @@ function renderPartyLobby() {
       _renderFriendPicker(m.code).catch(() => {});
     });
   }
-  if (isHost) {
-    body.querySelectorAll(".party-duration-opt").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const sec = Number(btn.dataset.sec) || 0;
-        if (!sec || !allowed.includes(sec)) return;
-        state.party.durationSec = sec;
-        renderPartyLobby();
-      });
-    });
-  }
   body.querySelector("#btn-party-start")?.addEventListener("click", (ev) => {
     const btn = ev.currentTarget;
     // Hard guard against the user clicking 'Start' multiple times
@@ -6851,10 +6848,7 @@ function renderPartyLobby() {
     btn.textContent = "Запускаем матч…";
     const ws = state.party.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "start",
-        duration_sec: Number(state.party.durationSec) || 600,
-      }));
+      ws.send(JSON.stringify({ type: "start", duration_sec: 180 }));
     } else {
       btn.disabled = false;
       btn.textContent = startLabel;
@@ -6934,22 +6928,92 @@ function _partyRenderHud() {
   _partyRenderScoreboard();
 }
 
+// Build the chess.com-style streak grid for a single player. Renders
+// as a horizontal strip of 10-tall vertical columns (one cell per
+// attempt; green=solved, red=failed); a fresh column opens to the
+// right of the previous one once the player completes 10 puzzles.
+// Skipped puzzles are intentionally NOT painted — the user requested
+// "решено / не решено" only.
+function _partyStreakGridHtml(grid, livesMax) {
+  const cells = Array.isArray(grid) ? grid : [];
+  const colHeight = Math.max(2, Math.floor(state.party.gridColHeight || 10));
+  // Always show at least one column even when the player hasn't
+  // attempted anything yet, so the grid doesn't visually collapse to
+  // nothing on the very first render.
+  const columnCount = Math.max(1, Math.ceil(cells.length / colHeight) + (cells.length % colHeight === 0 ? 1 : 0));
+  // Cap visible columns so a marathon player who somehow stacks 30
+  // columns doesn't blow the side panel. Older columns scroll into
+  // view via the wrapper's horizontal overflow.
+  const VISIBLE_MAX_COLS = 6;
+  const colsToRender = Math.min(columnCount, Math.max(1, VISIBLE_MAX_COLS));
+  // Draw the most recent columns when there are more than fit; older
+  // columns slide off the left edge so the player always sees their
+  // current streak position.
+  const startCol = Math.max(0, columnCount - colsToRender);
+  let columnsHtml = "";
+  for (let col = startCol; col < startCol + colsToRender; col += 1) {
+    let cellsHtml = "";
+    for (let row = 0; row < colHeight; row += 1) {
+      const idx = col * colHeight + row;
+      const v = cells[idx];
+      let cls = "battle-streak-cell";
+      if (v === true) cls += " is-solved";
+      else if (v === false) cls += " is-failed";
+      cellsHtml += `<span class="${cls}"></span>`;
+    }
+    columnsHtml += `<div class="battle-streak-col">${cellsHtml}</div>`;
+  }
+  void livesMax;
+  return `<div class="battle-streak-grid">${columnsHtml}</div>`;
+}
+
+// "Lives" indicator: 3 squares (configurable) rendered green-checkmark
+// when the player still has that life and red-X when they've spent
+// it. Drains left-to-right.
+function _partyLivesHtml(lives, livesMax) {
+  const max = Math.max(1, Math.floor(livesMax || 3));
+  const cur = Math.max(0, Math.min(max, Math.floor(Number(lives ?? max))));
+  let html = "";
+  for (let i = 0; i < max; i += 1) {
+    const alive = i < cur;
+    const cls = alive ? "battle-life is-alive" : "battle-life is-dead";
+    const inner = alive
+      ? `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`
+      : `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/></svg>`;
+    html += `<span class="${cls}">${inner}</span>`;
+  }
+  return `<div class="battle-lives">${html}</div>`;
+}
+
 function _partyRenderScoreboard() {
   const host = document.getElementById("party-side-panel");
   if (!host) return;
   const me = state.user.client_id;
-  const rows = (state.party.scoreboard || []).map((r, i) => `
-    <li class="party-row ${r.client_id === me ? "is-self" : ""}">
-      <span class="party-rank">#${i + 1}</span>
-      <span class="party-avatar">${avatarHtml(r.avatar)}</span>
-      <span class="party-name">${escapeHtml(r.nickname || "Гость")}</span>
-      <span class="party-score">${Number(r.score || 0)}</span>
-      <span class="party-solved">✔ ${Number(r.solved || 0)}</span>
-    </li>
-  `).join("");
+  const livesMax = Math.max(1, Math.floor(state.party.livesPerPlayer || 3));
+  const rowsList = (state.party.scoreboard || []).map((r, i) => {
+    const livesRaw = (r.lives === undefined || r.lives === null) ? livesMax : r.lives;
+    const livesHtml = _partyLivesHtml(livesRaw, r.lives_max || livesMax);
+    const gridHtml = _partyStreakGridHtml(r.attempts_grid, r.lives_max || livesMax);
+    const isSelf = r.client_id === me;
+    const isOut = Number(livesRaw) <= 0;
+    return `
+      <li class="party-row battle-row ${isSelf ? "is-self" : ""} ${isOut ? "is-out" : ""}">
+        <div class="battle-row-head">
+          <span class="party-rank">#${i + 1}</span>
+          <span class="party-avatar">${avatarHtml(r.avatar)}</span>
+          <span class="party-name">${escapeHtml(r.nickname || "Гость")}${isSelf ? " <span class=\"battle-you\">(вы)</span>" : ""}</span>
+          <span class="party-score">${Number(r.score || 0)}</span>
+        </div>
+        <div class="battle-row-body">
+          ${livesHtml}
+          ${gridHtml}
+        </div>
+      </li>
+    `;
+  }).join("");
   const timer = state.party.status === "playing"
     ? _formatPartyTimeLeft(state.party.endsAt)
-    : "—";
+    : (state.party.status === "finished" ? "0:00" : "3:00");
   const avgRating = Number.isFinite(state.party.avgRating) ? state.party.avgRating : 0;
   const avgRatingLine = avgRating > 0
     ? `<div class="party-side-avg" title="Пазлы подбираются под этот лобби">ср. ELO лобби: <strong>${avgRating}</strong></div>`
@@ -6960,7 +7024,7 @@ function _partyRenderScoreboard() {
       <span class="party-side-timer">${timer}</span>
     </header>
     ${avgRatingLine}
-    <ul class="party-side-list">${rows || `<li class="party-empty">…</li>`}</ul>
+    <ul class="party-side-list battle-rows">${rowsList || `<li class="party-empty">…</li>`}</ul>
     <button id="btn-party-leave-side" type="button" class="puzzle-ghost party-side-leave">Выйти из пати</button>
   `;
   host.querySelector("#btn-party-leave-side")?.addEventListener("click", leaveParty);

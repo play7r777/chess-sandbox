@@ -2251,51 +2251,40 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .party-solved { color: #6cf2a6; font-weight: 700; font-variant-numeric: tabular-nums; }
 .party-elo { color: #ffd75e; font-weight: 700; font-size: 12px; text-align: right; }
 
-/* Lobby: host-picked match length (2/3/5/10 min). */
-.party-duration-section {
+/* Lobby: fixed-duration / fixed-lives info row (chess.com Battle). */
+.party-rules {
   margin: 14px 0 6px;
-  padding: 12px;
+  padding: 12px 14px;
   background: #1a2538;
   border: 1px solid #2c3950;
   border-radius: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
 }
-.party-duration-label {
-  color: #c0cce0;
-  font-size: 13px;
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-.party-duration-options {
+.party-rule {
   display: flex;
+  align-items: baseline;
   gap: 8px;
-  flex-wrap: wrap;
 }
-.party-duration-opt {
-  flex: 1 1 0;
-  min-width: 84px;
-  padding: 10px 12px;
-  background: #0f1521;
-  border: 1px solid #2a3550;
-  border-radius: 10px;
-  color: #c0cce0;
-  font-weight: 700;
-  font-size: 14px;
-  cursor: pointer;
-  transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.12s;
+.party-rule-key {
+  color: #94a4be;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
 }
-.party-duration-opt:hover:not(:disabled) {
-  border-color: #6da7ff;
-  color: #e7eef9;
-}
-.party-duration-opt.is-active {
-  background: linear-gradient(180deg, #1f3a64, #182748);
-  border-color: #6da7ff;
+.party-rule-val {
   color: #ffd75e;
-  box-shadow: 0 4px 14px rgba(109, 167, 255, 0.18);
+  font-weight: 800;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
 }
-.party-duration-opt:disabled {
-  cursor: default;
-  opacity: 0.85;
+.party-rule.party-rule-note {
+  grid-column: 1 / -1;
+  color: #c0cce0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  font-weight: 500;
 }
 
 /* Detailed end-of-match results. */
@@ -2507,13 +2496,16 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   position: fixed;
   top: 80px;
   right: 16px;
-  width: 280px;
+  width: 320px;
+  max-height: calc(100vh - 110px);
   background: linear-gradient(180deg, #1f2a3a, #161e2c);
   border: 1px solid #2c3950;
   border-radius: 14px;
   padding: 14px;
   z-index: 80;
   box-shadow: 0 18px 36px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
 }
 .party-side-header {
   display: flex;
@@ -2521,26 +2513,146 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   justify-content: space-between;
   margin-bottom: 10px;
 }
-.party-side-title { font-weight: 800; color: #e7eef9; letter-spacing: 0.3px; }
+.party-side-title { font-weight: 800; color: #e7eef9; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 6px; }
 .party-side-timer {
   font: 800 22px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color: #ffd75e;
   font-variant-numeric: tabular-nums;
 }
-.party-side-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.party-side-list .party-row {
+.party-side-avg { font-size: 12px; color: #94a4be; margin-bottom: 8px; }
+
+.party-side-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2c3950 transparent;
+}
+.party-side-list::-webkit-scrollbar { width: 6px; }
+.party-side-list::-webkit-scrollbar-thumb { background: #2c3950; border-radius: 4px; }
+
+/* chess.com Puzzle Battle scoreboard row (per player). */
+.battle-rows .battle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 9px;
+  border-radius: 10px;
+  background: #131c2c;
+  border: 1px solid #1f2a3d;
+  transition: border-color 0.18s, background 0.18s, opacity 0.18s;
+}
+.battle-rows .battle-row.is-self {
+  background: rgba(109, 167, 255, 0.14);
+  border-color: rgba(109, 167, 255, 0.55);
+}
+.battle-rows .battle-row.is-out {
+  opacity: 0.55;
+  background: rgba(255, 118, 118, 0.08);
+  border-color: rgba(255, 118, 118, 0.35);
+}
+.battle-row-head {
   display: grid;
-  grid-template-columns: 36px 22px 1fr 56px 46px;
+  grid-template-columns: 24px 22px 1fr auto;
   align-items: center;
   gap: 6px;
-  padding: 4px 6px;
-  border-radius: 8px;
   font-size: 13px;
 }
-.party-side-list .party-row.is-self { background: rgba(109, 167, 255, 0.18); }
-.party-side-list .party-name { color: #e7eef9; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.party-side-list .party-score { color: #6da7ff; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; font-size: 13px; }
-.party-side-list .party-solved { color: #6cf2a6; font-size: 12px; }
+.battle-row-head .party-rank { color: #94a4be; font-weight: 700; font-size: 12px; }
+.battle-row-head .party-avatar { font-size: 18px; line-height: 1; }
+.battle-row-head .party-name {
+  color: #e7eef9;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.battle-row-head .party-score {
+  color: #6da7ff;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+}
+.battle-row-head .battle-you {
+  color: #94a4be;
+  font-weight: 500;
+  font-size: 11px;
+  margin-left: 2px;
+}
+
+.battle-row-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+/* "Lives" — small squares (chess.com style). Default = green ✓; spent = red ✗. */
+.battle-lives {
+  display: flex;
+  flex-direction: row;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.battle-life {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+}
+.battle-life svg { width: 14px; height: 14px; display: block; }
+.battle-life.is-alive {
+  background: rgba(108, 242, 166, 0.18);
+  border-color: rgba(108, 242, 166, 0.55);
+  color: #6cf2a6;
+}
+.battle-life.is-dead {
+  background: rgba(255, 118, 118, 0.16);
+  border-color: rgba(255, 118, 118, 0.5);
+  color: #ff7676;
+}
+
+/* Vertical streak grid — 10 cells per column, fresh column per 10 attempts. */
+.battle-streak-grid {
+  display: flex;
+  flex-direction: row;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.battle-streak-col {
+  display: grid;
+  grid-template-rows: repeat(10, 1fr);
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.battle-streak-cell {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: #1c2740;
+  border: 1px solid #243352;
+  display: block;
+}
+.battle-streak-cell.is-solved {
+  background: linear-gradient(180deg, #4ec47a, #2d8e4f);
+  border-color: #6cf2a6;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+.battle-streak-cell.is-failed {
+  background: linear-gradient(180deg, #d8554f, #8a2c28);
+  border-color: #ff7676;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
 .party-side-leave {
   margin-top: 10px;
   width: 100%;

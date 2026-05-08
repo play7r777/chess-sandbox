@@ -28,15 +28,22 @@ from fastapi import WebSocket
 from . import puzzles as puzzle_pack
 from . import users as users_db
 
-# Duration the host can pick before pressing "Start". The default
-# (10 min) matches the original behaviour; 2/3/5 min are short
-# variants for faster matches. Anything outside this set is rejected
-# server-side so a tampered WS payload can't request a 10-hour lobby.
-PARTY_ALLOWED_DURATIONS_SEC: tuple[int, ...] = (120, 180, 300, 600)
-PARTY_DURATION_SEC = 600  # default if the host doesn't pick one
+# Match length is fixed at 3 min — chess.com Puzzle Battle style.
+# We keep the tuple/constant so legacy WS payloads (older clients) that
+# send `duration_sec` still validate, but only 180 is accepted.
+PARTY_ALLOWED_DURATIONS_SEC: tuple[int, ...] = (180,)
+PARTY_DURATION_SEC = 180
+# How many wrong answers each player can stack before they're out. As
+# soon as ANY player drains all of their lives the room finishes
+# immediately and the current scoreboard becomes the result table.
+PARTY_LIVES_PER_PLAYER = 3
+# Number of cells per vertical column in the scoreboard's streak grid;
+# matches the chess.com rendering. After every Nth solved/failed puzzle
+# a fresh column opens to the right of the previous one.
+PARTY_GRID_COL_HEIGHT = 10
 LOBBY_GRACE_SEC = 1800
 RECONNECT_GRACE_SEC = 30
-MAX_MEMBERS = 16
+MAX_MEMBERS = 30
 # How many puzzles each match samples up-front. With a 10-minute
 # duration even the fastest solver rarely cracks more than a few hundred,
 # so 1000 leaves plenty of headroom while keeping the queue cheap to
@@ -222,6 +229,15 @@ class Member:
     # Replicated into the player's profile by `Party.finish()` so the
     # detailed breakdown survives the room shutdown.
     attempts_log: list[dict[str, Any]] = field(default_factory=list)
+    # Lives remaining (chess.com Battle style — first to drain all of
+    # them ends the match for everyone). Reset to ``PARTY_LIVES_PER_PLAYER``
+    # on `Party.start()`.
+    lives: int = PARTY_LIVES_PER_PLAYER
+    # Per-attempt outcome row used to draw the vertical streak grid in
+    # the scoreboard. ``True`` for solved, ``False`` for failed. Skipped
+    # puzzles do NOT appear here so a "пропустить" doesn't paint a red
+    # cell. Capped at PARTY_MAX_ATTEMPT_LOG just like ``attempts_log``.
+    attempts_grid: list[bool] = field(default_factory=list)
     disconnected_at: float | None = None
     is_host: bool = False
     # Wallclock of the last spectator broadcast for this member; used
@@ -295,6 +311,12 @@ class Party:
             "theme": m.theme,
             "pieces": m.pieces,
             "online": m.ws is not None,
+            "lives": int(m.lives),
+            "lives_max": PARTY_LIVES_PER_PLAYER,
+            # Solved/failed sequence (chess.com vertical streak grid).
+            # Booleans (true=solved, false=failed); the frontend wraps
+            # at PARTY_GRID_COL_HEIGHT into multiple columns.
+            "attempts_grid": list(m.attempts_grid),
         }
 
     def public_state(self) -> dict[str, Any]:
@@ -310,6 +332,8 @@ class Party:
             "members": [self.public_member(m) for m in self.members.values()],
             "spectator_count": sum(1 for s in self.spectators.values() if s.ws is not None),
             "avg_rating": int(self.avg_rating or self.average_member_rating()),
+            "lives_per_player": PARTY_LIVES_PER_PLAYER,
+            "grid_col_height": PARTY_GRID_COL_HEIGHT,
         }
 
     def scoreboard(self) -> list[dict[str, Any]]:
@@ -723,21 +747,28 @@ class Party:
             return
         if not self.members:
             raise PartyError("empty", "No members")
-        # Validate the host-picked duration. Anything not in the allow-list
-        # silently falls back to the current value (set via lobby radio
-        # earlier or the 10-min default) — this way a missing/garbled
-        # field on a reconnect-and-replay doesn't change the deal.
-        if duration_sec is not None:
-            try:
-                requested = int(duration_sec)
-            except (TypeError, ValueError):
-                requested = self.duration_sec
-            if requested in PARTY_ALLOWED_DURATIONS_SEC:
-                self.duration_sec = requested
+        # Match length is hard-coded to 3 min (chess.com Battle style).
+        # `duration_sec` is still accepted on the wire so older clients
+        # don't error out, but anything other than the canonical value
+        # is silently clamped.
+        self.duration_sec = PARTY_DURATION_SEC
         now = time.time()
         self.status = "playing"
         self.started_at = now
         self.ends_at = now + self.duration_sec
+        # Reset per-player game-state on every start so a re-used room
+        # (host left → re-created) begins with a clean slate of lives
+        # and an empty streak grid for everyone.
+        for m in self.members.values():
+            m.lives = PARTY_LIVES_PER_PLAYER
+            m.attempts_grid = []
+            m.score = 0
+            m.solved = 0
+            m.failed = 0
+            m.skipped = 0
+            m.streak = 0
+            m.best_streak = 0
+            m.attempts_log = []
         # Sample a fresh queue from the puzzle bank for each match. Every
         # member walks through that same ordered list, so the comparison
         # is fair (same puzzles, same order); a different sample per match
@@ -809,6 +840,11 @@ class Party:
         else:
             prev_themes = [str(t) for t in prev_themes_raw][:8]
         score_delta = 0
+        # Don't accept further attempts from a player who's already
+        # drained their lives — they're effectively eliminated and we
+        # avoid touching the grid / scoreboard for them.
+        if m.lives <= 0 and outcome == "failed":
+            return
         if outcome == "solved":
             m.solved += 1
             m.last_solve_ms = int(solve_ms)
@@ -817,9 +853,14 @@ class Party:
             m.streak += 1
             if m.streak > m.best_streak:
                 m.best_streak = m.streak
+            if len(m.attempts_grid) < PARTY_MAX_ATTEMPT_LOG:
+                m.attempts_grid.append(True)
         elif outcome == "failed":
             m.failed += 1
             m.streak = 0
+            m.lives = max(0, m.lives - 1)
+            if len(m.attempts_grid) < PARTY_MAX_ATTEMPT_LOG:
+                m.attempts_grid.append(False)
         else:
             m.skipped += 1
             m.streak = 0
@@ -834,6 +875,21 @@ class Party:
                     "themes": prev_themes,
                 }
             )
+        # Game over the moment any player drains their lives
+        # (chess.com Battle rule). The frontend will show the result
+        # table; the timer task is cancelled in `finish()`.
+        if m.lives <= 0:
+            await self.broadcast(
+                {
+                    "type": "scoreboard",
+                    "ends_at": int(self.ends_at),
+                    "scoreboard": self.scoreboard(),
+                }
+            )
+            if self.finish_task and not self.finish_task.done():
+                self.finish_task.cancel()
+            await self.finish()
+            return
         nxt = self._next_puzzle_for(m)
         if nxt is not None:
             await self._send(
