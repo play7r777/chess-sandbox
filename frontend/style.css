@@ -176,6 +176,17 @@ body.view-opening  main [data-view="puzzle"],
 body.view-opening  main [data-view="daily"],
 body.view-opening  main [data-view="battle"],
 body.view-opening  main [data-view="rush"] { display: none !important; }
+body.view-onevsone main [data-view="main"],
+body.view-onevsone main [data-view="analysis"],
+body.view-onevsone main [data-view="puzzle"],
+body.view-onevsone main [data-view="daily"],
+body.view-onevsone main [data-view="rush"],
+body.view-onevsone main [data-view="battle"],
+body.view-onevsone main [data-view="opening"] { display: none !important; }
+body.view-rush     main [data-view="onevsone"],
+body.view-puzzle   main [data-view="onevsone"],
+body.view-battle   main [data-view="onevsone"],
+body.view-opening  main [data-view="onevsone"] { display: none !important; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
 .mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }
@@ -4663,4 +4674,420 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   .cc-sidebar { padding: 12px; }
   .cc-section.sidebar-component .stats-overview-component { grid-template-columns: 1fr; }
   .cc-section.sidebar-component { padding: 12px; }
+}
+
+/* ===========================================================
+   Premove highlight (Play vs Stockfish — unlimited queue).
+   Marks every from/to of every queued premove until it drains
+   or gets cancelled by an illegal one (sound + reset live in JS).
+   =========================================================== */
+.board .square.premove::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 196, 60, 0.32);
+  box-shadow: inset 0 0 0 2px rgba(255, 196, 60, 0.85);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* ===========================================================
+   Puzzle Rush: drop the heavy panel-rush gradient (the
+   linear-gradient(rgb(31,42,58), rgb(22,30,44)) painted behind
+   the Puzzle Rush card). Keep the chess.com-style sidebar look
+   but on the same flat surface as the rest of the app.
+   =========================================================== */
+#panel-rush #rush-card.puzzle-card,
+#panel-rush #rush-actions.puzzle-actions,
+#panel-rush #rush-history.puzzle-history {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+#panel-rush #rush-card.puzzle-card { margin-bottom: 0; }
+
+/* The rush leaderboard tab pane gets a self-rendered list
+   (avatar/nick/stats) instead of a "see below" hint. */
+.cc-section.sidebar-component .cc-rush-lb-tab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row {
+  display: grid;
+  grid-template-columns: 28px 28px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-rank {
+  font-weight: 700;
+  color: #f7c66c;
+  text-align: center;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-av img,
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-av .avatar-placeholder {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-nick {
+  font-weight: 600;
+  color: #f5f2ec;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-score {
+  font-weight: 800;
+  color: #f7c66c;
+  font-variant-numeric: tabular-nums;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-empty {
+  padding: 14px 8px;
+  text-align: center;
+  font-size: 13px;
+  color: #a09b91;
+}
+
+/* ===========================================================
+   1 vs 1 mode (legal real-time chess between two visitors).
+   Layout mirrors Puzzle / Rush — board on the left, sidebar on
+   the right (online players, challenge dialog, live game info).
+   =========================================================== */
+#panel-onevsone {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+.onevsone-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.onevsone-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.onevsone-header h2 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.02em;
+  color: #f5f8fc;
+}
+.onevsone-header .onevsone-sub {
+  font-size: 12px;
+  color: #94a4be;
+}
+.onevsone-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.onevsone-tab {
+  background: transparent;
+  border: 0;
+  color: #94a4be;
+  padding: 8px 12px;
+  font-weight: 600;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.onevsone-tab.is-active {
+  color: #f5f8fc;
+  border-bottom-color: #81b64c;
+}
+.onevsone-online-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.onevsone-online-row {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.025);
+  cursor: pointer;
+}
+.onevsone-online-row:hover { background: rgba(255, 255, 255, 0.05); }
+.onevsone-online-row.is-offline { opacity: 0.55; cursor: default; }
+.onevsone-online-row .ov-av img,
+.onevsone-online-row .ov-av .avatar-placeholder {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.onevsone-online-row .ov-nick {
+  font-weight: 600;
+  color: #f5f8fc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.onevsone-online-row .ov-status {
+  font-size: 12px;
+  color: #6a7d96;
+}
+.onevsone-online-row .ov-status.is-online::before {
+  content: "•";
+  color: #81b64c;
+  margin-right: 4px;
+  font-size: 16px;
+  line-height: 0;
+}
+.onevsone-empty {
+  padding: 18px 10px;
+  text-align: center;
+  color: #94a4be;
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
+
+/* Challenge dialog (time selection + send). */
+.onevsone-challenge-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.025);
+}
+.onevsone-challenge-form .ov-times {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.onevsone-challenge-form .ov-times button {
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  border: 1px solid #2c3950;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.onevsone-challenge-form .ov-times button.is-active {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+.onevsone-challenge-form .ov-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.onevsone-challenge-form .ov-actions button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+.onevsone-challenge-form .ov-actions button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+
+/* Bottom-right toast for incoming challenges. */
+.onevsone-toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 90;
+  pointer-events: none;
+}
+.onevsone-toast {
+  pointer-events: auto;
+  min-width: 280px;
+  background: linear-gradient(180deg, #1f2a3a, #161e2c);
+  border: 1px solid #2c3950;
+  border-radius: 12px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #f5f8fc;
+}
+.onevsone-toast .ov-toast-title {
+  font-weight: 700;
+  font-size: 14px;
+}
+.onevsone-toast .ov-toast-body {
+  font-size: 13px;
+  color: #cfd9ea;
+}
+.onevsone-toast .ov-toast-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.onevsone-toast .ov-toast-actions button {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+.onevsone-toast .ov-toast-actions button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+
+/* Profile dialog (menu2-style) opened from Leaderboard / online list.
+   Reuses .modal-overlay/.modal-card for backdrop + container. */
+.profile-popover {
+  width: 360px;
+  max-width: 92vw;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.profile-popover .pp-head {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 12px;
+  align-items: center;
+}
+.profile-popover .pp-head .pp-av img,
+.profile-popover .pp-head .pp-av .avatar-placeholder {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.profile-popover .pp-head .pp-nick {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f5f8fc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.profile-popover .pp-head .pp-meta {
+  font-size: 12px;
+  color: #94a4be;
+}
+.profile-popover .pp-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.profile-popover .pp-stat {
+  text-align: center;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 8px;
+}
+.profile-popover .pp-stat-val {
+  font-size: 16px;
+  font-weight: 800;
+  color: #f7c66c;
+}
+.profile-popover .pp-stat-lbl {
+  font-size: 11px;
+  color: #94a4be;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.profile-popover .pp-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.profile-popover .pp-actions button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+.profile-popover .pp-actions button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+
+/* ===========================================================
+   Global Leaderboard panel (right column under the board on
+   every view that has a Leaderboard tab — currently rush, soon
+   1 vs 1). Pure dataset = every visitor; no Friends/Personal.
+   =========================================================== */
+.global-leaderboard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.global-leaderboard .gl-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #f7c66c;
+  text-transform: uppercase;
+}
+.global-leaderboard .gl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.global-leaderboard .gl-row {
+  display: grid;
+  grid-template-columns: 28px 28px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+.global-leaderboard .gl-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.global-leaderboard .gl-row .gl-rank { text-align: center; font-weight: 700; color: #f7c66c; }
+.global-leaderboard .gl-row .gl-av img,
+.global-leaderboard .gl-row .gl-av .avatar-placeholder {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.global-leaderboard .gl-row .gl-nick {
+  font-weight: 600;
+  color: #f5f8fc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.global-leaderboard .gl-row .gl-score {
+  font-weight: 800;
+  color: #f7c66c;
+  font-variant-numeric: tabular-nums;
 }

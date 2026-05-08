@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from . import daily_puzzle as daily_puzzle_pack
 from . import notifications as notifications_db
+from . import onevsone as onevsone_room
 from . import opening_trainer as opening_trainer_pack
 from . import party as party_room
 from . import presence as presence_room
@@ -144,6 +145,22 @@ class OpeningAttemptRequest(BaseModel):
     opening_id: str = Field(..., min_length=1, max_length=64)
     ply: int = Field(..., ge=0, le=64)
     san: str = Field(..., min_length=1, max_length=12)
+
+
+class OneVsOneChallengeRequest(BaseModel):
+    """Body for ``POST /api/onevsone/challenge`` — challenger picks a
+    target client + a base time control. Increment is optional and
+    defaults to 0 (sudden-death). Validation lives in
+    :func:`onevsone.create_challenge`."""
+    client_id: str = Field(..., min_length=4, max_length=64)
+    target_id: str = Field(..., min_length=4, max_length=64)
+    time_seconds: int = Field(..., ge=10, le=60 * 60)
+    increment_seconds: int = Field(default=0, ge=0, le=60)
+
+
+class OneVsOneActionRequest(BaseModel):
+    """Body for accept/decline/cancel/resign endpoints."""
+    client_id: str = Field(..., min_length=4, max_length=64)
 
 
 def _print_puzzle_banner() -> None:
@@ -1375,6 +1392,196 @@ async def _presence_ws_spectator(
         logger.warning("presence spectator ws error: %s", exc)
     finally:
         await presence_room.detach_spectator(target, spectator_id)
+
+
+# ---- 1 vs 1 mode (legal-move challenges + live match relay) ----
+
+
+@app.post("/api/onevsone/challenge")
+async def onevsone_challenge(payload: OneVsOneChallengeRequest) -> dict[str, Any]:
+    """Send a 1v1 challenge from ``client_id`` to ``target_id``. The
+    target receives a ``onevsone_challenge`` notification on the SSE
+    pipe; the response carries the persisted record so the challenger
+    can show "Awaiting reply…" UI."""
+    challenger = users_db.get_user(payload.client_id)
+    target = users_db.get_user(payload.target_id)
+    if challenger is None or target is None:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    try:
+        ch = await onevsone_room.create_challenge(
+            challenger_id=challenger.client_id,
+            challenger_nickname=challenger.nickname,
+            challenger_avatar=challenger.avatar,
+            target_id=target.client_id,
+            target_nickname=target.nickname,
+            time_seconds=payload.time_seconds,
+            increment_seconds=payload.increment_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"challenge": ch.public()}
+
+
+@app.get("/api/onevsone/challenges")
+async def onevsone_pending_challenges(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """Return any pending 1v1 challenges targeted at ``client_id``."""
+    return {"challenges": onevsone_room.pending_challenges_for(client_id)}
+
+
+@app.post("/api/onevsone/challenge/{challenge_id}/accept")
+async def onevsone_challenge_accept(
+    challenge_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    user = users_db.get_user(payload.client_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    result = await onevsone_room.accept_challenge(
+        challenge_id,
+        user.client_id,
+        user.nickname,
+        user.avatar,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
+    ch, match = result
+    return {"challenge": ch.public(), "match": match.public(user.client_id)}
+
+
+@app.post("/api/onevsone/challenge/{challenge_id}/decline")
+async def onevsone_challenge_decline(
+    challenge_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    ch = await onevsone_room.decline_challenge(challenge_id, payload.client_id)
+    if ch is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
+    return {"challenge": ch.public()}
+
+
+@app.post("/api/onevsone/challenge/{challenge_id}/cancel")
+async def onevsone_challenge_cancel(
+    challenge_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    ch = await onevsone_room.cancel_challenge(challenge_id, payload.client_id)
+    if ch is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
+    return {"challenge": ch.public()}
+
+
+@app.get("/api/onevsone/match/{match_id}")
+async def onevsone_match_state(
+    match_id: str,
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    m = onevsone_room.get_match(match_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="match_not_found")
+    if m.player_for(client_id) is None:
+        raise HTTPException(status_code=403, detail="not_a_player")
+    return {"match": m.public(client_id)}
+
+
+@app.post("/api/onevsone/match/{match_id}/resign")
+async def onevsone_match_resign(
+    match_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    result = await onevsone_room.resign(match_id, payload.client_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="match_not_found_or_finished")
+    # Notify both peers via in-game WS broadcast (handled inside ws loop).
+    m = onevsone_room.get_match(match_id)
+    if m is not None:
+        await _onevsone_broadcast(m, {
+            "type": "resigned",
+            "by": payload.client_id,
+            "winner": result.get("winner"),
+            "finish_reason": "resign",
+        })
+    return result
+
+
+@app.get("/api/onevsone/online")
+async def onevsone_online_users(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """List of all visitors with online/offline status. ``client_id``
+    is the caller, used to mark themselves so the frontend can grey
+    them out / hide them from the challenge list."""
+    rows = users_db.list_users()
+    return {"me": client_id, "users": rows}
+
+
+async def _onevsone_broadcast(match: onevsone_room.Match, payload: dict[str, Any]) -> None:
+    """Fan-out a payload to both peers' live WebSockets, ignoring closed sockets."""
+    for cid, sock in list(match.sockets.items()):
+        if sock is None:
+            continue
+        try:
+            await sock.send_json(payload)
+        except Exception:
+            # Socket likely closed mid-send; drop the registration.
+            match.sockets.pop(cid, None)
+
+
+@app.websocket("/api/onevsone/ws")
+async def onevsone_ws(ws: WebSocket) -> None:
+    """Live match relay. Each peer connects with ``match_id`` +
+    ``client_id`` query params. Server validates moves, updates clocks
+    and broadcasts ``move`` / ``resigned`` / ``ended`` payloads to the
+    opposite peer."""
+    match_id = ws.query_params.get("match_id") or ""
+    client_id = ws.query_params.get("client_id") or ""
+    if not match_id or not client_id:
+        await ws.close(code=4400)
+        return
+    match = await onevsone_room.attach_socket(match_id, client_id, ws)
+    if match is None:
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    try:
+        await ws.send_json({"type": "state", "match": match.public(client_id)})
+    except Exception:
+        await onevsone_room.detach_socket(match_id, client_id)
+        return
+    try:
+        while True:
+            msg = await ws.receive_json()
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "move":
+                uci = str(msg.get("uci") or "")
+                result = await onevsone_room.apply_move(match_id, client_id, uci)
+                if result is None:
+                    await ws.send_json({"type": "error", "code": "match_gone"})
+                    continue
+                if result.get("error"):
+                    await ws.send_json({"type": "error", "code": result["error"]})
+                    continue
+                m_now = onevsone_room.get_match(match_id)
+                if m_now is not None:
+                    await _onevsone_broadcast(m_now, {"type": "move", **result})
+            elif mtype == "resign":
+                result = await onevsone_room.resign(match_id, client_id)
+                if result is not None:
+                    m_now = onevsone_room.get_match(match_id)
+                    if m_now is not None:
+                        await _onevsone_broadcast(m_now, {
+                            "type": "resigned",
+                            "by": client_id,
+                            "winner": result.get("winner"),
+                            "finish_reason": "resign",
+                        })
+            elif mtype == "ping":
+                await ws.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("onevsone ws error: %s", exc)
+    finally:
+        await onevsone_room.detach_socket(match_id, client_id)
 
 
 # ---- Static avatars ----

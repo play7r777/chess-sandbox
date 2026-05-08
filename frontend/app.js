@@ -568,6 +568,32 @@ const state = {
     invitations: {},    // invite_id -> invitation payload
     reconnectTimer: null,
   },
+  // 1 vs 1 mode — challenge lobby + live match (legal moves over WS).
+  // `outgoing` tracks the in-flight challenge we sent (so we can cancel
+  // it). `match` is the active live game; `ws` is its WebSocket.
+  // `selectedTime` remembers the chosen tc (sec) in the challenge form.
+  onevsone: {
+    online: [],
+    selectedTime: 300,        // 5 min default
+    outgoing: null,           // { challenge_id, target_id, target_nickname, time_seconds }
+    incoming: {},             // challenge_id -> challenge payload (toast index)
+    match: null,              // server-shaped match object
+    ws: null,                 // WebSocket
+    wsRetry: 0,
+    clockTimer: null,
+    chess: null,              // chess.js position mirror
+    selected: null,           // selected square in live game
+    legalTargets: [],
+    pendingPromotion: null,   // { from, to } awaiting piece pick
+    refreshTimer: null,       // online list periodic refresh
+  },
+  // Global Leaderboard panel (right column on Rush + 1v1 views).
+  // Pure dataset = every visitor that has appeared on /api/users.
+  globalLeaderboard: {
+    rows: [],
+    fetchedAt: 0,
+    refreshTimer: null,
+  },
   // 64-cell array indexed 0..63 where 0 = a8, 7 = h8, 56 = a1, 63 = h1.
   // Each cell is a piece char (e.g. 'P','k') or null.
   board: new Array(64).fill(null),
@@ -1444,6 +1470,15 @@ function handleDrop(e, cell) {
     return;
   }
 
+  if (state.view === "onevsone" && state.onevsone && state.onevsone.match) {
+    if (!payload.fromSquare) {
+      setStatus("В матче нельзя ставить фигуры с палитры.", "error");
+      return;
+    }
+    tryOneVsOneMove(payload.fromSquare, targetSquare);
+    return;
+  }
+
   if (state.legalMode) {
     if (!payload.fromSquare) {
       setStatus("В легальном режиме нельзя ставить фигуры с палитры. Переключитесь в Песочницу.", "error");
@@ -1559,9 +1594,55 @@ function handleSquareClick(squareName) {
     handleGameSquareClick(squareName);
     return;
   }
+  if (state.view === "onevsone" && state.onevsone && state.onevsone.match) {
+    handleOneVsOneSquareClick(squareName);
+    return;
+  }
   if (state.legalMode) {
     handleFreeplaySquareClick(squareName);
   }
+}
+
+function handleOneVsOneSquareClick(squareName) {
+  const c = state.onevsone.chess;
+  if (!c) return;
+  const m = state.onevsone.match;
+  if (!m || m.finished) return;
+  const you = m.you;
+  const piece = c.get(squareName);
+  if (state.selectedSquare) {
+    if (state.selectedSquare === squareName) {
+      state.selectedSquare = null;
+      state.legalTargets = [];
+      renderBoard();
+      return;
+    }
+    if (state.legalTargets.includes(squareName)) {
+      tryOneVsOneMove(state.selectedSquare, squareName);
+      return;
+    }
+    if (piece && you && piece.color === you.color && c.turn() === you.color) {
+      _onevsoneSelectSquare(squareName);
+      return;
+    }
+    state.selectedSquare = null;
+    state.legalTargets = [];
+    renderBoard();
+    return;
+  }
+  if (piece && you && piece.color === you.color && c.turn() === you.color) {
+    _onevsoneSelectSquare(squareName);
+  }
+}
+
+function _onevsoneSelectSquare(squareName) {
+  const c = state.onevsone.chess;
+  if (!c) return;
+  let moves = [];
+  try { moves = c.moves({ square: squareName, verbose: true }); } catch { moves = []; }
+  state.selectedSquare = squareName;
+  state.legalTargets = moves.map((mv) => mv.to);
+  renderBoard();
 }
 
 function handleFreeplaySquareClick(squareName) {
@@ -9232,7 +9313,7 @@ function _renderRushSidebar(card, actions) {
         </div>
       </div>
       <div role="tabpanel" aria-labelledby="rush-tab-leaderboard" id="rush-tabpanel-leaderboard" class="sidebar-start-tabpanel-rush-start" data-cc-tab-pane="leaderboard"${tab === "leaderboard" ? "" : " hidden"}>
-        <p class="cc-rush-leaderboard-hint">Полная таблица рендерится ниже на странице. Переключай режим / период там же.</p>
+        <div id="rush-tabpanel-leaderboard-body"></div>
       </div>
     </section>
   `;
@@ -9288,18 +9369,20 @@ function _renderRushSidebar(card, actions) {
 function renderRushUi() {
   renderRushStatsBar();
   renderRushHistory();
-  renderRushLeaderboard();
   const card = document.getElementById("rush-card");
   const actions = document.getElementById("rush-actions");
   if (!card || !actions) return;
   if (!state.rush.mode || (!state.rush.active && !state.rush.finished)) {
     // Chess.com-style picker sidebar: header + Best Today / Top Score
     // tiles + tabs (Play / Leaderboard) + clickable mode rows + a big
-    // green Play button. The leaderboard tab reuses #rush-leaderboard
-    // which is already populated by renderRushLeaderboard() above.
+    // green Play button. The Лидерборд tab itself is populated by
+    // renderRushLeaderboard() against #rush-tabpanel-leaderboard-body
+    // which only exists once _renderRushSidebar built the sidebar DOM.
     _renderRushSidebar(card, actions);
+    renderRushLeaderboard();
     return;
   }
+  renderRushLeaderboard();
   if (state.rush.finished) {
     const reasonTxt = state.rush.finishReason === "time"
       ? "Время вышло."
@@ -9393,48 +9476,677 @@ function renderRushHistory() {
   }).join("");
 }
 
+// Renders the global leaderboard inline inside the chess.com-style
+// sidebar Лидерборд tab (#rush-tabpanel-leaderboard-body). Single
+// "Global" tab — every visitor that has appeared on /api/users.
+// Clicking a row opens the per-player profile dialog with a Challenge
+// button (no "Add friend").
 function renderRushLeaderboard() {
-  const host = document.getElementById("rush-leaderboard");
+  const host = document.getElementById("rush-tabpanel-leaderboard-body");
   if (!host) return;
-  const m = state.rush.leaderboardMode;
-  const rows = state.rush.leaderboard[m] || [];
-  const tabs = ["180", "300", "survival"].map((mm) => {
-    const active = mm === m ? " is-active" : "";
-    return `<button type="button" class="lb-tab${active}" data-mode="${mm}">${RUSH_MODE_LABEL[mm]}</button>`;
+  // Make sure the global mount point exists inside the rush sidebar
+  // tab so renderGlobalLeaderboard() can fill it. We avoid stomping
+  // it on every call so the click handlers attached by
+  // renderGlobalLeaderboard() survive.
+  if (!host.querySelector("#global-leaderboard-rush")) {
+    host.innerHTML = `<div id="global-leaderboard-rush"></div>`;
+  }
+  _refreshGlobalLeaderboard(false);
+}
+
+// ============================================================
+// Global Leaderboard panel (Rush + 1 vs 1 right column)
+// ============================================================
+//
+// Single "Global" tab — every visitor that has ever opened the site
+// shows up here (sourced from /api/users which already powers the
+// modal leaderboard). Clicking a row opens the per-player profile
+// dialog with a Challenge button (no "Add friend").
+async function _refreshGlobalLeaderboard(force) {
+  const fresh = state.globalLeaderboard.fetchedAt || 0;
+  if (!force && Date.now() - fresh < 15_000 && state.globalLeaderboard.rows.length) {
+    renderGlobalLeaderboard();
+    return;
+  }
+  try {
+    const r = await api("/api/users");
+    state.globalLeaderboard.rows = (r && r.users) || [];
+    state.globalLeaderboard.fetchedAt = Date.now();
+  } catch (_) {
+    state.globalLeaderboard.rows = state.globalLeaderboard.rows || [];
+  }
+  renderGlobalLeaderboard();
+}
+
+function renderGlobalLeaderboard() {
+  const hosts = [
+    document.getElementById("global-leaderboard-rush"),
+    document.getElementById("global-leaderboard-onevsone"),
+  ].filter(Boolean);
+  if (!hosts.length) return;
+  const rows = state.globalLeaderboard.rows || [];
+  const list = !rows.length
+    ? `<div class="cc-rush-lb-tab-empty">Пока никого нет. Реши первый пазл, чтобы появиться здесь.</div>`
+    : `<div class="gl-list">${rows.slice(0, 30).map((u, i) => {
+        const av = avatarHtml(u.avatar);
+        const nick = escapeHtml(u.nickname || "Гость");
+        const cid = escapeHtml(u.client_id || "");
+        const rating = u.rating != null ? u.rating : 1200;
+        const isSelf = u.client_id === state.user.client_id;
+        return `<div class="gl-row" data-cid="${cid}" data-nick="${nick}">
+          <span class="gl-rank">#${i + 1}</span>
+          <span class="gl-av">${av}</span>
+          <span class="gl-nick">${nick}${isSelf ? ' <span class="muted">(вы)</span>' : ""}</span>
+          <span class="gl-score">${rating}</span>
+        </div>`;
+      }).join("")}</div>`;
+  const html = `
+    <div class="global-leaderboard">
+      <div class="gl-title">Leaderboard · Global</div>
+      ${list}
+    </div>
+  `;
+  for (const host of hosts) {
+    host.innerHTML = html;
+    host.querySelectorAll(".gl-row[data-cid]").forEach((row) => {
+      row.addEventListener("click", () => {
+        const cid = row.dataset.cid;
+        const nick = row.dataset.nick;
+        if (cid && cid !== state.user.client_id) {
+          openPlayerChallengeProfile({ client_id: cid, nickname: nick });
+        }
+      });
+    });
+  }
+}
+
+// ============================================================
+// Player profile popover (menu2-style) with Challenge button
+// ============================================================
+async function openPlayerChallengeProfile(player) {
+  if (!player || !player.client_id) return;
+  if (player.client_id === state.user.client_id) {
+    if (typeof openProfileModal === "function") openProfileModal(state.user.client_id);
+    return;
+  }
+  let u = { ...player };
+  try {
+    const r = await api(`/api/users/${encodeURIComponent(player.client_id)}`);
+    if (r) u = { ...u, ...r };
+  } catch (_) { /* ignore */ }
+  _renderProfilePopover(u);
+}
+
+function _renderProfilePopover(u) {
+  let modal = document.getElementById("profile-popover-modal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "profile-popover-modal";
+    modal.className = "settings-modal";
+    modal.hidden = true;
+    modal.innerHTML = `<div class="settings-modal-card profile-popover-card"></div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) { modal.hidden = true; }
+    });
+  }
+  const card = modal.querySelector(".settings-modal-card");
+  const av = avatarHtml(u.avatar);
+  const nick = escapeHtml(u.nickname || "Гость");
+  const rating = u.rating != null ? u.rating : 1200;
+  const games = u.games != null ? u.games : 0;
+  const winPct = u.win_pct != null ? u.win_pct : 0;
+  card.innerHTML = `
+    <div class="profile-popover">
+      <div class="pp-head">
+        <span class="pp-av">${av}</span>
+        <div>
+          <div class="pp-nick">${nick}</div>
+          <div class="pp-meta">${u.last_seen ? "Был в сети: " + _formatLastSeen(u.last_seen) : "Игрок"}</div>
+        </div>
+      </div>
+      <div class="pp-stats">
+        <div class="pp-stat"><div class="pp-stat-val">${rating}</div><div class="pp-stat-lbl">Rating</div></div>
+        <div class="pp-stat"><div class="pp-stat-val">${games}</div><div class="pp-stat-lbl">Games</div></div>
+        <div class="pp-stat"><div class="pp-stat-val">${winPct}%</div><div class="pp-stat-lbl">Win</div></div>
+      </div>
+      <div class="pp-actions">
+        <button type="button" class="pp-close">Закрыть</button>
+        <button type="button" class="pp-challenge primary">⚔️ Челлендж</button>
+      </div>
+    </div>
+  `;
+  modal.hidden = false;
+  card.querySelector(".pp-close").onclick = () => { modal.hidden = true; };
+  card.querySelector(".pp-challenge").onclick = () => {
+    modal.hidden = true;
+    setView("onevsone");
+    setTimeout(() => _onevsoneFocusChallengeFor(u), 60);
+  };
+}
+
+// ============================================================
+// 1 vs 1 view — lobby + live game (legal moves over WS)
+// ============================================================
+const ONEVSONE_TIME_OPTIONS = [
+  { sec: 60,   label: "1 мин" },
+  { sec: 180,  label: "3 мин" },
+  { sec: 300,  label: "5 мин" },
+  { sec: 600,  label: "10 мин" },
+  { sec: 900,  label: "15 мин" },
+  { sec: 1800, label: "30 мин" },
+];
+
+async function enterOneVsOneView() {
+  if (typeof _puzzleViewSnapshotFlipped === "function") {
+    try { _puzzleViewSnapshotFlipped("onevsone"); } catch (_) { /* ignore */ }
+  }
+  if (state.legalMode === false && typeof setBoardMode === "function") setBoardMode(true);
+  if (state.onevsone.match) {
+    _renderOnevsoneMatchUi();
+    _onevsoneEnsureWs();
+    return;
+  }
+  _renderOnevsoneLobby();
+  await _refreshOnevsoneOnline(true);
+  await _refreshGlobalLeaderboard(true);
+  if (state.onevsone.refreshTimer) clearInterval(state.onevsone.refreshTimer);
+  state.onevsone.refreshTimer = setInterval(() => {
+    if (state.view === "onevsone") {
+      _refreshOnevsoneOnline(false);
+      _refreshGlobalLeaderboard(false);
+    }
+  }, 15_000);
+  try {
+    const r = await api(`/api/onevsone/challenges?client_id=${encodeURIComponent(state.user.client_id || "")}`);
+    (r && r.challenges || []).forEach((ch) => _onevsoneShowChallengeToast(ch));
+  } catch (_) { /* ignore */ }
+}
+
+function leaveOneVsOneView() {
+  if (state.onevsone.refreshTimer) {
+    clearInterval(state.onevsone.refreshTimer);
+    state.onevsone.refreshTimer = null;
+  }
+  if (state.onevsone.clockTimer) {
+    clearInterval(state.onevsone.clockTimer);
+    state.onevsone.clockTimer = null;
+  }
+  if (typeof _puzzleViewRestoreFlipped === "function") {
+    try { _puzzleViewRestoreFlipped("onevsone"); } catch (_) { /* ignore */ }
+  }
+  if (typeof _puzzleResetBoardCommon === "function" && !state.onevsone.match) {
+    try { _puzzleResetBoardCommon(); } catch (_) { /* ignore */ }
+  }
+}
+
+async function _refreshOnevsoneOnline(force) {
+  if (!state.user.client_id) return;
+  try {
+    const r = await api(`/api/onevsone/online?client_id=${encodeURIComponent(state.user.client_id)}`);
+    state.onevsone.online = (r && r.users) || [];
+  } catch (_) {
+    state.onevsone.online = state.onevsone.online || [];
+  }
+  if (force || state.view === "onevsone") _renderOnevsoneOnlineList();
+}
+
+function _renderOnevsoneLobby() {
+  const host = document.getElementById("onevsone-body");
+  if (!host) return;
+  host.innerHTML = `
+    <div class="onevsone-header">
+      <h2>1 vs 1</h2>
+      <span class="onevsone-sub">Сыграй легальную партию против живого соперника</span>
+    </div>
+    <div id="onevsone-online" class="onevsone-online-list"></div>
+    <div id="onevsone-form-host"></div>
+    <div id="global-leaderboard-onevsone"></div>
+  `;
+  _renderOnevsoneOnlineList();
+  _renderOnevsoneChallengeForm(null);
+  renderGlobalLeaderboard();
+}
+
+function _renderOnevsoneOnlineList() {
+  const host = document.getElementById("onevsone-online");
+  if (!host) return;
+  const me = state.user.client_id;
+  const users = (state.onevsone.online || []).filter((u) => u.client_id !== me);
+  if (!users.length) {
+    host.innerHTML = `<div class="onevsone-empty">Пока никого нет в сети. Поделись ссылкой с другом или жди — онлайн обновится.</div>`;
+    return;
+  }
+  host.innerHTML = users.map((u) => {
+    const offline = !u.online;
+    const av = avatarHtml(u.avatar);
+    const nick = escapeHtml(u.nickname || "Гость");
+    const cid = escapeHtml(u.client_id);
+    return `<div class="onevsone-online-row${offline ? " is-offline" : ""}" data-cid="${cid}" data-nick="${nick}">
+      <span class="ov-av">${av}</span>
+      <span class="ov-nick">${nick}</span>
+      <span class="ov-status${offline ? "" : " is-online"}">${offline ? "не в сети" : "в сети"}</span>
+    </div>`;
   }).join("");
-  const scope = state.rush.leaderboardScope;
-  const scopeTabs = ["today", "alltime"].map((s) => {
-    const active = s === scope ? " is-active" : "";
-    return `<button type="button" class="lb-tab${active}" data-scope="${s}">${s === "today" ? "Сегодня" : "Все время"}</button>`;
+  host.querySelectorAll(".onevsone-online-row").forEach((row) => {
+    if (row.classList.contains("is-offline")) return;
+    row.addEventListener("click", () => {
+      const cid = row.dataset.cid;
+      const nick = row.dataset.nick;
+      openPlayerChallengeProfile({ client_id: cid, nickname: nick });
+    });
+  });
+}
+
+function _onevsoneFocusChallengeFor(targetUser) {
+  if (!targetUser || !targetUser.client_id) return;
+  _renderOnevsoneChallengeForm({
+    client_id: targetUser.client_id,
+    nickname: targetUser.nickname || "Гость",
+    avatar: targetUser.avatar,
+  });
+}
+
+function _renderOnevsoneChallengeForm(target) {
+  const host = document.getElementById("onevsone-form-host");
+  if (!host) return;
+  if (!target) {
+    host.innerHTML = "";
+    return;
+  }
+  const sel = state.onevsone.selectedTime || 300;
+  const buttons = ONEVSONE_TIME_OPTIONS.map((o) => {
+    const active = o.sec === sel ? " is-active" : "";
+    return `<button type="button" data-sec="${o.sec}" class="${active}">${o.label}</button>`;
   }).join("");
-  let body;
-  if (!rows.length) {
-    body = `<div class="puzzle-empty">Лидерборд пуст. Сыграй первым!</div>`;
-  } else {
-    body = rows.slice(0, 20).map((r, i) => {
-      const av = avatarHtml(r.avatar);
-      const nick = escapeHtml(r.nickname || "Гость");
-      const score = r.score != null ? r.score : (r.best || 0);
-      return `<div class="lb-row">
-        <span class="lb-rank">${i + 1}</span>
-        <span class="lb-av">${av}</span>
-        <span class="lb-nick">${nick}</span>
-        <span class="lb-score">${score}</span>
-      </div>`;
-    }).join("");
+  host.innerHTML = `
+    <div class="onevsone-challenge-form">
+      <div><b>Бросить вызов:</b> ${escapeHtml(target.nickname || "Гость")}</div>
+      <div class="ov-times">${buttons}</div>
+      <div class="ov-actions">
+        <button type="button" class="ov-cancel">Отмена</button>
+        <button type="button" class="primary ov-send">Отправить вызов</button>
+      </div>
+    </div>
+  `;
+  host.querySelectorAll(".ov-times button").forEach((b) => {
+    b.onclick = () => {
+      state.onevsone.selectedTime = parseInt(b.dataset.sec, 10) || 300;
+      _renderOnevsoneChallengeForm(target);
+    };
+  });
+  host.querySelector(".ov-cancel").onclick = () => { host.innerHTML = ""; };
+  host.querySelector(".ov-send").onclick = async () => {
+    try {
+      await _onevsoneSendChallenge(target.client_id, target.nickname);
+      _showInfoToast(`Вызов отправлен · ${escapeHtml(target.nickname || "Гость")}`);
+      host.innerHTML = `<div class="onevsone-empty">Ждём ответ от ${escapeHtml(target.nickname || "Гость")}…</div>`;
+    } catch (e) {
+      _showInfoToast(`Ошибка: ${(e && e.message) || e}`);
+    }
+  };
+}
+
+async function _onevsoneSendChallenge(targetId, targetNickname) {
+  if (!state.user.client_id) throw new Error("Нет клиентского ID");
+  const sec = state.onevsone.selectedTime || 300;
+  const r = await api("/api/onevsone/challenge", {
+    method: "POST",
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname || "Гость",
+      avatar: state.user.avatar || "♟",
+      target_id: targetId,
+      target_nickname: targetNickname || "Гость",
+      time_seconds: sec,
+    }),
+  });
+  if (r && r.challenge) {
+    state.onevsone.outgoing = r.challenge;
+  }
+  return r;
+}
+
+// ============================================================
+// 1 vs 1 incoming-challenge toast (bottom-right)
+// ============================================================
+function _onevsoneShowChallengeToast(ch) {
+  if (!ch || !ch.id) return;
+  if (state.onevsone.incoming[ch.id]) return;
+  state.onevsone.incoming[ch.id] = ch;
+  let host = document.getElementById("onevsone-toast-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "onevsone-toast-host";
+    host.className = "onevsone-toast-host";
+    document.body.appendChild(host);
+  }
+  const card = document.createElement("div");
+  card.className = "onevsone-toast";
+  card.dataset.challengeId = ch.id;
+  const tcMin = Math.round((ch.time_seconds || 300) / 60);
+  card.innerHTML = `
+    <div class="ov-toast-title">⚔️ Челлендж от ${escapeHtml(ch.challenger_nickname || "Гость")}</div>
+    <div class="ov-toast-body">Контроль времени: ${tcMin} мин</div>
+    <div class="ov-toast-actions">
+      <button type="button" class="ov-decline">Отклонить</button>
+      <button type="button" class="primary ov-accept">Принять</button>
+    </div>
+  `;
+  host.appendChild(card);
+  if (typeof _playInvitationChime === "function" && userSettings.soundOn !== false) {
+    try { _playInvitationChime(); } catch (_) { /* ignore */ }
+  }
+  card.querySelector(".ov-accept").onclick = async () => {
+    try {
+      const r = await api(`/api/onevsone/challenge/${encodeURIComponent(ch.id)}/accept`, {
+        method: "POST",
+        body: JSON.stringify({
+          client_id: state.user.client_id,
+          nickname: state.user.nickname || "Гость",
+          avatar: state.user.avatar || "♟",
+        }),
+      });
+      _onevsoneDismissChallengeToast(ch.id);
+      if (r && r.match) {
+        state.onevsone.match = r.match;
+        setView("onevsone");
+        _renderOnevsoneMatchUi();
+        _onevsoneEnsureWs();
+      }
+    } catch (e) {
+      _showInfoToast(`Ошибка: ${(e && e.message) || e}`);
+    }
+  };
+  card.querySelector(".ov-decline").onclick = async () => {
+    try {
+      await api(`/api/onevsone/challenge/${encodeURIComponent(ch.id)}/decline`, {
+        method: "POST",
+        body: JSON.stringify({ client_id: state.user.client_id }),
+      });
+    } catch (_) { /* ignore */ }
+    _onevsoneDismissChallengeToast(ch.id);
+  };
+}
+
+function _onevsoneDismissChallengeToast(challengeId) {
+  delete state.onevsone.incoming[challengeId];
+  const host = document.getElementById("onevsone-toast-host");
+  if (!host) return;
+  const node = host.querySelector(`[data-challenge-id="${CSS.escape(challengeId)}"]`);
+  if (node) node.remove();
+}
+
+// ============================================================
+// 1 vs 1 live match (board + clocks + WS relay)
+// ============================================================
+function _onevsoneEnsureWs() {
+  const m = state.onevsone.match;
+  if (!m || !m.id || !state.user.client_id) return;
+  if (state.onevsone.ws && state.onevsone.ws.readyState === WebSocket.OPEN) return;
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`${proto}//${location.host}/api/onevsone/ws`);
+  url.searchParams.set("match_id", m.id);
+  url.searchParams.set("client_id", state.user.client_id);
+  let ws;
+  try { ws = new WebSocket(url.toString()); } catch (_) { return; }
+  state.onevsone.ws = ws;
+  ws.onopen = () => { state.onevsone.wsRetry = 0; };
+  ws.onmessage = (ev) => {
+    let payload;
+    try { payload = JSON.parse(ev.data); } catch (_) { return; }
+    _onevsoneHandleWsEvent(payload);
+  };
+  ws.onclose = () => {
+    state.onevsone.ws = null;
+    if (state.onevsone.match && !state.onevsone.match.finished && state.view === "onevsone") {
+      const delay = Math.min(8000, 800 * Math.pow(2, state.onevsone.wsRetry++));
+      setTimeout(_onevsoneEnsureWs, delay);
+    }
+  };
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
+}
+
+function _onevsoneHandleWsEvent(msg) {
+  if (!msg || typeof msg !== "object") return;
+  const m = state.onevsone.match;
+  if (!m) return;
+  switch (msg.type) {
+    case "hello":
+      if (msg.match) {
+        state.onevsone.match = msg.match;
+        _renderOnevsoneMatchUi();
+      }
+      break;
+    case "move": {
+      m.fen = msg.fen;
+      m.turn = msg.turn;
+      m.history = m.history || [];
+      m.history.push({
+        uci: msg.uci, san: msg.san, from: msg.from, to: msg.to, by: msg.by, capture: !!msg.capture, fen_after: msg.fen,
+      });
+      if (typeof msg.white_clock === "number") {
+        m.white = m.white || {};
+        m.white.clock_remaining = msg.white_clock;
+        if (m.you && m.you.color === "w") m.you.clock_remaining = msg.white_clock;
+        if (m.opponent && m.opponent.color === "w") m.opponent.clock_remaining = msg.white_clock;
+      }
+      if (typeof msg.black_clock === "number") {
+        m.black = m.black || {};
+        m.black.clock_remaining = msg.black_clock;
+        if (m.you && m.you.color === "b") m.you.clock_remaining = msg.black_clock;
+        if (m.opponent && m.opponent.color === "b") m.opponent.clock_remaining = msg.black_clock;
+      }
+      m.finished = !!msg.finished;
+      m.finish_reason = msg.finish_reason || "";
+      m.winner = msg.winner || "";
+      try {
+        if (state.onevsone.chess) {
+          state.onevsone.chess.load(m.fen);
+        }
+      } catch (_) { /* ignore */ }
+      try {
+        const isOwn = m.you && msg.by === m.you.color;
+        const sound = msg.finished && msg.finish_reason === "checkmate"
+          ? "check"
+          : (msg.capture ? "capture" : (isOwn ? "move-self" : "move-opponent"));
+        _playWav(sound);
+      } catch (_) { /* ignore */ }
+      _renderOnevsoneMatchUi();
+      break;
+    }
+    case "finished":
+      m.finished = true;
+      m.finish_reason = msg.finish_reason || m.finish_reason || "";
+      m.winner = msg.winner || m.winner || "";
+      _renderOnevsoneMatchUi();
+      break;
+  }
+}
+
+function _onevsoneSendMove(uci) {
+  const ws = state.onevsone.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try { ws.send(JSON.stringify({ type: "move", uci })); return true; } catch (_) { return false; }
+}
+
+function _onevsoneSendResign() {
+  const ws = state.onevsone.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try { ws.send(JSON.stringify({ type: "resign" })); return true; } catch (_) { return false; }
+}
+
+// Public hook used by the board click/drag handlers when state.view
+// is "onevsone" and a live match is loaded. Returns true if the move
+// was accepted (queued for relay), false otherwise.
+function tryOneVsOneMove(from, to) {
+  const m = state.onevsone.match;
+  if (!m || m.finished) return false;
+  const you = m.you;
+  if (!you) return false;
+  if (m.turn !== you.color) {
+    setStatus("Сейчас ход соперника.", "info");
+    return false;
+  }
+  const c = state.onevsone.chess;
+  if (!c) return false;
+  let move;
+  try { move = c.move({ from, to, promotion: "q" }); } catch { move = null; }
+  if (!move) {
+    setStatus("Нелегальный ход.", "error");
+    try { _playWav("illegal"); } catch (_) { /* ignore */ }
+    return false;
+  }
+  // Locally apply for snappy UI; server is the source of truth.
+  m.fen = c.fen();
+  m.turn = m.turn === "w" ? "b" : "w";
+  m.history = m.history || [];
+  m.history.push({
+    uci: move.from + move.to + (move.promotion || ""),
+    san: move.san,
+    from: move.from,
+    to: move.to,
+    by: you.color,
+    capture: move.flags && move.flags.includes("c"),
+    fen_after: m.fen,
+  });
+  try { loadFen(m.fen); } catch (_) { /* ignore */ }
+  state.lastMove = { from: move.from, to: move.to };
+  renderBoard();
+  try { _playWav(move.flags && move.flags.includes("c") ? "capture" : "move-self"); } catch (_) { /* ignore */ }
+  _onevsoneSendMove(move.from + move.to + (move.promotion || "q"));
+  _renderOnevsoneMatchUi();
+  return true;
+}
+
+function _renderOnevsoneMatchUi() {
+  const host = document.getElementById("onevsone-body");
+  if (!host) return;
+  const m = state.onevsone.match;
+  if (!m) { _renderOnevsoneLobby(); return; }
+  if (!state.onevsone.chess && typeof window.Chess === "function") {
+    try { state.onevsone.chess = new window.Chess(m.fen); } catch (_) { state.onevsone.chess = null; }
+  } else if (state.onevsone.chess) {
+    try { state.onevsone.chess.load(m.fen); } catch (_) { /* ignore */ }
+  }
+  const wantFlipped = m.you && m.you.color === "b";
+  if (state.flipped !== !!wantFlipped) {
+    state.flipped = !!wantFlipped;
+  }
+  try { loadFen(m.fen); } catch (_) { /* ignore */ }
+  state.lastMove = (m.history && m.history.length)
+    ? { from: m.history[m.history.length - 1].from, to: m.history[m.history.length - 1].to }
+    : null;
+  renderBoard();
+  const you = m.you || {};
+  const opp = m.opponent || {};
+  const youClock = you.clock_remaining != null ? you.clock_remaining : (m.time_seconds || 0);
+  const oppClock = opp.clock_remaining != null ? opp.clock_remaining : (m.time_seconds || 0);
+  const turnYou = m.turn === (you.color || "w");
+  const finished = !!m.finished;
+  let finishedHtml = "";
+  if (finished) {
+    let txt = "Партия завершена";
+    if (m.finish_reason === "checkmate") {
+      txt = m.winner === (you.color || "w") ? "Мат! Вы победили" : "Мат! Вы проиграли";
+    } else if (m.finish_reason === "resign") {
+      txt = m.winner === (you.color || "w") ? "Соперник сдался — победа" : "Вы сдались";
+    } else if (m.finish_reason === "stalemate") {
+      txt = "Пат (ничья)";
+    } else if (m.finish_reason === "insufficient_material") {
+      txt = "Недостаточно материала — ничья";
+    } else if (m.finish_reason === "repetition") {
+      txt = "Повторение — ничья";
+    } else if (m.finish_reason === "fifty_moves") {
+      txt = "Правило 50 ходов — ничья";
+    } else if (m.finish_reason === "time") {
+      txt = m.winner === (you.color || "w") ? "Время вышло у соперника — победа" : "Ваше время вышло";
+    }
+    finishedHtml = `<div class="onevsone-empty"><b>${escapeHtml(txt)}</b></div>`;
   }
   host.innerHTML = `
-    <div class="lb-title">Лидерборд</div>
-    <div class="lb-tabs">${tabs}</div>
-    <div class="lb-tabs lb-tabs-scope">${scopeTabs}</div>
-    ${body}
+    <div class="onevsone-header">
+      <h2>1 vs 1 · ${escapeHtml(opp.nickname || "Соперник")}</h2>
+      <span class="onevsone-sub">${turnYou && !finished ? "Ваш ход" : (finished ? "Игра окончена" : "Ход соперника")}</span>
+    </div>
+    <div class="onevsone-online-row" data-role="opponent">
+      <span class="ov-av">${avatarHtml(opp.avatar)}</span>
+      <span class="ov-nick">${escapeHtml(opp.nickname || "Соперник")}</span>
+      <span class="ov-status">⏱ ${_fmtMmSs((oppClock || 0) * 1000)}</span>
+    </div>
+    <div class="onevsone-online-row" data-role="you">
+      <span class="ov-av">${avatarHtml(you.avatar)}</span>
+      <span class="ov-nick">${escapeHtml(you.nickname || "Вы")}</span>
+      <span class="ov-status">⏱ ${_fmtMmSs((youClock || 0) * 1000)}</span>
+    </div>
+    ${finishedHtml}
+    <div class="ov-actions">
+      ${finished ? `<button type="button" class="primary" id="btn-onevsone-leave">Выйти</button>` : `<button type="button" id="btn-onevsone-resign">Сдаться</button>`}
+    </div>
+    <div id="onevsone-history" class="puzzle-history"></div>
+    <div id="global-leaderboard-onevsone"></div>
   `;
-  host.querySelectorAll(".lb-tab[data-mode]").forEach((b) => {
-    b.onclick = () => { state.rush.leaderboardMode = b.dataset.mode; _refreshRushLeaderboard(); };
-  });
-  host.querySelectorAll(".lb-tab[data-scope]").forEach((b) => {
-    b.onclick = () => { state.rush.leaderboardScope = b.dataset.scope; _refreshRushLeaderboard(); };
-  });
+  const histHost = document.getElementById("onevsone-history");
+  if (histHost) {
+    const items = (m.history || []).slice(-12);
+    histHost.innerHTML = items.map((h) => {
+      const cls = h.by === "w" ? "h-ok" : "h-bad";
+      return `<span class="puzzle-history-pill ${cls}">${escapeHtml(h.san || h.uci)}</span>`;
+    }).join("");
+  }
+  const btnResign = document.getElementById("btn-onevsone-resign");
+  if (btnResign) {
+    btnResign.onclick = () => {
+      if (!confirm("Сдаться?")) return;
+      _onevsoneSendResign();
+    };
+  }
+  const btnLeave = document.getElementById("btn-onevsone-leave");
+  if (btnLeave) {
+    btnLeave.onclick = () => {
+      if (state.onevsone.ws) { try { state.onevsone.ws.close(); } catch (_) {} }
+      state.onevsone.ws = null;
+      state.onevsone.match = null;
+      state.onevsone.chess = null;
+      _renderOnevsoneLobby();
+      _refreshOnevsoneOnline(true);
+    };
+  }
+  renderGlobalLeaderboard();
+  if (state.onevsone.clockTimer) clearInterval(state.onevsone.clockTimer);
+  if (!finished) {
+    state.onevsone.clockTimer = setInterval(() => {
+      const mm = state.onevsone.match;
+      if (!mm || mm.finished) {
+        if (state.onevsone.clockTimer) {
+          clearInterval(state.onevsone.clockTimer);
+          state.onevsone.clockTimer = null;
+        }
+        return;
+      }
+      const turn = mm.turn || "w";
+      const sideObj = turn === "w" ? mm.white : mm.black;
+      if (sideObj && typeof sideObj.clock_remaining === "number") {
+        sideObj.clock_remaining = Math.max(0, sideObj.clock_remaining - 1);
+        if (mm.you && mm.you.color === turn) mm.you.clock_remaining = sideObj.clock_remaining;
+        if (mm.opponent && mm.opponent.color === turn) mm.opponent.clock_remaining = sideObj.clock_remaining;
+        const oppRow = host.querySelector('.onevsone-online-row[data-role="opponent"] .ov-status');
+        const youRow = host.querySelector('.onevsone-online-row[data-role="you"] .ov-status');
+        if (oppRow && mm.opponent) oppRow.textContent = "⏱ " + _fmtMmSs((mm.opponent.clock_remaining || 0) * 1000);
+        if (youRow && mm.you) youRow.textContent = "⏱ " + _fmtMmSs((mm.you.clock_remaining || 0) * 1000);
+        if (sideObj.clock_remaining <= 0) {
+          mm.finished = true;
+          mm.finish_reason = "time";
+          mm.winner = turn === "w" ? "b" : "w";
+          if (state.onevsone.clockTimer) {
+            clearInterval(state.onevsone.clockTimer);
+            state.onevsone.clockTimer = null;
+          }
+          _renderOnevsoneMatchUi();
+        }
+      }
+    }, 1000);
+  }
 }
 
 // =================== Opening Trainer =====================
@@ -10168,6 +10880,7 @@ function handleNotificationEvent(msg) {
     case "hello":
       // Snapshot of pending invitations on (re)connect.
       (msg.invitations || []).forEach((inv) => _showInvitationToast(inv));
+      (msg.onevsone_challenges || []).forEach((ch) => _onevsoneShowChallengeToast(ch));
       break;
     case "invitation":
       if (msg.invitation) _showInvitationToast(msg.invitation);
@@ -10180,6 +10893,44 @@ function handleNotificationEvent(msg) {
     case "invitation_declined":
       if (msg.invitation && msg.invitation.host_id === state.user.client_id) {
         _showInfoToast(`Друг отклонил приглашение`);
+      }
+      break;
+    case "onevsone_challenge":
+      if (msg.challenge) _onevsoneShowChallengeToast(msg.challenge);
+      break;
+    case "onevsone_challenge_accepted":
+      // Server pushes the freshly-created match to *both* players when
+      // the target accepts. The challenger transitions into the match
+      // view; the target already navigated locally.
+      if (msg.match && msg.match.you && msg.match.you.client_id === state.user.client_id) {
+        state.onevsone.match = msg.match;
+        state.onevsone.outgoing = null;
+        setView("onevsone");
+        _renderOnevsoneMatchUi();
+        _onevsoneEnsureWs();
+      }
+      break;
+    case "onevsone_challenge_declined":
+      if (msg.challenge && msg.challenge.challenger_id === state.user.client_id) {
+        _showInfoToast(`Соперник отклонил вызов`);
+        state.onevsone.outgoing = null;
+        if (state.view === "onevsone" && !state.onevsone.match) {
+          _renderOnevsoneLobby();
+        }
+      }
+      break;
+    case "onevsone_challenge_cancelled":
+      if (msg.challenge && msg.challenge.id) {
+        _onevsoneDismissChallengeToast(msg.challenge.id);
+      }
+      break;
+    case "onevsone_challenge_expired":
+      if (msg.challenge && msg.challenge.id) {
+        _onevsoneDismissChallengeToast(msg.challenge.id);
+        if (msg.challenge.challenger_id === state.user.client_id) {
+          _showInfoToast("Челлендж истёк");
+          state.onevsone.outgoing = null;
+        }
       }
       break;
   }
