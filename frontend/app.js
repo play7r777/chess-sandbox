@@ -692,6 +692,7 @@ const state = {
     timerHandle: null,
     finished: false,
     finishReason: null,        // "time" | "mistakes" | "user-stop"
+    feedback: null,            // null | "solved" | "shown" — drives sidebar feedback line
     sessionId: null,
     history: [],               // [{ id, rating, outcome, solveMs }]
     bestToday: { "180": 0, "300": 0, "survival": 0 },
@@ -8598,6 +8599,7 @@ function _resetRushSession() {
   state.rush.deadlineAt = 0;
   state.rush.durationSec = 0;
   state.rush.history = [];
+  state.rush.feedback = null;
   state.rush.sessionId = null;
   state.rush.mode = null;
 }
@@ -8681,6 +8683,7 @@ function _serveNextRushPuzzle() {
   state.rush.fenStart = p.fen;
   state.rush.side = p.side_to_solve || "w";
   state.rush.nextIdx = 0;
+  state.rush.feedback = null;
   try { loadFen(p.fen); } catch (_) { return; }
   const wantFlipped = state.rush.side === "b";
   if (state.flipped !== wantFlipped) state.flipped = wantFlipped;
@@ -8748,6 +8751,7 @@ function tryRushMove(from, to) {
     state.selectedSquare = null;
     state.legalTargets = [];
     state.rush.mistakes += 1;
+    state.rush.feedback = "shown";
     state.rush.history.unshift({
       id: state.rush.current.id,
       rating: state.rush.current.rating,
@@ -8781,6 +8785,7 @@ function tryRushMove(from, to) {
   _flashSquare(move.to, "puzzle-flash-ok");
   if (state.rush.nextIdx >= state.rush.moves.length) {
     state.rush.score += 1;
+    state.rush.feedback = "solved";
     state.rush.history.unshift({
       id: state.rush.current.id,
       rating: state.rush.current.rating,
@@ -8819,6 +8824,7 @@ function _playRushOpponentReply() {
   state.rush.nextIdx += 1;
   if (state.rush.nextIdx >= state.rush.moves.length) {
     state.rush.score += 1;
+    state.rush.feedback = "solved";
     state.rush.history.unshift({
       id: state.rush.current.id,
       rating: state.rush.current.rating,
@@ -8829,6 +8835,29 @@ function _playRushOpponentReply() {
     renderRushUi();
     setTimeout(() => _serveNextRushPuzzle(), 220);
   }
+}
+
+// User-initiated skip from the Rush sidebar. Chess.com Rush has no
+// hint or skip — the closest equivalent is treating an unsolved puzzle
+// as a miss. We adopt the same rule here so the Skip button keeps the
+// session honest (mistake +1, advance to next puzzle, may end the run).
+function _skipRushPuzzle() {
+  if (!state.rush.active || !state.rush.current) return;
+  state.rush.mistakes += 1;
+  state.rush.feedback = "shown";
+  state.rush.history.unshift({
+    id: state.rush.current.id,
+    rating: state.rush.current.rating,
+    outcome: "failed",
+    solveMs: 0,
+  });
+  _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
+  if (state.rush.mistakes >= state.rush.maxMistakes) {
+    finishRush("mistakes");
+    return;
+  }
+  renderRushUi();
+  setTimeout(() => _serveNextRushPuzzle(), 220);
 }
 
 async function _reportRushAttempt({ outcome, solve_ms }) {
@@ -9085,20 +9114,35 @@ function renderRushUi() {
     document.getElementById("btn-rush-pick").onclick = () => { _resetRushSession(); renderRushUi(); };
     return;
   }
-  const p = state.rush.current;
+  // Match the Puzzle tab's running-state sidebar 1:1: side banner
+  // (Ход за …) → feedback line (Найди лучший ход / ✓ Решено / ✕ Ошибка)
+  // → action buttons (⤳ Пропустить · Стоп). Stats (Решено/Ошибки/Время)
+  // already render above the card via #rush-stats-bar — keep it that
+  // way so the live timer updates without re-running this innerHTML.
+  const sideCls = state.rush.side === "w" ? "side-w" : "side-b";
+  const sideLetter = state.rush.side === "w" ? "♔" : "♚";
+  const sideLabel = state.rush.side === "w" ? "белые" : "чёрные";
+  let feedback;
+  if (state.rush.feedback === "solved") {
+    feedback = `<div class="puzzle-feedback fb-solved">🏆 Решено. Идёт следующая…</div>`;
+  } else if (state.rush.feedback === "shown") {
+    feedback = `<div class="puzzle-feedback fb-bad">✕ Ошибка. Идёт следующая…</div>`;
+  } else {
+    feedback = `<div class="puzzle-feedback fb-info">Найди лучший ход.</div>`;
+  }
   card.innerHTML = `
-    <div class="rush-running">
-      <div class="puzzle-meta">
-        <div class="puzzle-id">Rush · ${escapeHtml(RUSH_MODE_LABEL[state.rush.mode])}</div>
-        <div class="puzzle-rating">★ ${p ? (p.rating || "—") : "—"}</div>
-      </div>
-      <div class="rush-stats">
-        <span>Решено: <b>${state.rush.score}</b></span>
-        <span>Ошибки: <b class="${state.rush.mistakes >= 2 ? "rush-bad" : ""}">${state.rush.mistakes}/${state.rush.maxMistakes}</b></span>
-      </div>
+    <div class="puzzle-side-banner">
+      <span class="puzzle-side-icon ${sideCls}">${sideLetter}</span>
+      <span class="puzzle-side-text">Ход за <b>${sideLabel}</b></span>
     </div>
+    ${feedback}
   `;
-  actions.innerHTML = `<button id="btn-rush-stop" type="button" class="puzzle-secondary">Стоп</button>`;
+  actions.innerHTML = `
+    <button id="btn-rush-skip" type="button" class="puzzle-secondary">⤳ Пропустить</button>
+    <button id="btn-rush-stop" type="button" class="puzzle-secondary">Стоп</button>
+  `;
+  const skip = document.getElementById("btn-rush-skip");
+  if (skip) skip.onclick = () => _skipRushPuzzle();
   const stop = document.getElementById("btn-rush-stop");
   if (stop) stop.onclick = () => finishRush("user-stop");
 }
