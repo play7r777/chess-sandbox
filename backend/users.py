@@ -291,6 +291,23 @@ def _summarize(u: dict[str, Any]) -> dict[str, Any]:
         1 for a in daily_attempts.values()
         if isinstance(a, dict) and a.get("outcome") == "solved"
     )
+    parties = u.get("parties") or []
+    onevsone_wins = 0
+    onevsone_games = 0
+    if isinstance(parties, list):
+        for p in parties:
+            if not isinstance(p, dict):
+                continue
+            if p.get("kind") == "onevsone":
+                onevsone_games += 1
+                if p.get("outcome") == "win":
+                    onevsone_wins += 1
+    last_seen = int(u.get("last_seen") or 0)
+    # Single source of truth for "online" — used by /api/users (which
+    # feeds every leaderboard, the 1v1 lobby and the Battle landing).
+    # Heartbeat fires every ~30s from the frontend, so a 90s window
+    # covers a single missed beat.
+    online = bool(last_seen) and (int(time.time()) - last_seen) <= 90
     return {
         "client_id": u.get("client_id"),
         "nickname": u.get("nickname"),
@@ -303,12 +320,15 @@ def _summarize(u: dict[str, Any]) -> dict[str, Any]:
         "win_pct": round(win_pct, 1),
         "best_streak": int(s.get("best_streak") or 0),
         "current_streak": int(s.get("current_streak") or 0),
-        "last_seen": int(u.get("last_seen") or 0),
+        "last_seen": last_seen,
+        "online": online,
         "created_at": int(u.get("created_at") or 0),
         "puzzle_rush_best": rush_best,
         "daily_best_streak": int(dp.get("best_streak") or 0),
         "daily_current_streak": int(dp.get("current_streak") or 0),
         "daily_solved_total": daily_solved,
+        "onevsone_wins": onevsone_wins,
+        "onevsone_games": onevsone_games,
     }
 
 

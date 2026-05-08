@@ -5229,6 +5229,41 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .global-leaderboard .gl-row .gl-nick {
   font-weight: 600;
   color: #f5f8fc;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.global-leaderboard .gl-row .gl-nick-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Online/offline pill next to a user name. The colour decides on its
+   own — no extra JS needed. Lives next to .gl-nick-line so it inherits
+   the row's flex sizing (won't push the nickname out). */
+.global-leaderboard .gl-row .gl-dot,
+.onevsone-online-row .gl-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.04);
+}
+.gl-dot.is-online   { background: #5db04e; }
+.gl-dot.is-offline  { background: #6b7790; }
+/* Why a user is ranked where they are (e.g. "Серия · решено 12",
+   "Победы 1v1 · 4 игр"). One muted line under the nickname. */
+.global-leaderboard .gl-row .gl-metric,
+.onevsone-online-row .ov-meta {
+  font-size: 11px;
+  color: #94a4be;
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5237,4 +5272,18 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   font-weight: 800;
   color: #f7c66c;
   font-variant-numeric: tabular-nums;
+}
+/* "авто" pill that replaced the manual ⟳ refresh on Battle landing.
+   Mirrors the auto-poll cadence so the user knows the list is live. */
+.cc-auto-refresh-hint {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #5db04e;
+  background: rgba(93, 176, 78, 0.12);
+  border: 1px solid rgba(93, 176, 78, 0.3);
+  padding: 2px 6px;
+  border-radius: 999px;
+  margin-left: auto;
 }

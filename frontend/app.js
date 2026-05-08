@@ -6305,8 +6305,29 @@ async function _bootUser() {
     state.user.client_id = _uuidv4();
     showOnboarding();
   }
-  // Heartbeat every 60s so last-seen stays fresh on the leaderboard.
-  setInterval(userHeartbeat, 60_000);
+  // Heartbeat every 30s so the backend "online" flag stays accurate
+  // (window is 90s — see users.py::_summarize). Frontend leaderboards
+  // and the 1 vs 1 / Battle online lists all read this single flag, so
+  // refreshing it quickly is what makes "online" snap on/off the moment
+  // someone opens / closes the tab.
+  setInterval(userHeartbeat, 30_000);
+  // Fire one immediately so the user shows up online before the first
+  // 30-second window elapses.
+  userHeartbeat();
+  // Hide the offline state when we go away (e.g. tab closed) and pop
+  // back online when the tab is re-focused — so other clients see the
+  // status flip without waiting for the next interval tick.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") userHeartbeat();
+  });
+  window.addEventListener("focus", () => { userHeartbeat(); });
+  // Single 3-second poll feeds every leaderboard, the 1 vs 1 list and
+  // the Battle landing roster — see `_startGlobalLeaderboardAutoRefresh`
+  // for the rationale (the user asked for ~100ms; 3s is the sane
+  // version that keeps the server from melting).
+  if (typeof _startGlobalLeaderboardAutoRefresh === "function") {
+    _startGlobalLeaderboardAutoRefresh();
+  }
   // Start the SSE notifications stream so party invitations pop up live.
   _bootNotifications();
   // If the user reloads while a puzzle was already in progress, the
@@ -6536,7 +6557,7 @@ function _renderBattleSidebar(body) {
         </div>
         <div class="cc-sidebar-section-title">
           Игроки
-          <button type="button" id="btn-cc-players-refresh" title="Обновить">⟳</button>
+          <span class="cc-auto-refresh-hint" title="Автообновление каждые 3 с">авто</span>
         </div>
         <div id="cc-player-list" class="cc-player-list">
           <div class="cc-empty">Загружаю…</div>
@@ -6614,10 +6635,10 @@ function _renderBattleSidebar(body) {
   body.querySelector("#party-join-code")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") body.querySelector("#btn-party-join").click();
   });
-  // Refresh buttons.
-  body.querySelector("#btn-cc-players-refresh")?.addEventListener("click", () => {
-    _renderCcPlayerList().catch(() => {});
-  });
+  // Watch tab still has its manual refresh button — open parties /
+  // presence aren't streamed through /api/users so the auto-poll
+  // doesn't cover them. The Play tab refresh button was removed (the
+  // 3-second poll covers it).
   body.querySelector("#btn-cc-watch-refresh")?.addEventListener("click", () => {
     _renderCcOpenParties().catch(() => {});
     _renderCcPresenceList().catch(() => {});
@@ -6631,32 +6652,37 @@ function _renderBattleSidebar(body) {
 }
 
 // Fills #cc-player-list with the registered-users roster from
-// /api/users, filtered by `_battleSidebarState.presence` (online =
-// last_seen within 5 min, offline = the rest). Each row has a green
-// "Пригласить" button — clicking lazily creates a party (if none
-// exists) and POSTs /api/party/invite to ping the target player.
+// /api/users, filtered by `_battleSidebarState.presence` (online /
+// offline). Online status comes straight from the backend's `online`
+// field (single source of truth across every leaderboard / lobby).
+// If a fresh /api/users payload is already in
+// state.globalLeaderboard.rows we use that — the auto-poll keeps it
+// up to date so we don't burn an extra request every 3 seconds.
 async function _renderCcPlayerList() {
   const host = document.getElementById("cc-player-list");
   if (!host) return;
-  host.innerHTML = `<div class="cc-empty">Загружаю…</div>`;
-  let users = [];
-  try {
-    const res = await fetch("/api/users");
-    const data = await res.json();
-    users = (data.users || []).filter((u) => u.client_id !== state.user.client_id);
-  } catch (_) {
-    host.innerHTML = `<div class="cc-empty">Не удалось загрузить</div>`;
-    return;
+  let users = state.globalLeaderboard.rows || [];
+  if (!users.length) {
+    host.innerHTML = `<div class="cc-empty">Загружаю…</div>`;
+    try {
+      const res = await fetch("/api/users");
+      const data = await res.json();
+      users = data.users || [];
+      state.globalLeaderboard.rows = users;
+      state.globalLeaderboard.fetchedAt = Date.now();
+    } catch (_) {
+      host.innerHTML = `<div class="cc-empty">Не удалось загрузить</div>`;
+      return;
+    }
   }
+  users = users.filter((u) => u.client_id !== state.user.client_id);
   if (!users.length) {
     host.innerHTML = `<div class="cc-empty">Пока нет других игроков. Поделись ссылкой на сервер.</div>`;
     return;
   }
-  const now = Math.floor(Date.now() / 1000);
-  const isOnline = (u) => (now - Number(u.last_seen || 0)) < 300;
   const filter = _battleSidebarState.presence === "offline"
-    ? ((u) => !isOnline(u))
-    : isOnline;
+    ? ((u) => !u.online)
+    : ((u) => !!u.online);
   const filtered = users.filter(filter)
     .sort((a, b) => (Number(b.last_seen || 0)) - (Number(a.last_seen || 0)));
   if (!filtered.length) {
@@ -6664,7 +6690,7 @@ async function _renderCcPlayerList() {
     return;
   }
   host.innerHTML = filtered.map((u) => {
-    const online = isOnline(u);
+    const online = !!u.online;
     return `
       <div class="cc-player-row" data-cid="${escapeHtml(u.client_id)}">
         <span class="cc-player-av">${avatarHtml(u.avatar)}</span>
@@ -8207,9 +8233,22 @@ function _partyShowResults() {
   body.querySelector("#btn-party-close-results")?.addEventListener("click", () => {
     closePartyModal();
     state.party.ws = null;
+    state.party.active = false;
+    state.party.code = null;
     state.party.status = "lobby";
     state.party.finalResults = null;
     state.party.finalMeta = null;
+    state.party.party_id = null;
+    state.party.score = 0;
+    state.party.scoreboard = [];
+    state.party.history = [];
+    // Re-render the Battle landing so the user actually sees the
+    // chooser instead of an empty results card. The modal-host fork
+    // (when state.view !== "battle") just hides itself.
+    if (state.view === "battle") {
+      try { _renderBattleSidebar(document.getElementById("battle-body")); }
+      catch (_) { /* ignore */ }
+    }
   });
 }
 
@@ -9534,7 +9573,11 @@ function renderRushLeaderboard() {
 // dialog with a Challenge button (no "Add friend").
 async function _refreshGlobalLeaderboard(force) {
   const fresh = state.globalLeaderboard.fetchedAt || 0;
-  if (!force && Date.now() - fresh < 15_000 && state.globalLeaderboard.rows.length) {
+  // Tight 1-second cache so back-to-back render calls (e.g. switching
+  // sub-tabs) don't double-fire /api/users, but the auto-refresh poll
+  // (3s, see _startGlobalLeaderboardAutoRefresh) still flows through
+  // without staleness.
+  if (!force && Date.now() - fresh < 1_000 && state.globalLeaderboard.rows.length) {
     renderGlobalLeaderboard();
     return;
   }
@@ -9546,50 +9589,84 @@ async function _refreshGlobalLeaderboard(force) {
     state.globalLeaderboard.rows = state.globalLeaderboard.rows || [];
   }
   renderGlobalLeaderboard();
+  _renderOnevsoneOnlineFromUsers();
+  _renderCcPlayerList();
+}
+
+// Auto-refresh poll: every 3 seconds we re-fetch /api/users and
+// re-render every leaderboard mount-point that is currently visible.
+// This is the "everything updates fast" the user asked for — they
+// suggested 100ms; we use 3s instead because 100ms would melt the
+// server (tens of req/s × every connected client) without any user
+// observable benefit. Online status and metric scores still flip
+// within a few seconds of the underlying change, which is what
+// matters in practice.
+let _GLOBAL_LB_POLL_TIMER = null;
+function _startGlobalLeaderboardAutoRefresh() {
+  if (_GLOBAL_LB_POLL_TIMER) return;
+  _GLOBAL_LB_POLL_TIMER = setInterval(() => {
+    if (document.hidden) return; // pause polling when tab is in bg
+    _refreshGlobalLeaderboard(true).catch(() => {});
+  }, 3_000);
 }
 
 // Per-mode leaderboard configuration. Each mode picks its own sort key
 // + display so the four sidebars (Puzzle / Daily / Rush / 1 vs 1) each
 // rank a different ladder, instead of all four showing the same row.
+//
+// Note: every leaderboard shows EVERY user (no eligibility filter) so
+// players who haven't played a mode yet still appear at the bottom
+// with a "0" score — this is what the user asked for ("сделай чтобы
+// все работало + был лидер борд рабочий на сто проц"). The ranking
+// metric is series / score, NOT puzzle ELO; the metric label next to
+// the player explains why they hold their position.
 const _LB_MODES = {
   puzzle: {
     title: "Leaderboard · Puzzle",
-    sortKey: (u) => Number(u.rating || 0),
-    eligible: () => true,
-    score: (u) => (u.rating != null ? u.rating : 1200),
-    scoreLabel: () => "",
-    empty: "Пока никого нет. Реши первый пазл, чтобы появиться здесь.",
+    // Best streak first, then total solved as tie-breaker. Two values
+    // are folded into a single sort key so JS array.sort stays stable.
+    sortKey: (u) =>
+      Number(u.best_streak || 0) * 1_000_000
+      + Number(u.solved || 0),
+    score: (u) => `🔥 ${Number(u.best_streak || 0)}`,
+    metric: (u) => `Серия · решено ${Number(u.solved || 0)}`,
+    empty: "Пока никого нет.",
   },
   daily: {
     title: "Leaderboard · Daily",
-    sortKey: (u) => Number(u.daily_best_streak || 0) * 10000 + Number(u.daily_solved_total || 0),
-    eligible: (u) => Number(u.daily_solved_total || 0) > 0 || Number(u.daily_best_streak || 0) > 0,
+    sortKey: (u) =>
+      Number(u.daily_best_streak || 0) * 10_000
+      + Number(u.daily_solved_total || 0),
     score: (u) => `🔥 ${Number(u.daily_best_streak || 0)}`,
-    scoreLabel: (u) => `Решено: ${Number(u.daily_solved_total || 0)}`,
-    empty: "Пока никого нет. Реши сегодняшний дневной пазл, чтобы появиться здесь.",
+    metric: (u) => `Дневная серия · решено ${Number(u.daily_solved_total || 0)}`,
+    empty: "Пока никого нет.",
   },
   rush: {
     title: "Leaderboard · Rush",
     sortKey: (u) => Number(u.puzzle_rush_best || 0),
-    eligible: (u) => Number(u.puzzle_rush_best || 0) > 0,
     score: (u) => Number(u.puzzle_rush_best || 0),
-    scoreLabel: () => "",
-    empty: "Пока никого нет. Сыграй Puzzle Rush, чтобы появиться здесь.",
+    metric: () => "Лучший рекорд Rush",
+    empty: "Пока никого нет.",
   },
   onevsone: {
     title: "Leaderboard · 1 vs 1",
-    sortKey: (u) => Number(u.rating || 0),
-    eligible: () => true,
-    score: (u) => (u.rating != null ? u.rating : 1200),
-    scoreLabel: () => "",
+    // Wins first, then rating as tie-breaker. Players with no 1v1
+    // matches yet show 0 wins but still appear (no filter).
+    sortKey: (u) =>
+      Number(u.onevsone_wins || 0) * 100_000
+      + Number(u.rating || 0),
+    score: (u) => `🏆 ${Number(u.onevsone_wins || 0)}`,
+    metric: (u) => `Победы 1v1 · ${Number(u.onevsone_games || 0)} игр`,
     empty: "Пока никого нет.",
   },
 };
 
 function _renderGlobalLeaderboardInto(host, mode) {
   const cfg = _LB_MODES[mode] || _LB_MODES.puzzle;
+  // No eligibility filter — every registered user appears in every
+  // mode's leaderboard (just with `0` if they haven't played that
+  // mode). The per-mode `sortKey` decides the position.
   const rows = (state.globalLeaderboard.rows || [])
-    .filter(cfg.eligible)
     .slice()
     .sort((a, b) => cfg.sortKey(b) - cfg.sortKey(a));
   const list = !rows.length
@@ -9600,10 +9677,23 @@ function _renderGlobalLeaderboardInto(host, mode) {
         const cid = escapeHtml(u.client_id || "");
         const isSelf = u.client_id === state.user.client_id;
         const score = cfg.score(u);
+        const metric = typeof cfg.metric === "function" ? cfg.metric(u) : "";
+        // `online` comes straight from the backend projection
+        // (users.py::_summarize), so the badge is consistent across
+        // every leaderboard / lobby that consumes /api/users.
+        const online = !!u.online;
+        const dotCls = online ? "gl-dot is-online" : "gl-dot is-offline";
+        const statusLabel = online ? "в сети" : "не в сети";
         return `<div class="gl-row" data-cid="${cid}" data-nick="${nick}">
           <span class="gl-rank">#${i + 1}</span>
           <span class="gl-av">${av}</span>
-          <span class="gl-nick">${nick}${isSelf ? ' <span class="muted">(вы)</span>' : ""}</span>
+          <span class="gl-nick">
+            <span class="gl-nick-line">
+              <span class="${dotCls}" title="${statusLabel}"></span>
+              ${nick}${isSelf ? ' <span class="muted">(вы)</span>' : ""}
+            </span>
+            ${metric ? `<span class="gl-metric">${escapeHtml(metric)}</span>` : ""}
+          </span>
           <span class="gl-score">${escapeHtml(String(score))}</span>
         </div>`;
       }).join("")}</div>`;
@@ -9858,13 +9948,31 @@ function leaveOneVsOneView() {
 
 async function _refreshOnevsoneOnline(force) {
   if (!state.user.client_id) return;
+  // Pull from /api/users so the 1 vs 1 lobby uses the same `online`
+  // field every other leaderboard / lobby reads — fixes the
+  // "everyone always offline in 1v1" bug. The legacy
+  // /api/onevsone/online endpoint returned the same rows but the
+  // frontend was checking a stale `u.online` field that wasn't
+  // populated server-side.
   try {
-    const r = await api(`/api/onevsone/online?client_id=${encodeURIComponent(state.user.client_id)}`);
+    const r = await api("/api/users");
     state.onevsone.online = (r && r.users) || [];
+    state.globalLeaderboard.rows = state.onevsone.online;
+    state.globalLeaderboard.fetchedAt = Date.now();
   } catch (_) {
     state.onevsone.online = state.onevsone.online || [];
   }
   if (force || state.view === "onevsone") _renderOnevsoneOnlineList();
+  renderGlobalLeaderboard();
+}
+
+// When the global poller refreshes /api/users, push the same data
+// through to the 1 vs 1 list (if it's currently visible) so all UIs
+// reflect the new state without separate fetches.
+function _renderOnevsoneOnlineFromUsers() {
+  if (!Array.isArray(state.globalLeaderboard.rows)) return;
+  state.onevsone.online = state.globalLeaderboard.rows;
+  if (document.getElementById("onevsone-online")) _renderOnevsoneOnlineList();
 }
 
 function _renderOnevsoneLobby() {
@@ -9890,9 +9998,19 @@ function _renderOnevsoneOnlineList() {
   const host = document.getElementById("onevsone-online");
   if (!host) return;
   const me = state.user.client_id;
-  const users = (state.onevsone.online || []).filter((u) => u.client_id !== me);
+  // Sort online users first, then offline — easier to spot active
+  // opponents to challenge.
+  const users = (state.onevsone.online || [])
+    .filter((u) => u.client_id !== me)
+    .slice()
+    .sort((a, b) => {
+      const oa = a.online ? 1 : 0;
+      const ob = b.online ? 1 : 0;
+      if (oa !== ob) return ob - oa;
+      return Number(b.last_seen || 0) - Number(a.last_seen || 0);
+    });
   if (!users.length) {
-    host.innerHTML = `<div class="onevsone-empty">Пока никого нет в сети. Поделись ссылкой с другом или жди — онлайн обновится.</div>`;
+    host.innerHTML = `<div class="onevsone-empty">Пока никого нет. Поделись ссылкой с другом.</div>`;
     return;
   }
   host.innerHTML = users.map((u) => {
@@ -9900,18 +10018,24 @@ function _renderOnevsoneOnlineList() {
     const av = avatarHtml(u.avatar);
     const nick = escapeHtml(u.nickname || "Гость");
     const cid = escapeHtml(u.client_id);
+    const wins = Number(u.onevsone_wins || 0);
     return `<div class="onevsone-online-row${offline ? " is-offline" : ""}" data-cid="${cid}" data-nick="${nick}">
       <span class="ov-av">${av}</span>
-      <span class="ov-nick">${nick}</span>
+      <span class="ov-nick">
+        <span class="ov-nick-line">
+          <span class="${offline ? "gl-dot is-offline" : "gl-dot is-online"}"></span>
+          ${nick}
+        </span>
+        <span class="ov-meta">🏆 ${wins} · ${Number(u.rating || 1200)} elo</span>
+      </span>
       <span class="ov-status${offline ? "" : " is-online"}">${offline ? "не в сети" : "в сети"}</span>
     </div>`;
   }).join("");
   host.querySelectorAll(".onevsone-online-row").forEach((row) => {
-    if (row.classList.contains("is-offline")) return;
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (e) => {
       const cid = row.dataset.cid;
       const nick = row.dataset.nick;
-      openPlayerChallengeProfile({ client_id: cid, nickname: nick });
+      openPlayerChallengeProfile({ client_id: cid, nickname: nick }, e.currentTarget);
     });
   });
 }
