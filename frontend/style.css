@@ -3704,8 +3704,8 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .party-side-header { margin-bottom: 4px; }
 
 .party-board-panel {
-  width: min(960px, 96%);
-  margin: 14px auto 24px;
+  width: 100%;
+  margin: 12px 0 4px;
   background: linear-gradient(180deg, #1f2a3a, #161e2c);
   border: 1px solid #2c3950;
   border-radius: 14px;
@@ -3713,13 +3713,13 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
 }
 .party-board-panel .party-side-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 320px;
+  max-height: 360px;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: #2c3950 transparent;

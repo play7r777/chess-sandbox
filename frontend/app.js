@@ -7063,20 +7063,29 @@ function _partyMountSidePanel() {
     host.className = "party-side-panel";
     document.body.appendChild(host);
   }
-  // The side panel keeps only the slim HUD (title / timer / avg ELO);
-  // the scoreboard rows live in #party-board-panel below the board so
-  // top-right stays out of the player's way.
+  // The slim HUD lives in the top-right; the full scoreboard mounts
+  // **inside the puzzle panel** right under #puzzle-history so it
+  // sits directly below the hint/skip row on the right column —
+  // exactly where the user expects to see who's still alive without
+  // taking their eyes off the puzzle card. We re-mount on every
+  // call to make sure the panel survives view switches that may
+  // have torn down the host element.
   let board = document.getElementById("party-board-panel");
   if (!board) {
     board = document.createElement("section");
     board.id = "party-board-panel";
     board.className = "party-board-panel";
-    // Mount into the board area so the panel inherits the same flex
-    // column as `#status-line` and sits directly under the board /
-    // FEN row.
-    const boardArea = document.querySelector(".board-area");
-    if (boardArea) boardArea.appendChild(board);
-    else document.body.appendChild(board);
+  }
+  // Pick the most appropriate mount point depending on the active
+  // view. While we're on the "puzzle" view (default for a Battle
+  // match) we tuck the panel under #puzzle-history so it inherits
+  // the right-column flex layout. As a fallback (e.g. user wandered
+  // off to Profile/Main mid-match) we attach to <body> so the panel
+  // never disappears.
+  const puzzlePanel = document.getElementById("panel-puzzle");
+  const desiredParent = puzzlePanel || document.body;
+  if (board.parentElement !== desiredParent) {
+    desiredParent.appendChild(board);
   }
   return host;
 }
