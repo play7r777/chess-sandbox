@@ -4082,14 +4082,16 @@ function tryPuzzleMove(from, to) {
   if (!sameMove) {
     // chess.com one-strike rule: first wrong move = puzzle is done,
     // user loses Δ rating, auto-advance to next puzzle. No retries.
-    try { c.undo(); } catch (_) { /* ignore */ }
     state.puzzle.attempts = 1;
     state.selectedSquare = null;
     state.legalTargets = [];
-    // Reuse the Analysis badge system: red "miss" cross in the
-    // top-right corner of the destination square + same pinkish tint
-    // on origin/dest. The reviewBadge has to be set *before*
-    // renderBoard, since renderBoard is what mounts the SVG.
+    // Apply the move visually so the piece stays where the user
+    // dropped it (chess.com-style — no snap-back to origin). The
+    // auto-advance below replaces the FEN with the next puzzle, so
+    // we don't need to revert. loadFen() unconditionally nulls
+    // state.reviewBadge — paint the analysis-style "miss" cross
+    // *after* loadFen so the SVG actually reaches the DOM.
+    loadFen(c.fen());
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
@@ -8318,16 +8320,36 @@ function tryDailyMove(from, to) {
         && playedUci.slice(0, 4) === expected.slice(0, 4)
         && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
   if (!sameMove) {
-    try { c.undo(); } catch (_) { /* ignore */ }
+    // Snapshot the pre-move FEN so we can revert the visual board
+    // after the wrong-move flash — daily allows retries, so the
+    // piece must show on the destination briefly (chess.com-style)
+    // and then the position has to come back to where the user can
+    // try again from. chess.js (`c`) currently has the wrong move
+    // applied, which is exactly what we want loadFen to render —
+    // we undo it on chess.js side right after.
+    const prevFen = buildFen();
     state.daily.attemptsToday += 1;
     state.selectedSquare = null;
     state.legalTargets = [];
+    state.daily.feedback = "wrong";
+    // Show the wrong move on the board (piece stays where dropped),
+    // then paint the analysis miss-badge after loadFen since
+    // loadFen() nulls state.reviewBadge.
+    loadFen(c.fen());
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
-    state.daily.feedback = "wrong";
     renderBoard();
     _flashSquare(move.to, "puzzle-flash-bad");
+    try { c.undo(); } catch (_) { /* ignore */ }
     renderDailyUi();
+    // Revert the visual board after a beat so the user can retry.
+    setTimeout(() => {
+      if (!state.daily.active) return;
+      loadFen(prevFen);
+      state.reviewBadge = null;
+      state.lastMove = null;
+      renderBoard();
+    }, 800);
     return;
   }
   loadFen(c.fen());
@@ -8747,7 +8769,6 @@ function tryRushMove(from, to) {
         && playedUci.slice(0, 4) === expected.slice(0, 4)
         && (expected.length === 4 || playedUci.slice(4) === expected.slice(4)));
   if (!sameMove) {
-    try { c.undo(); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     state.rush.mistakes += 1;
@@ -8758,9 +8779,12 @@ function tryRushMove(from, to) {
       outcome: "failed",
       solveMs: 0,
     });
-    // Mount the analysis-style "miss" badge on the destination square
-    // *before* renderBoard wipes the cells — otherwise the SVG never
-    // reaches the DOM (this was the Rush bug).
+    // Apply the move visually so the piece stays on the destination
+    // square (chess.com-style — no snap-back). The auto-advance to
+    // the next Rush puzzle below replaces the FEN. loadFen() nulls
+    // state.reviewBadge, so paint the analysis-style "miss" badge
+    // *after* loadFen.
+    loadFen(c.fen());
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
@@ -9436,19 +9460,37 @@ function tryOpeningMove(from, to) {
     // the theory move (otherwise the verdict can only say «не теория»
     // without knowing how bad it was).
     state.opening.lastWrongSan = move.san || "";
-    try { c.undo(); } catch (_) { /* ignore */ }
+    // Visual snapshot for the brief "show then revert" wrong flash.
+    // chess.js (state.opening.chess) stays at the post-move position
+    // long enough to read its FEN; we undo right after loadFen so
+    // that subsequent retries test against the correct position.
+    const prevFen = buildFen();
     state.opening.feedback = "wrong";
     state.opening.coachMsg = expected
       ? `Не лучший ход. По теории здесь: ${expected}.`
       : `Линия закончилась.`;
-    state.reviewBadge = { square: move.to, classification: "miss" };
-    state.lastMove = { from: move.from, to: move.to };
     state.selectedSquare = null;
     state.legalTargets = [];
+    // Show the wrong move on the board so the piece stays where the
+    // user dropped it (chess.com-style). loadFen() nulls
+    // state.reviewBadge, so paint the analysis miss-badge after.
+    loadFen(c.fen());
+    state.reviewBadge = { square: move.to, classification: "miss" };
+    state.lastMove = { from: move.from, to: move.to };
     renderBoard();
     _flashSquare(move.to, "puzzle-flash-bad");
+    try { c.undo(); } catch (_) { /* ignore */ }
     _reportOpeningAttempt(false, false);
     renderOpeningUi();
+    // Revert the visual board after a beat so the user can retry the
+    // theory move from the correct position.
+    setTimeout(() => {
+      if (!state.opening.active) return;
+      loadFen(prevFen);
+      state.reviewBadge = null;
+      state.lastMove = null;
+      renderBoard();
+    }, 800);
     return;
   }
   // Correct.
@@ -10549,7 +10591,16 @@ function _spectatorRender() {
     document.body.appendChild(panel);
   }
   const sp = state.spectator;
-  const players = Object.values(sp.players);
+  // Hide self from the spectator's own player list. After being
+  // eliminated and clicking "Смотреть матч" the player joins as a
+  // spectator on the same party — without this filter they'd see
+  // themselves in the "Игроки" sidebar (and could click their own
+  // row to watch themselves), which is nonsense since they're out.
+  // Same goes for solo-presence (filtered server-side already, but
+  // belt-and-suspenders here too).
+  const selfCid = state.user && state.user.client_id;
+  const players = Object.values(sp.players)
+    .filter((p) => !selfCid || p.client_id !== selfCid);
   // Pull live scores from scoreboard if present.
   const sbMap = {};
   (sp.scoreboard || []).forEach((r) => { sbMap[r.client_id] = r; });
@@ -10564,6 +10615,12 @@ function _spectatorRender() {
   });
   // Sort by current score desc.
   players.sort((a, b) => (b.score || 0) - (a.score || 0));
+  // If selectedId points to self (e.g. carried over from before the
+  // elimination), drop it so the renderer falls back to the first
+  // remaining player rather than rendering an empty board.
+  if (sp.selectedId && selfCid && sp.selectedId === selfCid) {
+    sp.selectedId = null;
+  }
   if (!sp.selectedId && players.length) sp.selectedId = players[0].client_id;
   const selected = sp.players[sp.selectedId] || players[0] || null;
 
