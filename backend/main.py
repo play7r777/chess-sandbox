@@ -1409,11 +1409,11 @@ async def onevsone_challenge(payload: OneVsOneChallengeRequest) -> dict[str, Any
         raise HTTPException(status_code=404, detail="user_not_found")
     try:
         ch = await onevsone_room.create_challenge(
-            challenger_id=challenger.client_id,
-            challenger_nickname=challenger.nickname,
-            challenger_avatar=challenger.avatar,
-            target_id=target.client_id,
-            target_nickname=target.nickname,
+            challenger_id=str(challenger.get("client_id") or payload.client_id),
+            challenger_nickname=str(challenger.get("nickname") or ""),
+            challenger_avatar=str(challenger.get("avatar") or ""),
+            target_id=str(target.get("client_id") or payload.target_id),
+            target_nickname=str(target.get("nickname") or ""),
             time_seconds=payload.time_seconds,
             increment_seconds=payload.increment_seconds,
         )
@@ -1437,16 +1437,17 @@ async def onevsone_challenge_accept(
     user = users_db.get_user(payload.client_id)
     if user is None:
         raise HTTPException(status_code=404, detail="user_not_found")
+    user_cid = str(user.get("client_id") or payload.client_id)
     result = await onevsone_room.accept_challenge(
         challenge_id,
-        user.client_id,
-        user.nickname,
-        user.avatar,
+        user_cid,
+        str(user.get("nickname") or ""),
+        str(user.get("avatar") or ""),
     )
     if result is None:
         raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
     ch, match = result
-    return {"challenge": ch.public(), "match": match.public(user.client_id)}
+    return {"challenge": ch.public(), "match": match.public(user_cid)}
 
 
 @app.post("/api/onevsone/challenge/{challenge_id}/decline")
