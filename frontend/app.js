@@ -2842,6 +2842,36 @@ document.querySelectorAll(".view-tab").forEach((btn) => {
   btn.addEventListener("click", () => setView(btn.dataset.view));
 });
 
+// ---------- Per-panel sub-tabs (Play / Лидерборд) ----------
+// Used by Puzzle, Daily and 1v1 panels (see index.html). Mirrors the
+// Rush sidebar tab behaviour: clicking a subtab toggles `.cc-tab-item-active`
+// + `aria-selected` on the buttons and shows/hides the matching `.panel-subpane`
+// via the `[hidden]` attribute. The leaderboard mount point inside the
+// leaderboard subpane is filled lazily by `renderGlobalLeaderboard()`.
+function _initPanelSubtabs() {
+  document.querySelectorAll('[data-panel-subtabs]').forEach((group) => {
+    const panel = group.closest(".panel");
+    if (!panel) return;
+    group.querySelectorAll('[data-subtab]').forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const target = btn.dataset.subtab;
+        group.querySelectorAll('[data-subtab]').forEach((x) => {
+          const isActive = x.dataset.subtab === target;
+          x.classList.toggle("cc-tab-item-active", isActive);
+          x.setAttribute("aria-selected", String(isActive));
+        });
+        panel.querySelectorAll('[data-subpane]').forEach((p) => {
+          p.hidden = p.dataset.subpane !== target;
+        });
+        if (target === "leaderboard") {
+          try { renderGlobalLeaderboard(); } catch (_) { /* ignore */ }
+        }
+      });
+    });
+  });
+}
+_initPanelSubtabs();
+
 setView((() => {
   try { return localStorage.getItem("cs.view") || "main"; } catch (_) { return "main"; }
 })());
@@ -9522,6 +9552,8 @@ function renderGlobalLeaderboard() {
   const hosts = [
     document.getElementById("global-leaderboard-rush"),
     document.getElementById("global-leaderboard-onevsone"),
+    document.getElementById("global-leaderboard-puzzle"),
+    document.getElementById("global-leaderboard-daily"),
   ].filter(Boolean);
   if (!hosts.length) return;
   const rows = state.globalLeaderboard.rows || [];
@@ -9694,6 +9726,9 @@ async function _refreshOnevsoneOnline(force) {
 function _renderOnevsoneLobby() {
   const host = document.getElementById("onevsone-body");
   if (!host) return;
+  // Leaderboard lives in the dedicated `Лидерборд` sub-tab (see
+  // index.html → #global-leaderboard-onevsone) so the lobby itself
+  // only renders the online list + challenge form.
   host.innerHTML = `
     <div class="onevsone-header">
       <h2>1 vs 1</h2>
@@ -9701,7 +9736,6 @@ function _renderOnevsoneLobby() {
     </div>
     <div id="onevsone-online" class="onevsone-online-list"></div>
     <div id="onevsone-form-host"></div>
-    <div id="global-leaderboard-onevsone"></div>
   `;
   _renderOnevsoneOnlineList();
   _renderOnevsoneChallengeForm(null);
@@ -10084,7 +10118,6 @@ function _renderOnevsoneMatchUi() {
       ${finished ? `<button type="button" class="primary" id="btn-onevsone-leave">Выйти</button>` : `<button type="button" id="btn-onevsone-resign">Сдаться</button>`}
     </div>
     <div id="onevsone-history" class="puzzle-history"></div>
-    <div id="global-leaderboard-onevsone"></div>
   `;
   const histHost = document.getElementById("onevsone-history");
   if (histHost) {

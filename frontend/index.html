@@ -230,18 +230,44 @@
 
         <section class="panel" id="panel-puzzle" data-view="puzzle">
           <h2>Puzzle <span class="puzzle-h-sub">— тактические задачи</span></h2>
-          <div id="puzzle-stats-bar" class="puzzle-stats-bar"></div>
-          <div id="puzzle-card" class="puzzle-card"></div>
-          <div id="puzzle-actions" class="puzzle-actions"></div>
-          <div id="puzzle-history" class="puzzle-history"></div>
+          <div role="tablist" class="cc-tab-group-component cc-tab-group-secondary panel-subtabs" data-panel-subtabs="puzzle" aria-label="Puzzle">
+            <button class="cc-tab-item-component cc-tab-item-active" id="puzzle-subtab-play" type="button" data-subtab="play" aria-selected="true" aria-controls="puzzle-subpane-play">
+              <span class="cc-tab-item-label cc-text-medium-bold">Играть</span>
+            </button>
+            <button class="cc-tab-item-component" id="puzzle-subtab-leaderboard" type="button" data-subtab="leaderboard" aria-selected="false" aria-controls="puzzle-subpane-leaderboard">
+              <span class="cc-tab-item-label cc-text-medium-bold">Лидерборд</span>
+            </button>
+          </div>
+          <div role="tabpanel" id="puzzle-subpane-play" class="panel-subpane" aria-labelledby="puzzle-subtab-play" data-subpane="play">
+            <div id="puzzle-stats-bar" class="puzzle-stats-bar"></div>
+            <div id="puzzle-card" class="puzzle-card"></div>
+            <div id="puzzle-actions" class="puzzle-actions"></div>
+            <div id="puzzle-history" class="puzzle-history"></div>
+          </div>
+          <div role="tabpanel" id="puzzle-subpane-leaderboard" class="panel-subpane" aria-labelledby="puzzle-subtab-leaderboard" data-subpane="leaderboard" hidden>
+            <div id="global-leaderboard-puzzle"></div>
+          </div>
         </section>
 
         <section class="panel" id="panel-daily" data-view="daily">
           <h2>Daily Puzzle <span class="puzzle-h-sub">— один пазл на сегодня для всех</span></h2>
-          <div id="daily-stats-bar" class="puzzle-stats-bar"></div>
-          <div id="daily-card" class="puzzle-card"></div>
-          <div id="daily-actions" class="puzzle-actions"></div>
-          <div id="daily-leaderboard" class="puzzle-history"></div>
+          <div role="tablist" class="cc-tab-group-component cc-tab-group-secondary panel-subtabs" data-panel-subtabs="daily" aria-label="Daily Puzzle">
+            <button class="cc-tab-item-component cc-tab-item-active" id="daily-subtab-play" type="button" data-subtab="play" aria-selected="true" aria-controls="daily-subpane-play">
+              <span class="cc-tab-item-label cc-text-medium-bold">Играть</span>
+            </button>
+            <button class="cc-tab-item-component" id="daily-subtab-leaderboard" type="button" data-subtab="leaderboard" aria-selected="false" aria-controls="daily-subpane-leaderboard">
+              <span class="cc-tab-item-label cc-text-medium-bold">Лидерборд</span>
+            </button>
+          </div>
+          <div role="tabpanel" id="daily-subpane-play" class="panel-subpane" aria-labelledby="daily-subtab-play" data-subpane="play">
+            <div id="daily-stats-bar" class="puzzle-stats-bar"></div>
+            <div id="daily-card" class="puzzle-card"></div>
+            <div id="daily-actions" class="puzzle-actions"></div>
+            <div id="daily-leaderboard" class="puzzle-history"></div>
+          </div>
+          <div role="tabpanel" id="daily-subpane-leaderboard" class="panel-subpane" aria-labelledby="daily-subtab-leaderboard" data-subpane="leaderboard" hidden>
+            <div id="global-leaderboard-daily"></div>
+          </div>
         </section>
 
         <section class="panel" id="panel-rush" data-view="rush">
@@ -252,7 +278,21 @@
         </section>
 
         <section class="panel" id="panel-onevsone" data-view="onevsone">
-          <div id="onevsone-body" class="onevsone-body"></div>
+          <h2>1 vs 1 <span class="puzzle-h-sub">— легальная партия с живым соперником</span></h2>
+          <div role="tablist" class="cc-tab-group-component cc-tab-group-secondary panel-subtabs" data-panel-subtabs="onevsone" aria-label="1 vs 1">
+            <button class="cc-tab-item-component cc-tab-item-active" id="onevsone-subtab-play" type="button" data-subtab="play" aria-selected="true" aria-controls="onevsone-subpane-play">
+              <span class="cc-tab-item-label cc-text-medium-bold">Играть</span>
+            </button>
+            <button class="cc-tab-item-component" id="onevsone-subtab-leaderboard" type="button" data-subtab="leaderboard" aria-selected="false" aria-controls="onevsone-subpane-leaderboard">
+              <span class="cc-tab-item-label cc-text-medium-bold">Лидерборд</span>
+            </button>
+          </div>
+          <div role="tabpanel" id="onevsone-subpane-play" class="panel-subpane" aria-labelledby="onevsone-subtab-play" data-subpane="play">
+            <div id="onevsone-body" class="onevsone-body"></div>
+          </div>
+          <div role="tabpanel" id="onevsone-subpane-leaderboard" class="panel-subpane" aria-labelledby="onevsone-subtab-leaderboard" data-subpane="leaderboard" hidden>
+            <div id="global-leaderboard-onevsone"></div>
+          </div>
         </section>
 
         <section class="panel" id="panel-battle" data-view="battle">

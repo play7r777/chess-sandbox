@@ -139,43 +139,50 @@ body.view-main     main [data-view="puzzle"],
 body.view-main     main [data-view="daily"],
 body.view-main     main [data-view="rush"],
 body.view-main     main [data-view="battle"],
-body.view-main     main [data-view="opening"] { display: none !important; }
+body.view-main     main [data-view="opening"],
+body.view-main     main [data-view="onevsone"] { display: none !important; }
 body.view-analysis main [data-view="main"],
 body.view-analysis main [data-view="puzzle"],
 body.view-analysis main [data-view="daily"],
 body.view-analysis main [data-view="rush"],
 body.view-analysis main [data-view="battle"],
-body.view-analysis main [data-view="opening"] { display: none !important; }
+body.view-analysis main [data-view="opening"],
+body.view-analysis main [data-view="onevsone"] { display: none !important; }
 body.view-puzzle   main [data-view="main"],
 body.view-puzzle   main [data-view="analysis"],
 body.view-puzzle   main [data-view="daily"],
 body.view-puzzle   main [data-view="rush"],
 body.view-puzzle   main [data-view="battle"],
-body.view-puzzle   main [data-view="opening"] { display: none !important; }
+body.view-puzzle   main [data-view="opening"],
+body.view-puzzle   main [data-view="onevsone"] { display: none !important; }
 body.view-daily    main [data-view="main"],
 body.view-daily    main [data-view="analysis"],
 body.view-daily    main [data-view="puzzle"],
 body.view-daily    main [data-view="rush"],
 body.view-daily    main [data-view="battle"],
-body.view-daily    main [data-view="opening"] { display: none !important; }
+body.view-daily    main [data-view="opening"],
+body.view-daily    main [data-view="onevsone"] { display: none !important; }
 body.view-rush     main [data-view="main"],
 body.view-rush     main [data-view="analysis"],
 body.view-rush     main [data-view="puzzle"],
 body.view-rush     main [data-view="daily"],
 body.view-rush     main [data-view="battle"],
-body.view-rush     main [data-view="opening"] { display: none !important; }
+body.view-rush     main [data-view="opening"],
+body.view-rush     main [data-view="onevsone"] { display: none !important; }
 body.view-battle   main [data-view="main"],
 body.view-battle   main [data-view="analysis"],
 body.view-battle   main [data-view="puzzle"],
 body.view-battle   main [data-view="daily"],
 body.view-battle   main [data-view="rush"],
-body.view-battle   main [data-view="opening"] { display: none !important; }
+body.view-battle   main [data-view="opening"],
+body.view-battle   main [data-view="onevsone"] { display: none !important; }
 body.view-opening  main [data-view="main"],
 body.view-opening  main [data-view="analysis"],
 body.view-opening  main [data-view="puzzle"],
 body.view-opening  main [data-view="daily"],
 body.view-opening  main [data-view="battle"],
-body.view-opening  main [data-view="rush"] { display: none !important; }
+body.view-opening  main [data-view="rush"],
+body.view-opening  main [data-view="onevsone"] { display: none !important; }
 body.view-onevsone main [data-view="main"],
 body.view-onevsone main [data-view="analysis"],
 body.view-onevsone main [data-view="puzzle"],
@@ -183,10 +190,6 @@ body.view-onevsone main [data-view="daily"],
 body.view-onevsone main [data-view="rush"],
 body.view-onevsone main [data-view="battle"],
 body.view-onevsone main [data-view="opening"] { display: none !important; }
-body.view-rush     main [data-view="onevsone"],
-body.view-puzzle   main [data-view="onevsone"],
-body.view-battle   main [data-view="onevsone"],
-body.view-opening  main [data-view="onevsone"] { display: none !important; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
 .mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }
@@ -4518,7 +4521,8 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 
 /* ---- Tab group (Play / Leaderboard) ---- */
-.cc-section.sidebar-component .cc-tab-group-component.cc-tab-group-secondary {
+.cc-section.sidebar-component .cc-tab-group-component.cc-tab-group-secondary,
+.panel-subtabs.cc-tab-group-component.cc-tab-group-secondary {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: 1fr;
@@ -4526,7 +4530,11 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   margin-bottom: 4px;
 }
-.cc-section.sidebar-component .cc-tab-item-component {
+.panel-subtabs.cc-tab-group-component.cc-tab-group-secondary {
+  margin: 4px 0 12px;
+}
+.cc-section.sidebar-component .cc-tab-item-component,
+.panel-subtabs .cc-tab-item-component {
   position: relative;
   background: transparent;
   border: none;
@@ -4540,20 +4548,30 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   justify-content: center;
   gap: 6px;
   transition: color 120ms;
+  font-family: inherit;
 }
-.cc-section.sidebar-component .cc-tab-item-component:hover { color: #f5f2ec; }
-.cc-section.sidebar-component .cc-tab-item-component.cc-tab-item-active {
+.cc-section.sidebar-component .cc-tab-item-component:hover,
+.panel-subtabs .cc-tab-item-component:hover { color: #f5f2ec; }
+.cc-section.sidebar-component .cc-tab-item-component.cc-tab-item-active,
+.panel-subtabs .cc-tab-item-component.cc-tab-item-active {
   color: #f5f2ec;
 }
-.cc-section.sidebar-component .cc-tab-item-component.cc-tab-item-active::after {
+.cc-section.sidebar-component .cc-tab-item-component.cc-tab-item-active::after,
+.panel-subtabs .cc-tab-item-component.cc-tab-item-active::after {
   content: "";
   position: absolute;
   left: 0; right: 0; bottom: -1px;
   height: 2px;
-  background: var(--cc-green-300);
+  background: var(--cc-green-300, #81b64c);
   border-radius: 2px;
 }
-.cc-section.sidebar-component .cc-tab-item-label { line-height: 1; }
+.cc-section.sidebar-component .cc-tab-item-label,
+.panel-subtabs .cc-tab-item-label { line-height: 1; }
+
+/* Per-panel sub-tabpane visibility — hide whichever subpane is
+   inactive without letting the surrounding flex/grid layout leak
+   the leaderboard view in. */
+.panel-subpane[hidden] { display: none !important; }
 
 /* ---- Tab panel + mode card stack ---- */
 .cc-section.sidebar-component .sidebar-start-tabpanel-rush-start {
@@ -4561,6 +4579,13 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   flex-direction: column;
   gap: 10px;
   min-height: 60px;
+}
+/* Class-level `display: flex` above outweighs the UA stylesheet's
+   `[hidden] { display: none }` rule, so without this override an
+   explicit `hidden` attribute on the inactive tabpanel still
+   leaves the leaderboard pane stacked under the Play tab. */
+.cc-section.sidebar-component .sidebar-start-tabpanel-rush-start[hidden] {
+  display: none !important;
 }
 .cc-section.sidebar-component .sidebar-start-content { display: flex; flex-direction: column; gap: 8px; }
 .cc-section.sidebar-component .sidebar-start-cardContainer { display: flex; flex-direction: column; gap: 8px; }
