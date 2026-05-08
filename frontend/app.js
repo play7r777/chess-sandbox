@@ -405,6 +405,38 @@ function escapeHtml(s) {
   })[ch]);
 }
 
+// ----- Avatar rendering -----
+//
+// Avatars used to be a single emoji glyph. Players can now upload a
+// real photo via the profile editor, in which case the persisted
+// `avatar` field becomes a relative URL like `/api/avatars/<cid>.png`.
+// Both shapes flow through the same string field, so every render
+// site routes through this helper to pick the right output.
+
+function _isAvatarImageUrl(s) {
+  if (!s) return false;
+  const t = String(s);
+  return t.startsWith("/api/avatars/")
+      || t.startsWith("http://")
+      || t.startsWith("https://")
+      || t.startsWith("data:image/");
+}
+
+// Returns an HTML string suitable for inlining into a template literal.
+// `extraClass` is appended onto the wrapper (img or span). `fallback`
+// is the glyph drawn for empty / non-URL avatars.
+function avatarHtml(avatar, opts) {
+  const o = opts || {};
+  const extraClass = o.extraClass || "";
+  const fallback = o.fallback || "♟";
+  const sizePx = o.sizePx || null;
+  if (_isAvatarImageUrl(avatar)) {
+    const sizeStyle = sizePx ? ` style="width:${sizePx}px;height:${sizePx}px"` : "";
+    return `<img src="${escapeHtml(avatar)}" alt="" class="avatar-img ${extraClass}"${sizeStyle} referrerpolicy="no-referrer">`;
+  }
+  return `<span class="avatar-glyph ${extraClass}">${escapeHtml(avatar || fallback)}</span>`;
+}
+
 function pieceSvgUrl(piece, overrideSet) {
   // overrideSet lets the spectator render a different player's pieces
   // without touching the local user's settings.
@@ -5414,8 +5446,57 @@ function _renderOnboardingAvatars(selected) {
     btn.addEventListener("click", () => {
       host.querySelectorAll(".onboarding-avatar").forEach((b) => b.classList.remove("is-selected"));
       btn.classList.add("is-selected");
+      // Picking a glyph drops any previously-staged photo.
+      _onboardingPhoto = null;
+      _renderOnboardingPhotoPreview(btn.dataset.avatar || "♟");
     });
   });
+}
+
+// Photo state for the onboarding modal. While the modal is open, we
+// stage the user's choice locally:
+//   • `_onboardingPhoto = { url, file? }` — a custom photo (already
+//     uploaded to /api/avatars/<cid>.png if `url` is set, or pending
+//     upload if `file` is set and `url` is null).
+//   • `_onboardingPhoto = null` — fall back to the selected glyph.
+let _onboardingPhoto = null;
+
+function _renderOnboardingPhotoPreview(glyph) {
+  const host = document.getElementById("onboarding-photo-preview");
+  const clearBtn = document.getElementById("btn-onboarding-photo-clear");
+  if (!host) return;
+  if (_onboardingPhoto && _onboardingPhoto.url) {
+    host.innerHTML = `<img src="${escapeHtml(_onboardingPhoto.url)}" alt="" referrerpolicy="no-referrer">`;
+    if (clearBtn) clearBtn.hidden = false;
+    return;
+  }
+  host.textContent = glyph || "♟";
+  if (clearBtn) clearBtn.hidden = true;
+}
+
+async function _uploadAvatarFile(file) {
+  if (!file) return null;
+  if (!state.user.client_id) state.user.client_id = _uuidv4();
+  const status = document.getElementById("onboarding-photo-status");
+  if (status) status.textContent = "Загружаю…";
+  try {
+    const fd = new FormData();
+    fd.append("file", file, file.name || "avatar");
+    const res = await fetch(`/api/users/avatar?client_id=${encodeURIComponent(state.user.client_id)}`, {
+      method: "POST",
+      body: fd,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (status) status.textContent = "Готово";
+    return data && data.avatar ? data.avatar : null;
+  } catch (e) {
+    if (status) status.textContent = "Ошибка загрузки";
+    return null;
+  }
 }
 
 function showOnboarding() {
@@ -5423,7 +5504,19 @@ function showOnboarding() {
   if (!modal) return;
   const nickInput = document.getElementById("onboarding-nick");
   if (nickInput) nickInput.value = state.user.nickname || "";
-  _renderOnboardingAvatars(state.user.avatar || "♟");
+  // Seed the photo preview from the persisted user state so re-opening
+  // the editor shows the existing custom photo instead of resetting.
+  const cur = state.user.avatar || "♟";
+  if (_isAvatarImageUrl(cur)) {
+    _onboardingPhoto = { url: cur };
+    _renderOnboardingAvatars("♟");
+  } else {
+    _onboardingPhoto = null;
+    _renderOnboardingAvatars(cur);
+  }
+  _renderOnboardingPhotoPreview(_isAvatarImageUrl(cur) ? "" : cur);
+  const status = document.getElementById("onboarding-photo-status");
+  if (status) status.textContent = "";
   modal.hidden = false;
   setTimeout(() => nickInput && nickInput.focus(), 50);
 }
@@ -5438,10 +5531,44 @@ function _selectedOnboardingAvatar() {
   return (sel && sel.dataset.avatar) || "♟";
 }
 
+document.getElementById("btn-onboarding-photo")?.addEventListener("click", () => {
+  document.getElementById("onboarding-photo-input")?.click();
+});
+
+document.getElementById("onboarding-photo-input")?.addEventListener("change", async (e) => {
+  const input = e.currentTarget;
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const url = await _uploadAvatarFile(file);
+  if (url) {
+    _onboardingPhoto = { url };
+    _renderOnboardingPhotoPreview("");
+  }
+  // Reset the input so picking the same file twice in a row still fires.
+  input.value = "";
+});
+
+document.getElementById("btn-onboarding-photo-clear")?.addEventListener("click", async () => {
+  if (!state.user.client_id) {
+    _onboardingPhoto = null;
+    _renderOnboardingPhotoPreview(_selectedOnboardingAvatar() || "♟");
+    return;
+  }
+  try {
+    await fetch(`/api/users/avatar?client_id=${encodeURIComponent(state.user.client_id)}`, { method: "DELETE" });
+  } catch (_) { /* best-effort */ }
+  _onboardingPhoto = null;
+  _renderOnboardingPhotoPreview(_selectedOnboardingAvatar() || "♟");
+});
+
 document.getElementById("btn-onboarding-save")?.addEventListener("click", async () => {
   const nickInput = document.getElementById("onboarding-nick");
   const nickname = (nickInput?.value || "").trim().slice(0, 32) || "Гость";
-  const avatar = _selectedOnboardingAvatar();
+  // The photo path takes precedence over a glyph if the user uploaded
+  // one, otherwise we fall back to the selected emoji.
+  const avatar = (_onboardingPhoto && _onboardingPhoto.url)
+    ? _onboardingPhoto.url
+    : _selectedOnboardingAvatar();
   if (!state.user.client_id) state.user.client_id = _uuidv4();
   state.user.nickname = nickname;
   state.user.avatar = avatar;
@@ -5706,7 +5833,7 @@ async function openProfileModal(clientId) {
   const isSelf = user.client_id === state.user.client_id;
   body.innerHTML = `
     <header class="profile-header">
-      <div class="profile-avatar">${escapeHtml(user.avatar || "♟")}</div>
+      <div class="profile-avatar">${avatarHtml(user.avatar, { extraClass: "profile-avatar-img" })}</div>
       <div class="profile-name">
         <h3>${escapeHtml(user.nickname || "Гость")}${isSelf ? " <span class=\"muted\" style=\"font-size:13px; font-weight:500;\">(вы)</span>" : ""}</h3>
         <div class="muted">Последний раз: ${_formatLastSeen(user.last_seen)}</div>
@@ -5815,7 +5942,7 @@ async function openLeaderboardModal() {
       <tr class="leaderboard-row ${isSelf ? "is-self" : ""}" data-cid="${escapeHtml(u.client_id)}">
         <td class="lb-rank">#${idx + 1}</td>
         <td>
-          <span class="lb-avatar">${escapeHtml(u.avatar || "♟")}</span>
+          <span class="lb-avatar">${avatarHtml(u.avatar)}</span>
           <span class="lb-name">${escapeHtml(u.nickname || "Гость")}${isSelf ? " <span class=\"muted\">(вы)</span>" : ""}</span>
         </td>
         <td class="lb-rating">${u.rating}</td>
@@ -5903,10 +6030,19 @@ function _partyEnsureModal(opts) {
   // switching the view to "battle" (so the panel is visible) — we
   // deliberately don't do it here to keep this helper free of
   // recursive setView calls.
-  const panelBody = document.getElementById("battle-body");
-  if (panelBody) {
-    panelBody.classList.toggle("party-card-results", !!(opts && opts.results));
-    return panelBody;
+  //
+  // Exception: callers that open from outside the Battle tab (e.g.
+  // a "history" row in the profile modal) pass `useModal: true` so
+  // we render into the legacy `#party-modal` overlay instead — the
+  // side-panel is hidden behind another view there and writing to it
+  // would produce a visibly empty modal frame.
+  const useModal = !!(opts && opts.useModal);
+  if (!useModal) {
+    const panelBody = document.getElementById("battle-body");
+    if (panelBody) {
+      panelBody.classList.toggle("party-card-results", !!(opts && opts.results));
+      return panelBody;
+    }
   }
   const m = document.getElementById("party-modal");
   if (m) m.hidden = false;
@@ -6626,7 +6762,7 @@ function renderPartyLobby() {
   const isHost = m.host_id === state.user.client_id;
   const memberRows = (m.members || []).map((mem) => `
     <li class="party-member ${mem.online ? "is-online" : "is-offline"}">
-      <span class="party-avatar">${escapeHtml(mem.avatar || "♟")}</span>
+      <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
       <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
       ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
       ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
@@ -6795,7 +6931,7 @@ function _partyRenderScoreboard() {
   const rows = (state.party.scoreboard || []).map((r, i) => `
     <li class="party-row ${r.client_id === me ? "is-self" : ""}">
       <span class="party-rank">#${i + 1}</span>
-      <span class="party-avatar">${escapeHtml(r.avatar || "♟")}</span>
+      <span class="party-avatar">${avatarHtml(r.avatar)}</span>
       <span class="party-name">${escapeHtml(r.nickname || "Гость")}</span>
       <span class="party-score">${Number(r.score || 0)}</span>
       <span class="party-solved">✔ ${Number(r.solved || 0)}</span>
@@ -6875,7 +7011,7 @@ function _renderPartyResultsHTML(results, meta, opts) {
       <tr class="party-results-row ${isSelf ? "is-self" : ""}">
         <td class="party-rank">#${Number(r.rank || 0)}</td>
         <td class="party-results-player">
-          <span class="party-avatar">${escapeHtml(r.avatar || "♟")}</span>
+          <span class="party-avatar">${avatarHtml(r.avatar)}</span>
           <span class="party-name">${escapeHtml(r.nickname || "Гость")}${isSelf ? " <span class=\"muted\" style=\"font-size:11px;\">(вы)</span>" : ""}</span>
         </td>
         <td class="party-results-num party-score">${Number(r.score || 0)}</td>
@@ -7198,7 +7334,12 @@ function _partyShowResults() {
 // fallback row identifies the actual owner instead of the viewer.
 function openPartyResultDetail(entry, opts) {
   if (!entry || typeof entry !== "object") return;
-  const body = _partyEnsureModal({ results: true });
+  // Always render into the legacy `#party-modal` overlay — this entry
+  // point is fired from the profile modal (or a leaderboard popup), so
+  // the side-panel host (`#battle-body`) is sitting under another view
+  // and writing to it produced a visibly empty modal frame instead of
+  // the table.
+  const body = _partyEnsureModal({ results: true, useModal: true });
   if (!body) return;
   const ownerId = (opts && opts.ownerId) || state.user.client_id;
   const ownerNickname = (opts && opts.ownerNickname) || state.user.nickname || "Гость";
@@ -7692,7 +7833,7 @@ function renderDailyLeaderboard() {
     return;
   }
   const items = rows.slice(0, 20).map((r, i) => {
-    const av = escapeHtml(r.avatar || "♟");
+    const av = avatarHtml(r.avatar);
     const nick = escapeHtml(r.nickname || "Гость");
     const ms = typeof r.solve_ms === "number" ? r.solve_ms : 0;
     const att = typeof r.attempts === "number" ? r.attempts : 0;
@@ -8234,7 +8375,7 @@ function renderRushLeaderboard() {
     body = `<div class="puzzle-empty">Лидерборд пуст. Сыграй первым!</div>`;
   } else {
     body = rows.slice(0, 20).map((r, i) => {
-      const av = escapeHtml(r.avatar || "♟");
+      const av = avatarHtml(r.avatar);
       const nick = escapeHtml(r.nickname || "Гость");
       const score = r.score != null ? r.score : (r.best || 0);
       return `<div class="lb-row">
@@ -9054,7 +9195,7 @@ function _showInvitationToast(inv) {
   card.dataset.invitationId = inv.id;
   card.innerHTML = `
     <div class="toast-header">
-      <span class="toast-avatar">${escapeHtml(inv.host_avatar || "♟")}</span>
+      <span class="toast-avatar">${avatarHtml(inv.host_avatar)}</span>
       <div>
         <div class="toast-title">${escapeHtml(inv.host_nickname || "Гость")} зовёт в пати</div>
         <div class="toast-sub">Код комнаты: ${escapeHtml(inv.party_code)}</div>
@@ -9154,7 +9295,7 @@ async function _renderFriendPicker(partyCode) {
     const recent = (now - Number(u.last_seen || 0)) < 300;
     return `
       <div class="party-friend-row" data-cid="${escapeHtml(u.client_id)}">
-        <span class="toast-avatar">${escapeHtml(u.avatar || "♟")}</span>
+        <span class="toast-avatar">${avatarHtml(u.avatar)}</span>
         <span class="party-friend-name">${escapeHtml(u.nickname || "Гость")}</span>
         <span class="party-friend-meta">${recent ? "<span class=\"party-friend-online\">● онлайн</span>" : ""} ${Number(u.rating || 1500)} elo</span>
         <button type="button" class="party-friend-invite-btn" data-cid="${escapeHtml(u.client_id)}">Пригласить</button>
@@ -9214,7 +9355,7 @@ async function _renderOpenPartiesList() {
     const joinable = p.status === "lobby";
     return `
       <div class="party-open-row" data-code="${escapeHtml(p.code)}">
-        <span class="toast-avatar">${escapeHtml(p.host_avatar || "♟")}</span>
+        <span class="toast-avatar">${avatarHtml(p.host_avatar)}</span>
         <div class="party-open-info">
           <div>${escapeHtml(p.host_nickname || "Гость")} · <span class="muted">${escapeHtml(p.code)}</span></div>
           <div class="muted" style="font-size:11px;">${p.members} игроков${p.spectator_count ? ` · ${p.spectator_count} наблюдателей` : ""}</div>
@@ -9268,7 +9409,7 @@ async function _renderPresenceList() {
     const meta = [puzzleRating, streak].filter(Boolean).join(" · ");
     return `
       <div class="party-open-row" data-cid="${escapeHtml(p.client_id)}">
-        <span class="toast-avatar">${escapeHtml(p.avatar || "♟")}</span>
+        <span class="toast-avatar">${avatarHtml(p.avatar)}</span>
         <div class="party-open-info">
           <div>${escapeHtml(p.nickname || "Гость")} · <span class="muted">${escapeHtml(rating)}</span></div>
           <div class="muted" style="font-size:11px;">${escapeHtml(meta || "решает пазлы")}${p.spectator_count ? ` · ${p.spectator_count} наблюдателей` : ""}</div>
@@ -9625,7 +9766,7 @@ function _spectatorRender() {
         <h3>Игроки</h3>
         ${players.map((p) => `
           <div class="spectator-player-row ${p.client_id === sp.selectedId ? "is-selected" : ""}" data-cid="${escapeHtml(p.client_id)}">
-            <span class="toast-avatar">${escapeHtml(p.avatar || "♟")}</span>
+            <span class="toast-avatar">${avatarHtml(p.avatar)}</span>
             <span class="pname">${escapeHtml(p.nickname || "Гость")}</span>
             <span class="pscore">${Number(p.score || 0)}</span>
           </div>
@@ -9666,13 +9807,13 @@ function _spectatorRenderSingle(p) {
   const isPresence = state.spectator && state.spectator.kind === "presence";
   const metaInner = isPresence
     ? `
-        <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
+        <h3>${escapeHtml(p.nickname || "Гость")} ${avatarHtml(p.avatar, { fallback: "" })}</h3>
         <div class="row">Рейтинг игрока: <b>${Number(p.rating || 0) || "—"}</b></div>
         <div class="row">Текущий пазл: ${p.puzzle_rating ? `<b>${Number(p.puzzle_rating)}</b>` : "—"}</div>
         <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
       `
     : `
-        <h3>${escapeHtml(p.nickname || "Гость")} ${escapeHtml(p.avatar || "")}</h3>
+        <h3>${escapeHtml(p.nickname || "Гость")} ${avatarHtml(p.avatar, { fallback: "" })}</h3>
         <div class="row">Очки: <b>${Number(p.score || 0)}</b></div>
         <div class="row">Решено: ${Number(p.solved || 0)} · ошибок: ${Number(p.failed || 0)} · пропущено: ${Number(p.skipped || 0)}</div>
         <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
@@ -9694,7 +9835,7 @@ function _spectatorRenderGrid(players) {
         return `
           <div class="grid-cell" data-cid="${escapeHtml(p.client_id)}">
             <div class="grid-head">
-              <span>${escapeHtml(p.avatar || "♟")}</span>
+              <span>${avatarHtml(p.avatar)}</span>
               <span class="gname">${escapeHtml(p.nickname || "Гость")}</span>
               <span class="gscore">${Number(p.score || 0)}</span>
             </div>

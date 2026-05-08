@@ -4,8 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
-from typing import Any
+from io import BytesIO
+from pathlib import Path
+from typing import Annotated, Any
 
 import chess
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
@@ -74,7 +77,10 @@ class GameAnalyseRequest(BaseModel):
 class UserUpsertRequest(BaseModel):
     client_id: str = Field(..., min_length=4, max_length=64)
     nickname: str = Field(default="Гость", max_length=32)
-    avatar: str = Field(default="♟", max_length=8)
+    # 256 chars covers both single-glyph emoji avatars and the longer
+    # ``/api/avatars/<cid>.png?v=<ts>`` URLs produced by the upload
+    # endpoint after a player chooses a custom photo.
+    avatar: str = Field(default="♟", max_length=256)
 
 
 class HeartbeatRequest(BaseModel):
@@ -514,6 +520,98 @@ def users_upsert(req: UserUpsertRequest) -> dict[str, Any]:
         nickname=req.nickname,
         avatar=req.avatar,
     )
+
+
+# ---- Avatar upload / serve ----
+#
+# Custom photos are stored on disk under ``data_dir/avatars/<cid>.png``.
+# We always re-encode through Pillow into PNG so:
+#   • untrusted SVG/animated content can't be hand-rolled past us,
+#   • output is bounded in pixels (max 256×256) and uniformly sized.
+# The path returned in the user row contains a cache-busting query
+# string so the client always re-fetches after an upload.
+
+_AVATAR_DIR = settings.data_dir / "avatars"
+_AVATAR_MAX_BYTES = 4 * 1024 * 1024  # 4 MB hard cap on the upload itself
+_AVATAR_MAX_PX = 256
+
+
+def _avatar_path(client_id: str) -> Path:
+    safe = "".join(ch for ch in client_id if ch.isalnum() or ch in ("-", "_"))[:64]
+    if not safe:
+        raise HTTPException(status_code=400, detail="Bad client_id.")
+    return _AVATAR_DIR / f"{safe}.png"
+
+
+@app.post("/api/users/avatar")
+async def users_avatar_upload(
+    file: Annotated[UploadFile, File(...)],
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """Accept a multipart image, normalise it to a 256×256 PNG, persist."""
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty upload.")
+    if len(raw) > _AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 4MB).")
+    try:
+        from PIL import Image, UnidentifiedImageError
+        from PIL.Image import Image as PILImage
+
+        try:
+            im: PILImage = Image.open(BytesIO(raw))
+            im.load()
+        except UnidentifiedImageError as exc:
+            raise HTTPException(status_code=415, detail="Unsupported image type.") from exc
+        # Normalise mode and centre-crop to a square.
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGBA")
+        side = min(im.width, im.height)
+        if side <= 0:
+            raise HTTPException(status_code=400, detail="Image has zero dimension.")
+        left = (im.width - side) // 2
+        top = (im.height - side) // 2
+        im = im.crop((left, top, left + side, top + side))
+        if im.width > _AVATAR_MAX_PX:
+            im = im.resize(
+                (_AVATAR_MAX_PX, _AVATAR_MAX_PX),
+                Image.Resampling.LANCZOS,
+            )
+        out = BytesIO()
+        im.save(out, format="PNG", optimize=True)
+        encoded = out.getvalue()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("avatar upload: failed to decode/encode")
+        raise HTTPException(status_code=400, detail="Bad image.") from exc
+
+    target = _avatar_path(client_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(encoded)
+
+    url = f"/api/avatars/{target.name}?v={int(time.time())}"
+    updated = users_db.set_avatar(client_id, url)
+    if updated is None:
+        # User row didn't exist yet — surface a sensible reply with the
+        # URL so the client can post a follow-up upsert with this avatar
+        # value once the row gets created.
+        return {"avatar": url, "user": None}
+    return {"avatar": url, "user": updated}
+
+
+@app.delete("/api/users/avatar")
+def users_avatar_delete(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """Remove the custom photo and revert the avatar to a default glyph."""
+    target = _avatar_path(client_id)
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
+        pass
+    updated = users_db.set_avatar(client_id, "♟")
+    return {"avatar": "♟", "user": updated}
 
 
 @app.post("/api/users/heartbeat")
@@ -1230,6 +1328,16 @@ async def _presence_ws_spectator(
         logger.warning("presence spectator ws error: %s", exc)
     finally:
         await presence_room.detach_spectator(target, spectator_id)
+
+
+# ---- Static avatars ----
+#
+# Mount the on-disk avatars directory at ``/api/avatars``. Done before
+# the SPA fallback so requests like ``/api/avatars/<cid>.png`` aren't
+# captured by the catch-all ``/{path:path}`` handler at the bottom.
+
+_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/api/avatars", StaticFiles(directory=_AVATAR_DIR), name="avatars")
 
 
 # ---- Static frontend ----

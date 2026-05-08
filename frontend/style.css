@@ -1905,6 +1905,53 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 .onboarding-actions { margin-top: 18px; display: flex; justify-content: flex-end; }
 
+/* Custom-photo block above the glyph grid */
+.onboarding-photo-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 12px;
+  background: #11161f;
+  border: 1px solid #2c3950;
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+.onboarding-photo-preview {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #2a3a55, #18222f);
+  border: 1px solid #324059;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 30px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.onboarding-photo-preview img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.onboarding-photo-actions {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px;
+}
+.onboarding-photo-status { font-size: 11px; }
+.onboarding-photo-hint { margin: 0 0 6px; font-size: 11px; }
+
+/* Generic avatar image rendering. Used wherever the `avatar` field
+   resolves to an `<img>` instead of a glyph (uploaded photo). */
+.avatar-img {
+  display: inline-block;
+  width: 1em; height: 1em;
+  vertical-align: middle;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #11161f;
+}
+.avatar-glyph {
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  line-height: 1;
+}
+
 /* ---------- Profile ---------- */
 .profile-body { display: flex; flex-direction: column; gap: 14px; }
 .profile-header {
@@ -1922,6 +1969,14 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border: 1px solid #324059;
   display: flex; align-items: center; justify-content: center;
   font-size: 32px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+/* Override the 1em sizing for the round profile slot — we want the
+   uploaded photo to fill the entire 64×64 frame, not just one em. */
+.profile-avatar .avatar-img {
+  width: 100%; height: 100%;
+  border-radius: 50%;
 }
 .profile-name h3 {
   margin: 0 0 2px;

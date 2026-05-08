@@ -401,7 +401,17 @@
           <input id="onboarding-nick" type="text" maxlength="32" placeholder="Например, Tactician42" />
         </label>
         <div class="onboarding-field">
-          <span>Аватар</span>
+          <span>Своё фото</span>
+          <div class="onboarding-photo-row">
+            <div id="onboarding-photo-preview" class="onboarding-photo-preview" aria-hidden="true">♟</div>
+            <div class="onboarding-photo-actions">
+              <button id="btn-onboarding-photo" type="button" class="puzzle-secondary">Загрузить фото…</button>
+              <button id="btn-onboarding-photo-clear" type="button" class="puzzle-secondary" hidden>Сбросить</button>
+              <span id="onboarding-photo-status" class="muted onboarding-photo-status"></span>
+            </div>
+            <input id="onboarding-photo-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+          </div>
+          <p class="muted onboarding-photo-hint">или выбери глиф ниже:</p>
           <div id="onboarding-avatars" class="onboarding-avatars"></div>
         </div>
         <div class="onboarding-actions">

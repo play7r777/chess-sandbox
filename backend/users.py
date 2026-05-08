@@ -192,6 +192,24 @@ def _ensure_extra_fields(u: dict[str, Any]) -> None:
         u["opening_trainer"] = {}
 
 
+def _normalize_avatar(avatar: str) -> str:
+    """Trim and bound the avatar string.
+
+    Two shapes are accepted:
+      • a short glyph (emoji / single chess unicode), capped at 8 chars
+      • a relative URL (e.g. ``/api/avatars/<cid>.png?v=...``) pointing
+        at an uploaded image — capped at 256 chars so users.json can't
+        be bloated with arbitrary inline base64.
+    Anything else falls back to the ♟ glyph.
+    """
+    s = (avatar or "").strip()
+    if not s:
+        return "♟"
+    if s.startswith("/api/avatars/"):
+        return s[:256]
+    return s[:8]
+
+
 def upsert_user(
     client_id: str,
     nickname: str,
@@ -199,7 +217,7 @@ def upsert_user(
 ) -> dict[str, Any]:
     """Create the user row on first use, otherwise patch nickname/avatar."""
     nickname = (nickname or "").strip()[:32] or "Гость"
-    avatar = (avatar or "").strip()[:8] or "♟"
+    avatar = _normalize_avatar(avatar)
     with _LOCK:
         data = _load()
         users = data["users"]
@@ -211,6 +229,20 @@ def upsert_user(
             u["nickname"] = nickname
             u["avatar"] = avatar
             _ensure_extra_fields(u)
+        u["last_seen"] = int(time.time())
+        _save(data)
+        return dict(u)
+
+
+def set_avatar(client_id: str, avatar: str) -> dict[str, Any] | None:
+    """Update only the avatar field. Returns the updated row or None."""
+    avatar = _normalize_avatar(avatar)
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        u["avatar"] = avatar
         u["last_seen"] = int(time.time())
         _save(data)
         return dict(u)
@@ -309,6 +341,10 @@ def record_puzzle_attempt(
                 s["current_streak"] = int(s.get("current_streak") or 0) + 1
                 if s["current_streak"] > int(s.get("best_streak") or 0):
                     s["best_streak"] = s["current_streak"]
+            else:
+                # Hint-assisted solve breaks the streak — pure clean
+                # solves only.
+                s["current_streak"] = 0
         elif outcome == "failed":
             s["wrong"] = int(s.get("wrong") or 0) + 1
             s["current_streak"] = 0
