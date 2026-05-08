@@ -8978,6 +8978,22 @@ async function _refreshRushLeaderboard() {
 const CC_RUSH_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M13.5 3 6 13h5l-1.5 8L17 11h-5l1.5-8z" fill="#f7c66c"/></svg>`;
 const CC_BATTLE_SVG = BATTLE_SWORDS_SVG.replace('width="18" height="18"', 'width="22" height="22"');
 const CC_TROPHY_SVG = `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M7 4h10v2h3v3a4 4 0 0 1-4 4h-.4A5 5 0 0 1 13 16v2h3v3H8v-3h3v-2a5 5 0 0 1-2.6-3H8a4 4 0 0 1-4-4V6h3V4z" fill="#f7c66c"/></svg>`;
+// Glyphs lifted directly from chess.com (data-glyph paths) so the
+// chess.com-style Rush picker uses the exact same icon silhouettes
+// (back-arrow / blitz lightning / rapid stopwatch / survival pinwheel).
+const CC_GLYPH_BACK = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.07,10 c1.6,0,1.93,0.33,1.93,1.93 l0,0.13 c0,1.6,-0.33,1.93,-1.93,1.93 l-15.57,0 l0,-4 Z M11.93,21.13 l-0.07,0.07 c-1.13,1.13,-1.6,1.13,-2.73,0 l-6.4,-6.37 c-1.73,-1.77,-1.73,-3.9,0,-5.67 l6.4,-6.37 c1.13,-1.13,1.6,-1.13,2.73,0 l0.07,0.07 c1.13,1.13,1.13,1.6,0,2.73 l-6.37,6.4 l6.37,6.4 c1.13,1.13,1.13,1.6,0,2.73 Z M11.93,21.13" fill="currentColor"/></svg>`;
+const CC_GLYPH_BLITZ = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.77,15 c-1.03,0,-1.37,-0.4,-1.2,-1.4 l1.53,-10.2 c0.17,-1,0.63,-1.4,1.67,-1.4 l5.8,0 c1.03,0,1.33,0.4,1.07,1.37 l-3.23,11.63 Z M18.83,9 c1.03,0,1.2,0.33,0.57,1.13 l-9.67,12.73 c-1.23,1.63,-1.6,1.47,-1.27,-0.57 l2.2,-13.3 Z M18.83,9" fill="currentColor"/></svg>`;
+const CC_GLYPH_RAPID = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.97,14.63 c-0.9,0,-1.87,-0.73,-1.5,-2.23 l1.03,-4.4 l1,0 l1.03,4.37 c0.37,1.53,-0.63,2.27,-1.57,2.27 Z M12,22.5 c-5.23,0,-9.5,-4.27,-9.5,-9.5 c0,-5.23,4.27,-9.5,9.5,-9.5 c5.23,0,9.5,4.27,9.5,9.5 c0,5.23,-4.27,9.5,-9.5,9.5 Z M12,19.5 c4,0,6.5,-2.5,6.5,-6.5 c0,-4,-2.5,-6.5,-6.5,-6.5 c-4,0,-6.5,2.5,-6.5,6.5 c0,4,2.5,6.5,6.5,6.5 Z M10.5,5.23 l0,-4.23 l3,0 l0,4.23 Z M15.5,2 l-7,0 c0,-1.7,0.43,-2,3.5,-2 c3.07,0,3.5,0.3,3.5,2 Z M15.5,2" fill="currentColor"/></svg>`;
+const CC_GLYPH_SURVIVAL = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M1.97,16.17 c1.2,-1.2,3.13,-0.1,3.87,-0.83 l1.97,-1.97 l2.83,2.83 l-1.97,1.97 c-0.77,0.73,0.37,2.67,-0.83,3.9 c-0.7,0.67,-1.8,0.7,-2.57,-0.07 c-0.73,-0.73,-0.67,-1.87,-0.3,-2.97 c-1.1,0.33,-2.23,0.43,-2.93,-0.27 c-0.73,-0.73,-0.77,-1.9,-0.07,-2.6 Z M13.38,7.78 l1.95,-1.95 c0.77,-0.73,-0.37,-2.67,0.83,-3.9 c0.7,-0.67,1.8,-0.7,2.57,0.07 c0.73,0.73,0.67,1.87,0.3,2.97 c1.1,-0.33,2.23,-0.43,2.93,0.27 c0.73,0.73,0.77,1.9,0.07,2.6 c-1.2,1.2,-3.13,0.1,-3.87,0.83 l-1.95,1.95 Z M13.4,10.57 l4.77,4.77 c0.73,0.77,2.67,-0.37,3.9,0.83 c0.67,0.7,0.7,1.8,-0.07,2.57 c-0.73,0.73,-1.87,0.67,-2.97,0.3 c0.33,1.1,0.43,2.23,-0.27,2.93 c-0.73,0.73,-1.9,0.77,-2.6,0.07 c-1.2,-1.2,-0.1,-3.13,-0.83,-3.87 l-4.77,-4.77 Z M10.6,13.43 l-4.77,-4.77 c-0.73,-0.77,-2.67,0.37,-3.9,-0.83 c-0.67,-0.7,-0.7,-1.8,0.07,-2.57 c0.73,-0.73,1.87,-0.67,2.97,-0.3 c-0.33,-1.1,-0.43,-2.23,0.27,-2.93 c0.73,-0.73,1.9,-0.77,2.6,-0.07 c1.2,1.2,0.1,3.13,0.83,3.87 l4.77,4.77 Z M10.6,13.43" fill="currentColor"/></svg>`;
+// Color-icon approximations of chess.com's puzzle-rush.svg (header
+// feature icon), calendar-blank.svg (Best Today stat), and
+// rating-stats.svg (Top Score stat). chess.com hot-links those from
+// /bundles/web/images/color-icons/ which we can't reuse — so these
+// inline SVGs reproduce the silhouette + colour palette that ships
+// with their design system.
+const CC_FEATURE_PUZZLE_RUSH = `<svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="ccfprBg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#ffd34d"/><stop offset="1" stop-color="#f59c2a"/></linearGradient></defs><rect x="2" y="2" width="36" height="36" rx="9" fill="url(#ccfprBg)"/><path d="M22.5 5.5 12.5 19h7l-2 12 11.5-15h-7l2.5-10.5z" fill="#fff" stroke="#7a4a06" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+const CC_STAT_CALENDAR = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2.5" fill="#e85a4f"/><rect x="3" y="5" width="18" height="5" fill="#c2453b"/><rect x="6.2" y="2.6" width="2.2" height="5" rx="1.1" fill="#3b3b3b"/><rect x="15.6" y="2.6" width="2.2" height="5" rx="1.1" fill="#3b3b3b"/><rect x="6" y="12" width="3" height="2.4" rx="0.6" fill="#fff"/><rect x="10.5" y="12" width="3" height="2.4" rx="0.6" fill="#fff"/><rect x="15" y="12" width="3" height="2.4" rx="0.6" fill="#fff"/><rect x="6" y="15.5" width="3" height="2.4" rx="0.6" fill="#fff"/><rect x="10.5" y="15.5" width="3" height="2.4" rx="0.6" fill="#fff"/></svg>`;
+const CC_STAT_RATING = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="13" width="4" height="8" rx="1" fill="#7fb6e6"/><rect x="10" y="9" width="4" height="12" rx="1" fill="#3994d6"/><rect x="17" y="5" width="4" height="16" rx="1" fill="#1f6fb0"/><path d="M3 8 11 3l5 3 5-4" stroke="#f0ad4e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><circle cx="21" cy="3" r="1.5" fill="#f0ad4e"/></svg>`;
 
 // Holds the in-memory selection for the rush picker so the sidebar
 // remembers which mode the user clicked between re-renders. Defaults
@@ -9013,69 +9029,100 @@ function _renderRushSidebar(card, actions) {
     state.rush.bestEver["300"] || 0,
     state.rush.bestEver["survival"] || 0,
   );
+  // Three pickable modes — ids match the keys used by `startRush()`
+  // and the bestEver / bestToday score buckets. Labels mirror the
+  // chess.com Puzzle Rush card (3 min / 5 min / Survival) so the
+  // markup matches the source HTML structurally.
   const modes = [
-    { id: "180", icon: "⏱", name: "3 минуты", sub: "Реши максимум за 3 минуты", bestKey: "180" },
-    { id: "300", icon: "⏱", name: "5 минут", sub: "Реши максимум за 5 минут", bestKey: "300" },
-    { id: "survival", icon: "❤", name: "Survival", sub: "Без таймера, до 3 ошибок", bestKey: "survival" },
+    { id: "180",      label: "3 min",    glyph: CC_GLYPH_BLITZ,    cy: "select-three_minutes" },
+    { id: "300",      label: "5 min",    glyph: CC_GLYPH_RAPID,    cy: "select-five_minutes" },
+    { id: "survival", label: "Survival", glyph: CC_GLYPH_SURVIVAL, cy: "select-three_strikes" },
   ];
-  const modeRows = modes.map((m) => {
-    const active = m.id === sel ? " is-active" : "";
-    const best = state.rush.bestEver[m.bestKey] || 0;
+  const modeButtons = modes.map((m) => {
+    const selected = m.id === sel ? " cc-selected-border" : "";
     return `
-      <button type="button" class="cc-mode-row${active}" data-mode="${m.id}">
-        <span class="cc-mode-icon">${m.icon}</span>
-        <span class="cc-mode-text">
-          <span class="cc-mode-name">${escapeHtml(m.name)}</span>
-          <span class="cc-mode-sub">${escapeHtml(m.sub)}</span>
-        </span>
-        <span class="cc-mode-best" title="Лучший результат за всё время">${best > 0 ? `★ ${best}` : ""}</span>
+      <button class="cc-button-component cc-button-secondary cc-button-x-large cc-bg-secondary cc-button-full${selected}" type="button" data-cy="${m.cy}" data-mode="${m.id}">
+        <span aria-hidden="true" class="cc-icon-glyph cc-icon-size-24 cc-button-icon">${m.glyph}</span>
+        <span class="cc-button-one-line">${escapeHtml(m.label)}</span>
       </button>
     `;
   }).join("");
+  // chess.com's Puzzle Rush sidebar:
+  //   <section.cc-section.sidebar-component>
+  //     <div.cc-sidebar-header-component.cc-sidebar-header-primary>
+  //       start (back-arrow) | center (puzzle-rush feature icon + h1) | end
+  //     <div.stats-overview-component>
+  //       Best Today + Top Score (each: icon, value, label)
+  //     <div.cc-tab-group-component.cc-tab-group-secondary.sidebar-start-tabs>
+  //       Play / Leaderboard
+  //     <div.sidebar-start-tabpanel-rush-start>
+  //       <div.sidebar-start-content>
+  //         <div.sidebar-start-cardContainer>3 mode buttons (cc-button-secondary
+  //           cc-button-x-large cc-button-full · cc-selected-border on the chosen one)
+  //       <div>Big primary Play button (cc-button-primary cc-button-xx-large)
+  // We keep #rush-card and #rush-actions as the two host elements so
+  // the rest of the panel (history, leaderboard) flows beneath the
+  // sidebar in the natural document order.
   card.innerHTML = `
-    <div class="cc-sidebar">
-      <div class="cc-sidebar-head">
-        <span class="cc-sidebar-glyph">${CC_RUSH_SVG}</span>
-        <div class="cc-sidebar-title">Puzzle Rush</div>
-      </div>
-      <div class="cc-sidebar-stats">
-        <div class="cc-sidebar-stat">
-          <span class="cc-stat-label">Best Today</span>
-          <span class="cc-stat-value">${bestToday}</span>
+    <section class="cc-section sidebar-component">
+      <div class="cc-sidebar-header-component cc-sidebar-header-primary">
+        <div class="cc-sidebar-header-header-start">
+          <button type="button" aria-label="Назад" class="cc-sidebar-header-icon-start" data-cy="sidebar-header-start-button" data-cc-back>
+            <span aria-hidden="true" class="cc-icon-glyph cc-icon-size-20">${CC_GLYPH_BACK}</span>
+          </button>
         </div>
-        <div class="cc-sidebar-stat">
-          <span class="cc-stat-label">Top Score</span>
-          <span class="cc-stat-value">${bestEverAll}</span>
+        <div class="cc-sidebar-header-header-center">
+          <span aria-hidden="true" class="cc-icon-img cc-icon-size-40 cc-sidebar-header-feature-icon">${CC_FEATURE_PUZZLE_RUSH}</span>
+          <h1 class="cc-sidebar-header-title cc-sidebar-header-primary">Puzzle Rush</h1>
         </div>
       </div>
-      <div class="cc-sidebar-tabs" role="tablist">
-        <button type="button" class="cc-tab ${tab === "play" ? "is-active" : ""}" data-cc-tab="play">Играть</button>
-        <button type="button" class="cc-tab ${tab === "leaderboard" ? "is-active" : ""}" data-cc-tab="leaderboard">Лидерборд</button>
+      <div class="stats-overview-component">
+        <div class="stats-overview-stat">
+          <span aria-hidden="true" class="cc-icon-img cc-icon-size-24 stats-overview-icon">${CC_STAT_CALENDAR}</span>
+          <span class="stats-overview-value cc-heading-x-small-bold cc-monospace">${bestToday}</span>
+          <span class="stats-overview-label cc-text-label">Best Today</span>
+        </div>
+        <div class="stats-overview-stat">
+          <span aria-hidden="true" class="cc-icon-img cc-icon-size-24 stats-overview-icon">${CC_STAT_RATING}</span>
+          <span class="stats-overview-value cc-heading-x-small-bold cc-monospace">${bestEverAll}</span>
+          <span class="stats-overview-label cc-text-label">Top Score</span>
+        </div>
       </div>
-      <div class="cc-sidebar-body" data-cc-tab-pane="play" ${tab === "play" ? "" : "hidden"}>
-        <div class="cc-sidebar-section-title">Выбери режим</div>
-        <div class="cc-mode-list">${modeRows}</div>
+      <div role="tablist" class="cc-tab-group-component cc-tab-group-secondary sidebar-start-tabs">
+        <button aria-controls="rush-tabpanel-play" aria-selected="${tab === "play"}" class="cc-tab-item-component${tab === "play" ? " cc-tab-item-active" : ""}" id="rush-tab-play" type="button" data-cy="section-tab-Play" data-cc-tab="play">
+          <span class="cc-tab-item-label cc-text-medium-bold">Играть</span>
+        </button>
+        <button aria-controls="rush-tabpanel-leaderboard" aria-selected="${tab === "leaderboard"}" class="cc-tab-item-component${tab === "leaderboard" ? " cc-tab-item-active" : ""}" id="rush-tab-leaderboard" type="button" data-cy="section-tab-Leaderboard" data-cc-tab="leaderboard">
+          <span class="cc-tab-item-label cc-text-medium-bold">Лидерборд</span>
+        </button>
       </div>
-      <div class="cc-sidebar-body" data-cc-tab-pane="leaderboard" ${tab === "leaderboard" ? "" : "hidden"}>
-        <div class="cc-sidebar-section-title">Лидерборд <span class="muted" style="font-size:11px;">ниже на странице</span></div>
-        <p class="muted" style="margin: 0 0 4px;">Полная таблица рендерится прямо под этим блоком. Переключай режим / период там же.</p>
+      <div role="tabpanel" aria-labelledby="rush-tab-play" id="rush-tabpanel-play" class="sidebar-start-tabpanel-rush-start" data-cc-tab-pane="play"${tab === "play" ? "" : " hidden"}>
+        <div class="sidebar-start-content">
+          <div class="sidebar-start-cardContainer">
+            ${modeButtons}
+          </div>
+        </div>
       </div>
-    </div>
+      <div role="tabpanel" aria-labelledby="rush-tab-leaderboard" id="rush-tabpanel-leaderboard" class="sidebar-start-tabpanel-rush-start" data-cc-tab-pane="leaderboard"${tab === "leaderboard" ? "" : " hidden"}>
+        <p class="cc-rush-leaderboard-hint">Полная таблица рендерится ниже на странице. Переключай режим / период там же.</p>
+      </div>
+    </section>
   `;
-  // The big Play button lives in #rush-actions so the rest of the
-  // page (history, leaderboard) sits below it in the natural flow.
   actions.innerHTML = `
-    <div class="cc-sidebar-cta" style="width:100%;">
-      <button type="button" id="btn-cc-rush-play" class="cc-play-btn">▶ Играть</button>
+    <div class="cc-rush-cta">
+      <button class="cc-button-component cc-button-primary cc-button-xx-large cc-bg-primary cc-button-full" type="button" data-cy="startSession" id="btn-cc-rush-play">
+        <span>Играть</span>
+      </button>
     </div>
   `;
-  // Mode row clicks update the selection (no auto-start — keep parity
-  // with chess.com's UI where the Play button starts the chosen mode).
-  card.querySelectorAll(".cc-mode-row").forEach((b) => {
+  // Mode-button click — update the selection (no auto-start; the big
+  // primary Play button below starts the chosen mode, matching the
+  // chess.com flow).
+  card.querySelectorAll("[data-mode]").forEach((b) => {
     b.addEventListener("click", () => {
       _rushSidebarState.selectedMode = b.dataset.mode;
-      card.querySelectorAll(".cc-mode-row").forEach((x) => {
-        x.classList.toggle("is-active", x.dataset.mode === b.dataset.mode);
+      card.querySelectorAll("[data-mode]").forEach((x) => {
+        x.classList.toggle("cc-selected-border", x.dataset.mode === b.dataset.mode);
       });
     });
   });
@@ -9083,13 +9130,24 @@ function _renderRushSidebar(card, actions) {
     t.addEventListener("click", () => {
       _rushSidebarState.tab = t.dataset.ccTab;
       card.querySelectorAll("[data-cc-tab]").forEach((x) => {
-        x.classList.toggle("is-active", x.dataset.ccTab === _rushSidebarState.tab);
+        const isActive = x.dataset.ccTab === _rushSidebarState.tab;
+        x.classList.toggle("cc-tab-item-active", isActive);
+        x.setAttribute("aria-selected", String(isActive));
       });
       card.querySelectorAll("[data-cc-tab-pane]").forEach((p) => {
         p.hidden = p.dataset.ccTabPane !== _rushSidebarState.tab;
       });
     });
   });
+  // Back-arrow — chess.com uses it to go back to Puzzles. In our SPA
+  // the equivalent is returning to the main analysis tab. Falls back
+  // to a no-op if setView isn't available for some reason.
+  const back = card.querySelector("[data-cc-back]");
+  if (back) {
+    back.addEventListener("click", () => {
+      try { setView("main"); } catch (_) { /* ignore */ }
+    });
+  }
   const playBtn = actions.querySelector("#btn-cc-rush-play");
   if (playBtn) {
     playBtn.addEventListener("click", () => {

@@ -4338,7 +4338,329 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .cc-code-fallback summary::before { content: "▸ "; color: inherit; }
 .cc-code-fallback[open] summary::before { content: "▾ "; }
 
+/* =============================================================
+ * Chess.com Puzzle Rush picker — 1:1 reproduction of the markup
+ * shipped at chess.com/puzzles/rush. Class names mirror the source
+ * (cc-section, sidebar-component, cc-sidebar-header-*, stats-overview-*,
+ * cc-tab-group-*, cc-tab-item-*, sidebar-start-*, cc-button-*,
+ * cc-bg-primary/secondary, cc-selected-border, cc-icon-*, …) so the
+ * structure is recognisable side-by-side with the chess.com DOM.
+ *
+ * Colours use chess.com's actual brand tokens lifted from their
+ * stylesheet:
+ *   --cc-green-200: #b2e068   (top inset highlight)
+ *   --cc-green-300: #81b64c   (gradient start, selected outline)
+ *   --cc-green-400: #5d9948   (gradient end)
+ *   --cc-green-500: #45753c   (bottom inset shadow)
+ *   --cc-gray-700:  #4b4847   (card background, dark mode)
+ *   --cc-gray-800:  #312e2b   (panel background, dark mode)
+ *   --cc-gray-900:  #262421   (deepest dark)
+ *
+ * The proprietary chess.com fonts (Chess Sans / Montserrat) are
+ * approximated with the system stack already used by the app — the
+ * sidebar inherits whatever the body font is.
+ * ============================================================= */
+.cc-section.sidebar-component {
+  --cc-green-200: #b2e068;
+  --cc-green-300: #81b64c;
+  --cc-green-400: #5d9948;
+  --cc-green-500: #45753c;
+  --cc-gray-700: #4b4847;
+  --cc-gray-800: #312e2b;
+  --cc-gray-900: #262421;
+  background: linear-gradient(180deg, #312e2b 0%, #262421 100%);
+  border: 1px solid #1d1b1a;
+  border-radius: 12px;
+  color: #d6d2cb;
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+  margin-bottom: 14px;
+}
+
+/* ---- Header (back · feature icon + title · spacer) ---- */
+.cc-section.sidebar-component .cc-sidebar-header-component {
+  display: grid;
+  grid-template-columns: 32px 1fr 32px;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  position: relative;
+}
+.cc-section.sidebar-component .cc-sidebar-header-header-start {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+.cc-section.sidebar-component .cc-sidebar-header-header-center {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cc-section.sidebar-component .cc-sidebar-header-icon-start {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  color: #c8c5be;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.cc-section.sidebar-component .cc-sidebar-header-icon-start:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+.cc-section.sidebar-component .cc-sidebar-header-feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+.cc-section.sidebar-component .cc-sidebar-header-feature-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.cc-section.sidebar-component .cc-sidebar-header-title {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.005em;
+  color: #f5f2ec;
+  margin: 0;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Generic icon-size helpers (chess.com cc-icon-size-* utilities) ---- */
+.cc-section.sidebar-component .cc-icon-glyph,
+.cc-section.sidebar-component .cc-icon-img {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+.cc-section.sidebar-component .cc-icon-size-20 svg,
+.cc-section.sidebar-component .cc-icon-size-20 { width: 20px; height: 20px; }
+.cc-section.sidebar-component .cc-icon-size-24 svg,
+.cc-section.sidebar-component .cc-icon-size-24 { width: 24px; height: 24px; }
+.cc-section.sidebar-component .cc-icon-size-40 svg,
+.cc-section.sidebar-component .cc-icon-size-40 { width: 40px; height: 40px; }
+.cc-section.sidebar-component .cc-icon-size-20 svg { display: block; }
+.cc-section.sidebar-component .cc-icon-size-24 svg { display: block; }
+.cc-section.sidebar-component .cc-icon-size-40 svg { display: block; }
+
+/* ---- Stats overview (Best Today + Top Score) ---- */
+.cc-section.sidebar-component .stats-overview-component {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.cc-section.sidebar-component .stats-overview-stat {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 10px;
+  padding: 12px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cc-section.sidebar-component .stats-overview-icon {
+  grid-row: 1 / span 2;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.cc-section.sidebar-component .stats-overview-icon svg { width: 100%; height: 100%; display: block; }
+.cc-section.sidebar-component .stats-overview-value {
+  grid-column: 2;
+  font-size: 18px;
+  font-weight: 800;
+  color: #f5f2ec;
+  letter-spacing: -0.005em;
+  line-height: 1.1;
+}
+.cc-section.sidebar-component .cc-monospace { font-variant-numeric: tabular-nums; }
+.cc-section.sidebar-component .stats-overview-label {
+  grid-column: 2;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #a09b91;
+}
+
+/* ---- Tab group (Play / Leaderboard) ---- */
+.cc-section.sidebar-component .cc-tab-group-component.cc-tab-group-secondary {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 4px;
+}
+.cc-section.sidebar-component .cc-tab-item-component {
+  position: relative;
+  background: transparent;
+  border: none;
+  color: #a09b91;
+  padding: 10px 8px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: color 120ms;
+}
+.cc-section.sidebar-component .cc-tab-item-component:hover { color: #f5f2ec; }
+.cc-section.sidebar-component .cc-tab-item-component.cc-tab-item-active {
+  color: #f5f2ec;
+}
+.cc-section.sidebar-component .cc-tab-item-component.cc-tab-item-active::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 2px;
+  background: var(--cc-green-300);
+  border-radius: 2px;
+}
+.cc-section.sidebar-component .cc-tab-item-label { line-height: 1; }
+
+/* ---- Tab panel + mode card stack ---- */
+.cc-section.sidebar-component .sidebar-start-tabpanel-rush-start {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 60px;
+}
+.cc-section.sidebar-component .sidebar-start-content { display: flex; flex-direction: column; gap: 8px; }
+.cc-section.sidebar-component .sidebar-start-cardContainer { display: flex; flex-direction: column; gap: 8px; }
+.cc-section.sidebar-component .cc-rush-leaderboard-hint {
+  margin: 0;
+  font-size: 13px;
+  color: #a09b91;
+  padding: 12px 8px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+/* ---- Buttons (cc-button-component base + secondary/primary variants) ---- */
+.cc-section.sidebar-component .cc-button-component,
+#rush-actions .cc-button-component {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.005em;
+  transition: filter 120ms, transform 80ms, background 140ms, box-shadow 140ms;
+  padding: 0 18px;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.cc-section.sidebar-component .cc-button-full,
+#rush-actions .cc-button-full { width: 100%; }
+.cc-section.sidebar-component .cc-button-x-large,
+#rush-actions .cc-button-x-large {
+  height: 56px;
+  font-size: 17px;
+}
+.cc-section.sidebar-component .cc-button-xx-large,
+#rush-actions .cc-button-xx-large {
+  height: 64px;
+  font-size: 20px;
+  border-radius: 8px;
+}
+
+/* Secondary (translucent) — used by mode cards */
+.cc-section.sidebar-component .cc-button-secondary.cc-bg-secondary,
+#rush-actions .cc-button-secondary.cc-bg-secondary {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0.05) 100%);
+  color: #f5f2ec;
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.10),
+    0 1px 2px rgba(0, 0, 0, 0.14),
+    0 2px 4px rgba(0, 0, 0, 0.10);
+}
+.cc-section.sidebar-component .cc-button-secondary.cc-bg-secondary:hover,
+#rush-actions .cc-button-secondary.cc-bg-secondary:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.05) 100%);
+}
+
+/* Primary green — used by the big Play CTA */
+.cc-section.sidebar-component .cc-button-primary.cc-bg-primary,
+#rush-actions .cc-button-primary.cc-bg-primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  color: #fff;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  box-shadow:
+    inset 0 1px 0 0 rgba(178, 224, 104, 0.55),
+    inset 0 -1px 0 0 #45753c,
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    0 2px 4px rgba(0, 0, 0, 0.12);
+}
+.cc-section.sidebar-component .cc-button-primary.cc-bg-primary:hover,
+#rush-actions .cc-button-primary.cc-bg-primary:hover {
+  background:
+    linear-gradient(180deg, rgba(178, 224, 104, 0.5) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+}
+.cc-section.sidebar-component .cc-button-component:active,
+#rush-actions .cc-button-component:active {
+  transform: translateY(1px);
+}
+
+.cc-section.sidebar-component .cc-button-icon { flex-shrink: 0; color: #d6d2cb; }
+.cc-section.sidebar-component .cc-button-secondary.cc-bg-secondary .cc-button-icon { color: #c8c5be; }
+.cc-section.sidebar-component .cc-button-one-line {
+  flex: 0 0 auto;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+/* Selected outline (chosen mode card) — chess.com uses outline 3px */
+.cc-section.sidebar-component .cc-selected-border {
+  outline: 3px solid var(--cc-green-300, #81b64c);
+  outline-offset: 2px;
+}
+.cc-section.sidebar-component .cc-button-secondary.cc-bg-secondary.cc-selected-border .cc-button-icon { color: #c2e09a; }
+
+/* ---- Bottom Play CTA wrapper ---- */
+.cc-rush-cta {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  margin-top: 4px;
+  margin-bottom: 14px;
+}
+
 @media (max-width: 540px) {
   .cc-sidebar-stats { grid-template-columns: 1fr; }
   .cc-sidebar { padding: 12px; }
+  .cc-section.sidebar-component .stats-overview-component { grid-template-columns: 1fr; }
+  .cc-section.sidebar-component { padding: 12px; }
 }
