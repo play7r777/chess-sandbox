@@ -3684,3 +3684,225 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   font-weight: 800;
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- Slim HUD + below-board scoreboard panel ---- */
+
+/* The HUD that lives in the top-right is now intentionally tiny —
+ * it carries only the title, timer, and the rating line. The full
+ * scoreboard moved to .party-board-panel below the board so the
+ * playing area no longer competes with the right-edge resize
+ * handle of the board. */
+.party-side-panel {
+  width: 260px;
+  max-height: none;
+  padding: 10px 12px 12px;
+}
+.party-side-panel .party-side-list,
+.party-side-panel .party-side-leave {
+  display: none;
+}
+.party-side-header { margin-bottom: 4px; }
+
+.party-board-panel {
+  width: min(960px, 96%);
+  margin: 14px auto 24px;
+  background: linear-gradient(180deg, #1f2a3a, #161e2c);
+  border: 1px solid #2c3950;
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+}
+.party-board-panel .party-side-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2c3950 transparent;
+}
+.party-board-panel .party-side-list::-webkit-scrollbar { width: 6px; }
+.party-board-panel .party-side-list::-webkit-scrollbar-thumb {
+  background: #2c3950; border-radius: 4px;
+}
+.party-board-panel .party-side-leave {
+  margin-top: 12px;
+  width: auto;
+  padding: 8px 18px;
+  font-weight: 600;
+}
+
+/* "You're out" notice that replaces the hint/skip row in the puzzle
+ * card after the server's `eliminated` frame. */
+.puzzle-eliminated {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 118, 118, 0.08);
+  border: 1px solid rgba(255, 118, 118, 0.35);
+  border-radius: 10px;
+  font-size: 13px;
+  color: #e7eef9;
+}
+.puzzle-eliminated .puzzle-eliminated-icon {
+  font-size: 18px;
+  color: #ff7676;
+  flex: 0 0 auto;
+}
+.puzzle-eliminated .puzzle-eliminated-text {
+  flex: 1 1 auto;
+  line-height: 1.35;
+  color: #c9d4e6;
+}
+.puzzle-eliminated button { flex: 0 0 auto; }
+
+/* ---- Lobby: rating-mode picker (standard / custom) ---- */
+.party-mode-section {
+  margin: 14px 0 6px;
+  padding: 12px 14px;
+  background: #1a2538;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+}
+.party-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #94a4be;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+.party-mode-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.party-mode-opt {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: center;
+  padding: 10px 12px;
+  background: #131c2c;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s;
+}
+.party-mode-opt:hover { border-color: #3c5078; }
+.party-mode-opt input[type="radio"] {
+  grid-row: 1 / 3;
+  grid-column: 1 / 2;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #6da7ff;
+}
+.party-mode-opt .party-mode-title {
+  grid-row: 1 / 2;
+  grid-column: 2 / 3;
+  color: #e7eef9;
+  font-weight: 700;
+  font-size: 14px;
+}
+.party-mode-opt .party-mode-hint {
+  grid-row: 2 / 3;
+  grid-column: 2 / 3;
+  color: #94a4be;
+  font-size: 11.5px;
+}
+.party-mode-opt.is-active {
+  background: rgba(109, 167, 255, 0.14);
+  border-color: rgba(109, 167, 255, 0.55);
+}
+.party-custom-range {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.party-custom-range[hidden] { display: none; }
+.party-range-input {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #94a4be;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.party-range-input input {
+  background: #0d1421;
+  border: 1px solid #2c3950;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: 600 14px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #ffd75e;
+  font-variant-numeric: tabular-nums;
+}
+.party-range-input input:focus {
+  outline: none;
+  border-color: #6da7ff;
+  box-shadow: 0 0 0 3px rgba(109, 167, 255, 0.18);
+}
+.party-range-note {
+  grid-column: 1 / -1;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.party-mode-readonly {
+  font-size: 13px;
+  color: #c9d4e6;
+}
+.party-mode-readonly strong {
+  color: #ffd75e;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.party-refresh-btn {
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 8px;
+}
+
+/* ---- Profile match-history mode badge ---- */
+.profile-party-row .pp-mode {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.profile-party-row .pp-mode.is-standard {
+  background: rgba(108, 242, 166, 0.12);
+  border-color: rgba(108, 242, 166, 0.35);
+  color: #6cf2a6;
+}
+.profile-party-row .pp-mode.is-custom {
+  background: rgba(247, 198, 49, 0.14);
+  border-color: rgba(247, 198, 49, 0.4);
+  color: #ffd75e;
+}
+
+/* ---- Elimination modal header ---- */
+.party-header.party-header-elim h2 {
+  color: #ff9b6e;
+}
+.party-header.party-header-elim h2 span[aria-hidden="true"] {
+  color: #ffb486;
+  margin-right: 6px;
+}

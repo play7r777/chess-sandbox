@@ -517,6 +517,20 @@ const state = {
     // Cells per vertical column in the streak grid; new column opens
     // every Nth solved/failed puzzle.
     gridColHeight: 10,
+    // Puzzle-rating mode picked by the host: "standard" (server uses
+    // the lobby's avg ELO ± a band) or "custom" (server uses the
+    // explicit [ratingMin, ratingMax] window). Mirrored from the
+    // server's lobby/match_state messages so non-host members see the
+    // chosen mode read-only and the post-match results render the
+    // right badge.
+    mode: "standard",
+    ratingMin: 0,
+    ratingMax: 0,
+    // Local "I've been eliminated" flag — set to true after we receive
+    // the "eliminated" WS frame so the puzzle UI / scoreboard can
+    // dim our row, lock our board, and stop us from hammering the
+    // hint/skip buttons. Cleared on the next match start / leave.
+    selfEliminated: false,
   },
   // Spectator session (view-only, separate from `party`).
   spectator: {
@@ -4390,9 +4404,27 @@ function renderPuzzleUi() {
     </div>
     ${feedback}
   `;
-  // Action buttons depend on whether we're solving or finished.
+  // Action buttons depend on whether we're solving or finished. In a
+  // party match where we just lost our last life the server stops
+  // sending us new puzzles and we shouldn't be able to hint/skip the
+  // last one — replace the row with a clear "you're out" notice
+  // instead. The "Смотреть матч" CTA in this notice mirrors the
+  // elimination modal so the user can still hop into spectator mode
+  // even after they dismissed the modal.
   const finished = !state.puzzle.active;
-  if (finished) {
+  const partyEliminated = state.party.active && state.party.selfEliminated;
+  if (partyEliminated) {
+    actions.innerHTML = `
+      <div class="puzzle-eliminated muted">
+        <span class="puzzle-eliminated-icon" aria-hidden="true">⚔</span>
+        <span class="puzzle-eliminated-text">Вы выбыли из матча. Матч идёт, пока в живых есть хотя бы двое.</span>
+        <button id="btn-puzzle-spectate" type="button" class="puzzle-secondary">Смотреть матч</button>
+      </div>
+    `;
+    document.getElementById("btn-puzzle-spectate")?.addEventListener("click", () => {
+      _partySwitchToSpectator();
+    });
+  } else if (finished) {
     actions.innerHTML = `
       <button id="btn-puzzle-next" type="button" class="puzzle-primary">→ Следующая</button>
     `;
@@ -5886,12 +5918,25 @@ async function openProfileModal(clientId) {
         const winrate = Number(p.winrate || 0);
         const place = Number(p.placement || 0);
         const placeCls = place === 1 ? "ok" : (place === 2 ? "warn" : "");
+        // Mode badge: "Стандартный" → ср.ELO, "Кастомный" → диапазон.
+        // Older entries written before the mode field landed are
+        // treated as standard so their badge still says "Стандартный"
+        // (with the avg if it was logged).
+        const mode = (p.mode === "custom") ? "custom" : "standard";
+        const rmin = Number(p.rating_min || 0);
+        const rmax = Number(p.rating_max || 0);
+        const avg = Number(p.avg_rating || 0);
+        const modeText = mode === "custom"
+          ? (rmin > 0 && rmax > 0 ? `Кастом · ELO ${rmin}–${rmax}` : "Кастом")
+          : (avg > 0 ? `Стандарт · ср.ELO ${avg}` : "Стандарт");
+        const modeCls = mode === "custom" ? "is-custom" : "is-standard";
         return `
           <button type="button" class="profile-party-row" data-idx="${idx}" title="Открыть подробный результат">
             <span class="pp-rank ${placeCls}">#${place}</span>
             <span class="pp-meta">
               <span class="pp-date">${escapeHtml(date)}</span>
               <span class="pp-duration muted">${escapeHtml(dur || "—")}</span>
+              <span class="pp-mode ${modeCls}">${escapeHtml(modeText)}</span>
             </span>
             <span class="pp-stats">
               <span class="ok">✔ ${Number(p.solved || 0)}</span>
@@ -6363,6 +6408,9 @@ function handlePartyMessage(msg) {
       }
       state.party.members = Array.isArray(msg.members) ? msg.members : [];
       if (Number.isFinite(msg.avg_rating)) state.party.avgRating = Math.floor(msg.avg_rating);
+      if (typeof msg.mode === "string") state.party.mode = msg.mode;
+      if (Number.isFinite(msg.rating_min)) state.party.ratingMin = Math.floor(msg.rating_min);
+      if (Number.isFinite(msg.rating_max)) state.party.ratingMax = Math.floor(msg.rating_max);
       if (state.party.status === "lobby") renderPartyLobby();
       break;
     case "start":
@@ -6373,7 +6421,14 @@ function handlePartyMessage(msg) {
         state.party.durationSec = Math.floor(msg.duration_sec);
       }
       if (Number.isFinite(msg.avg_rating)) state.party.avgRating = Math.floor(msg.avg_rating);
+      if (typeof msg.mode === "string") state.party.mode = msg.mode;
+      if (Number.isFinite(msg.rating_min)) state.party.ratingMin = Math.floor(msg.rating_min);
+      if (Number.isFinite(msg.rating_max)) state.party.ratingMax = Math.floor(msg.rating_max);
       state.party.selfScore = 0;
+      // Brand new match — clear any leftover "I was eliminated" flag
+      // from the previous run so the fresh match doesn't open with a
+      // dimmed self-row / locked board.
+      state.party.selfEliminated = false;
       closePartyModal();
       setView("puzzle");
       _partyMountSidePanel();
@@ -6386,6 +6441,9 @@ function handlePartyMessage(msg) {
       if (Number.isFinite(msg.duration_sec) && msg.duration_sec > 0) {
         state.party.durationSec = Math.floor(msg.duration_sec);
       }
+      if (typeof msg.mode === "string") state.party.mode = msg.mode;
+      if (Number.isFinite(msg.rating_min)) state.party.ratingMin = Math.floor(msg.rating_min);
+      if (Number.isFinite(msg.rating_max)) state.party.ratingMax = Math.floor(msg.rating_max);
       if (Array.isArray(msg.scoreboard)) state.party.scoreboard = msg.scoreboard;
       _partyMountSidePanel();
       _partyStartCountdown();
@@ -6399,6 +6457,14 @@ function handlePartyMessage(msg) {
       if (Array.isArray(msg.scoreboard)) state.party.scoreboard = msg.scoreboard;
       _partyRenderScoreboard();
       break;
+    case "eliminated":
+      // Server tells us we just lost our last life. Mark ourselves
+      // out so the puzzle UI hides hint/skip and the scoreboard row
+      // dims; then offer the "watch the rest of the match as
+      // spectator" modal that piggybacks on the existing spectator
+      // flow.
+      _partyHandleEliminated(msg);
+      break;
     case "finish":
       state.party.status = "finished";
       state.party.finalResults = Array.isArray(msg.results) ? msg.results : [];
@@ -6407,12 +6473,19 @@ function handlePartyMessage(msg) {
         started_at: Number(msg.started_at) || state.party.startedAt || 0,
         ended_at: Number(msg.ended_at) || Math.floor(Date.now() / 1000),
         party_id: msg.party_id || state.party.party_id || "",
+        mode: typeof msg.mode === "string" ? msg.mode : state.party.mode,
+        rating_min: Number(msg.rating_min) || state.party.ratingMin || 0,
+        rating_max: Number(msg.rating_max) || state.party.ratingMax || 0,
+        avg_rating: Number(msg.avg_rating) || state.party.avgRating || 0,
       };
       state.party.active = false;
       if (state.party.countdownInterval) {
         clearInterval(state.party.countdownInterval);
         state.party.countdownInterval = null;
       }
+      // Tear down the elimination modal if it was still open — the
+      // post-match scoreboard supersedes it.
+      _partyDismissEliminatedModal();
       _partyShowResults();
       try { state.party.ws && state.party.ws.close(); } catch (_) {}
       break;
@@ -6798,6 +6871,15 @@ function renderPartyLobby() {
     ? `<span class="party-avg-pill" title="средний ELO лобби — под эту отметку подбираются пазлы">ср. ELO ${m.avgRating}</span>`
     : "";
   const livesN = Math.max(1, Math.floor(m.livesPerPlayer || 3));
+  // Pre-fill the custom inputs with the current avg ±200 so the host
+  // doesn't start from blank fields. We persist the host's last
+  // selection via the inputs themselves on submit (no localStorage
+  // round-trip — keep state on the server).
+  const avgFloor = Math.max(400, (m.avgRating || 1200) - 200);
+  const avgCeil  = Math.min(3000, (m.avgRating || 1200) + 200);
+  const initialMode = (m.mode === "custom") ? "custom" : "standard";
+  const initialMin = Number.isFinite(m.ratingMin) && m.ratingMin > 0 ? m.ratingMin : avgFloor;
+  const initialMax = Number.isFinite(m.ratingMax) && m.ratingMax > 0 ? m.ratingMax : avgCeil;
   body.innerHTML = `
     <header class="party-header">
       <h2><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle — лобби</h2>
@@ -6807,8 +6889,41 @@ function renderPartyLobby() {
     <section class="party-rules">
       <div class="party-rule"><span class="party-rule-key">Длительность</span><span class="party-rule-val">3 мин</span></div>
       <div class="party-rule"><span class="party-rule-key">Жизни</span><span class="party-rule-val">${livesN}</span></div>
-      <div class="party-rule party-rule-note">Матч заканчивается, когда у одного из игроков заканчиваются жизни — иначе по таймеру.</div>
+      <div class="party-rule party-rule-note">Матч заканчивается, когда живым остаётся один игрок — иначе по таймеру.</div>
     </section>
+    ${isHost ? `
+    <section class="party-mode-section">
+      <div class="party-section-title">Режим пазлов</div>
+      <div class="party-mode-row" role="radiogroup" aria-label="Режим пазлов">
+        <label class="party-mode-opt ${initialMode === "standard" ? "is-active" : ""}">
+          <input type="radio" name="party-mode" value="standard" ${initialMode === "standard" ? "checked" : ""}>
+          <span class="party-mode-title">Стандартный</span>
+          <span class="party-mode-hint">по среднему ELO лобби</span>
+        </label>
+        <label class="party-mode-opt ${initialMode === "custom" ? "is-active" : ""}">
+          <input type="radio" name="party-mode" value="custom" ${initialMode === "custom" ? "checked" : ""}>
+          <span class="party-mode-title">Кастомный</span>
+          <span class="party-mode-hint">задай диапазон ELO вручную</span>
+        </label>
+      </div>
+      <div id="party-custom-range" class="party-custom-range" ${initialMode === "custom" ? "" : "hidden"}>
+        <label class="party-range-input">
+          <span>От</span>
+          <input id="party-rating-min" type="number" min="400" max="3000" step="10" value="${initialMin}" inputmode="numeric">
+        </label>
+        <label class="party-range-input">
+          <span>До</span>
+          <input id="party-rating-max" type="number" min="400" max="3000" step="10" value="${initialMax}" inputmode="numeric">
+        </label>
+        <div class="party-range-note muted">Ограничено 400–3000. Если вилка слишком узкая, пазлы добираются вокруг середины.</div>
+      </div>
+    </section>` : `
+    <section class="party-mode-section party-mode-section-readonly">
+      <div class="party-section-title">Режим пазлов</div>
+      <div class="party-mode-readonly muted">${initialMode === "custom"
+        ? `Кастом: ELO <strong>${initialMin}–${initialMax}</strong>`
+        : `Стандартный (по среднему ELO лобби)`}</div>
+    </section>`}
     ${isHost ? `
     <section class="party-invite-section">
       <div class="party-section-title">
@@ -6835,6 +6950,21 @@ function renderPartyLobby() {
     body.querySelector("#btn-party-invite-refresh")?.addEventListener("click", () => {
       _renderFriendPicker(m.code).catch(() => {});
     });
+    // Mode toggle: show/hide rating inputs and keep label active state
+    // in sync. We don't persist on every keypress — the values only
+    // get sent on the "start" frame.
+    const modeRadios = body.querySelectorAll('input[name="party-mode"]');
+    const customBox = body.querySelector("#party-custom-range");
+    modeRadios.forEach((radio) => {
+      radio.addEventListener("change", () => {
+        const mode = body.querySelector('input[name="party-mode"]:checked')?.value || "standard";
+        body.querySelectorAll(".party-mode-opt").forEach((lbl) => {
+          const r = lbl.querySelector('input[name="party-mode"]');
+          lbl.classList.toggle("is-active", !!(r && r.checked));
+        });
+        if (customBox) customBox.hidden = mode !== "custom";
+      });
+    });
   }
   body.querySelector("#btn-party-start")?.addEventListener("click", (ev) => {
     const btn = ev.currentTarget;
@@ -6844,11 +6974,27 @@ function renderPartyLobby() {
     // big puzzle bank that the user can rack up several clicks. We
     // disable the button immediately and re-enable on error / leave.
     if (btn.disabled) return;
+    const mode = body.querySelector('input[name="party-mode"]:checked')?.value || "standard";
+    const startFrame = { type: "start", duration_sec: 180, mode };
+    if (mode === "custom") {
+      const rmin = parseInt(body.querySelector("#party-rating-min")?.value, 10);
+      const rmax = parseInt(body.querySelector("#party-rating-max")?.value, 10);
+      if (!Number.isFinite(rmin) || !Number.isFinite(rmax) || rmin <= 0 || rmax <= 0 || rmin >= rmax) {
+        const err = body.querySelector("#party-error");
+        if (err) {
+          err.textContent = "Укажи корректный диапазон ELO (От < До, в пределах 400–3000).";
+          err.hidden = false;
+        }
+        return;
+      }
+      startFrame.rating_min = Math.max(400, Math.min(3000, rmin));
+      startFrame.rating_max = Math.max(400, Math.min(3000, rmax));
+    }
     btn.disabled = true;
     btn.textContent = "Запускаем матч…";
     const ws = state.party.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "start", duration_sec: 180 }));
+      ws.send(JSON.stringify(startFrame));
     } else {
       btn.disabled = false;
       btn.textContent = startLabel;
@@ -6911,17 +7057,35 @@ function _partyStartCountdown() {
 
 function _partyMountSidePanel() {
   let host = document.getElementById("party-side-panel");
-  if (host) return host;
-  host = document.createElement("aside");
-  host.id = "party-side-panel";
-  host.className = "party-side-panel";
-  document.body.appendChild(host);
+  if (!host) {
+    host = document.createElement("aside");
+    host.id = "party-side-panel";
+    host.className = "party-side-panel";
+    document.body.appendChild(host);
+  }
+  // The side panel keeps only the slim HUD (title / timer / avg ELO);
+  // the scoreboard rows live in #party-board-panel below the board so
+  // top-right stays out of the player's way.
+  let board = document.getElementById("party-board-panel");
+  if (!board) {
+    board = document.createElement("section");
+    board.id = "party-board-panel";
+    board.className = "party-board-panel";
+    // Mount into the board area so the panel inherits the same flex
+    // column as `#status-line` and sits directly under the board /
+    // FEN row.
+    const boardArea = document.querySelector(".board-area");
+    if (boardArea) boardArea.appendChild(board);
+    else document.body.appendChild(board);
+  }
   return host;
 }
 
 function _partyUnmountSidePanel() {
   const host = document.getElementById("party-side-panel");
   if (host) host.remove();
+  const board = document.getElementById("party-board-panel");
+  if (board) board.remove();
 }
 
 function _partyRenderHud() {
@@ -6987,7 +7151,8 @@ function _partyLivesHtml(lives, livesMax) {
 
 function _partyRenderScoreboard() {
   const host = document.getElementById("party-side-panel");
-  if (!host) return;
+  const board = document.getElementById("party-board-panel");
+  if (!host && !board) return;
   const me = state.user.client_id;
   const livesMax = Math.max(1, Math.floor(state.party.livesPerPlayer || 3));
   const rowsList = (state.party.scoreboard || []).map((r, i) => {
@@ -7015,19 +7180,118 @@ function _partyRenderScoreboard() {
     ? _formatPartyTimeLeft(state.party.endsAt)
     : (state.party.status === "finished" ? "0:00" : "3:00");
   const avgRating = Number.isFinite(state.party.avgRating) ? state.party.avgRating : 0;
-  const avgRatingLine = avgRating > 0
-    ? `<div class="party-side-avg" title="Пазлы подбираются под этот лобби">ср. ELO лобби: <strong>${avgRating}</strong></div>`
-    : "";
-  host.innerHTML = `
-    <header class="party-side-header">
-      <span class="party-side-title"><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle</span>
-      <span class="party-side-timer">${timer}</span>
+  // The top-right HUD is intentionally slim per the redesign: only the
+  // title, timer, and a single rating line (avg ELO for standard,
+  // explicit window for custom). The full scoreboard moved to the
+  // `.party-board-panel` rendered below the board so playing area
+  // doesn't have a tall list overlapping the right-edge scale handle.
+  let ratingLine = "";
+  if (state.party.mode === "custom" && state.party.ratingMin > 0 && state.party.ratingMax > 0) {
+    ratingLine = `<div class="party-side-avg" title="Кастомный диапазон рейтинга пазлов">ELO пазлов: <strong>${state.party.ratingMin}–${state.party.ratingMax}</strong></div>`;
+  } else if (avgRating > 0) {
+    ratingLine = `<div class="party-side-avg" title="Пазлы подбираются под этот лобби">ср. ELO лобби: <strong>${avgRating}</strong></div>`;
+  }
+  if (host) {
+    host.innerHTML = `
+      <header class="party-side-header">
+        <span class="party-side-title"><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle</span>
+        <span class="party-side-timer">${timer}</span>
+      </header>
+      ${ratingLine}
+    `;
+  }
+  // Below-board scoreboard panel: full player list + leave button.
+  // The hint/skip buttons live in the puzzle card directly under the
+  // board (rendered by renderPuzzleUi) and are *not* duplicated here
+  // — this panel only owns the multiplayer state.
+  if (board) {
+    board.innerHTML = `
+      <ul class="party-side-list battle-rows">${rowsList || `<li class="party-empty">…</li>`}</ul>
+      <button id="btn-party-leave-side" type="button" class="puzzle-ghost party-side-leave">Выйти из пати</button>
+    `;
+    board.querySelector("#btn-party-leave-side")?.addEventListener("click", leaveParty);
+  }
+}
+
+// ---- Elimination modal ----
+
+// When the server marks us out of lives we get an `eliminated` WS
+// frame. We surface it as a modal that offers two paths:
+//   1. "Смотреть матч"  → close modal, leave the party WS, open the
+//      spectator session for the same party_id (existing flow), so
+//      the user keeps watching the survivors until finish/timer.
+//   2. "Остаться в лобби" → keep the modal closed, stay in the
+//      already-locked board (no further dispatch). When the survivor
+//      remains the server's `finish` frame will land us on the
+//      results table the same as everyone else.
+// The modal also self-dismisses on the next `finish` frame in case
+// the user just sat there with it open.
+function _partyHandleEliminated(msg) {
+  state.party.selfEliminated = true;
+  // Refresh the puzzle card so the hint/skip row is replaced with a
+  // "you're out" notice — `renderPuzzleUi` reads `selfEliminated`.
+  try { renderPuzzleUi(); } catch (_) {}
+  try { _partyRenderScoreboard(); } catch (_) {}
+  const partyId = (msg && msg.party_id) || state.party.party_id || "";
+  const partyCode = state.party.code || "";
+  const livesMax = Math.max(1, Math.floor(state.party.livesPerPlayer || 3));
+  const solved = Number(msg && msg.solved) || 0;
+  const failed = Number(msg && msg.failed) || 0;
+  // Re-use the party modal element so we don't fork a new overlay
+  // class. _partyEnsureModal returns the inner body container; the
+  // modal itself is keyed by id `#party-modal`.
+  const body = _partyEnsureModal({ useModal: true });
+  if (!body) return;
+  body.innerHTML = `
+    <header class="party-header party-header-elim">
+      <h2><span aria-hidden="true">⚔</span> Вы выбыли из матча</h2>
+      <p class="muted">Кончились жизни (${livesMax}/${livesMax}). Решено: <strong>${solved}</strong>, ошибок: <strong>${failed}</strong>.</p>
+      <p class="muted">Матч продолжается, пока остаётся хотя бы двое выживших — можно остаться и наблюдать.</p>
     </header>
-    ${avgRatingLine}
-    <ul class="party-side-list battle-rows">${rowsList || `<li class="party-empty">…</li>`}</ul>
-    <button id="btn-party-leave-side" type="button" class="puzzle-ghost party-side-leave">Выйти из пати</button>
+    <div class="party-actions">
+      <button id="btn-elim-spectate" type="button" class="puzzle-primary">Смотреть матч</button>
+      <button id="btn-elim-stay" type="button" class="puzzle-ghost">Остаться в пати</button>
+    </div>
   `;
-  host.querySelector("#btn-party-leave-side")?.addEventListener("click", leaveParty);
+  body.querySelector("#btn-elim-stay")?.addEventListener("click", () => {
+    closePartyModal();
+  });
+  body.querySelector("#btn-elim-spectate")?.addEventListener("click", () => {
+    closePartyModal();
+    _partySwitchToSpectator();
+  });
+  void partyId;
+}
+
+// Drop the player WS and reattach as a spectator on the same party.
+// Used by both the elim-modal "Смотреть матч" button and the inline
+// "Смотреть матч" button in the puzzle card. We tear down the
+// scoreboard panel first so it doesn't shadow the spectator UI.
+function _partySwitchToSpectator() {
+  const partyCode = state.party.code || "";
+  try { state.party.ws && state.party.ws.close(); } catch (_) {}
+  state.party.ws = null;
+  state.party.active = false;
+  state.party.status = "finished";
+  state.party.selfEliminated = false;
+  if (state.party.countdownInterval) {
+    clearInterval(state.party.countdownInterval);
+    state.party.countdownInterval = null;
+  }
+  _partyUnmountSidePanel();
+  if (partyCode && typeof spectatorConnect === "function") {
+    spectatorConnect(partyCode);
+  }
+}
+
+function _partyDismissEliminatedModal() {
+  // The elimination overlay reuses #party-modal; we only want to
+  // close it if it's currently showing the elim header.
+  const modal = document.getElementById("party-modal");
+  if (!modal || modal.hidden) return;
+  if (modal.querySelector(".party-header-elim")) {
+    closePartyModal();
+  }
 }
 
 function _formatPartyDuration(sec) {

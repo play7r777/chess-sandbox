@@ -892,12 +892,46 @@ class PartyCreateRequest(BaseModel):
     # avatars mount (e.g. "/api/avatars/<cid>.png?v=<ts>"), so the cap
     # mirrors UserUpsertRequest at 256 chars.
     avatar: str = Field(default="♟", max_length=256)
+    # Puzzle-rating mode picked by the host on the lobby screen:
+    #   "standard" — server picks puzzles around the lobby's average ELO
+    #   "custom"   — host explicitly types a [rating_min, rating_max]
+    # If `mode == "custom"` then both `rating_min` and `rating_max` must
+    # be set; otherwise both are ignored. Both bounds are clipped to
+    # ``PARTY_BAND_MIN..PARTY_BAND_MAX`` server-side so a tampered
+    # payload can't request a 0-rated bank.
+    mode: str = Field(default="standard", max_length=16)
+    rating_min: int = Field(default=0, ge=0, le=4000)
+    rating_max: int = Field(default=0, ge=0, le=4000)
 
 
 @app.post("/api/party/create")
 async def party_create(req: PartyCreateRequest) -> dict[str, Any]:
     party_room.reap_idle()
     p = await party_room.create_party(req.client_id, req.nickname, req.avatar)
+    # Persist the host-picked mode + rating window onto the freshly
+    # created Party. We do it *outside* `create_party()` so the helper
+    # signature stays generic for tests; the mode round-trips through
+    # `public_state()` so the lobby UI can show the badge to everyone.
+    mode = (req.mode or "standard").strip().lower()
+    if mode not in ("standard", "custom"):
+        mode = "standard"
+    p.mode = mode
+    if mode == "custom":
+        lo = int(req.rating_min or 0)
+        hi = int(req.rating_max or 0)
+        if lo > 0 and hi > 0 and lo < hi:
+            p.rating_min = lo
+            p.rating_max = hi
+        else:
+            # Invalid window — silently fall back to standard so the
+            # host doesn't lose the lobby on a typo. The frontend
+            # validates as well.
+            p.mode = "standard"
+            p.rating_min = 0
+            p.rating_max = 0
+    else:
+        p.rating_min = 0
+        p.rating_max = 0
     return {"party_id": p.party_id, "code": p.code, **p.public_state()}
 
 
@@ -1064,13 +1098,23 @@ async def _party_ws_player(
                 continue
             mtype = msg.get("type")
             if mtype == "start":
-                # The host can pick a 2/3/5/10-min match length in the
-                # lobby; the value rides along on the start frame so we
-                # don't need a separate REST hop. party.start() validates
-                # against the allowlist, so passing through msg.get is safe.
+                # `duration_sec` is fixed at 180 server-side, but we
+                # still accept it on the wire so legacy clients don't
+                # error out. `mode` / `rating_min` / `rating_max` let
+                # the host switch the puzzle-rating window at start
+                # time without recreating the lobby.
                 duration_sec = msg.get("duration_sec")
+                mode = msg.get("mode")
+                rating_min = msg.get("rating_min")
+                rating_max = msg.get("rating_max")
                 try:
-                    await party.start(client_id, duration_sec=duration_sec)
+                    await party.start(
+                        client_id,
+                        duration_sec=duration_sec,
+                        mode=str(mode) if mode is not None else None,
+                        rating_min=int(rating_min) if rating_min is not None else None,
+                        rating_max=int(rating_max) if rating_max is not None else None,
+                    )
                 except party_room.PartyError as e:
                     await ws.send_json({"type": "error", "code": e.code, "message": e.message})
             elif mtype == "attempt":
