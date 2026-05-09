@@ -276,15 +276,26 @@ def attempt(
             }
         cur = sess.current
         cur_id = str(cur.get("id") or "") if cur else ""
-        if cur is None or cur_id != puzzle_id:
-            # Stale attempt for a puzzle we already rotated past.
+        # The frontend Rush UI maintains its own puzzle queue (it pulls
+        # from /api/puzzle/random) and never consumes the queue we
+        # pre-built in start_session. Without this lookup every attempt
+        # would be rejected as stale and the session score would stay
+        # zero, which is what made the Rush leaderboard show "0" for
+        # everyone even after a 6-solve run.
+        scored_puzzle: dict[str, Any] | None = cur if cur and cur_id == puzzle_id else None
+        if scored_puzzle is None and puzzle_id:
+            try:
+                scored_puzzle = puzzle_pack.get_by_id(puzzle_id)
+            except Exception:
+                scored_puzzle = None
+        if scored_puzzle is None:
             return {
                 "stale": True,
                 **_attempt_payload(sess, finished=False),
                 "puzzle": _puzzle_payload(cur) if cur else None,
             }
         # Apply outcome.
-        prev_rating = int(cur.get("rating") or 1200)
+        prev_rating = int(scored_puzzle.get("rating") or 1200)
         if outcome == "solved":
             sess.solved += 1
             sess.score += prev_rating + max(0, 30 - max(0, solve_ms // 1000)) * 2

@@ -587,6 +587,12 @@ const state = {
     legalTargets: [],
     pendingPromotion: null,   // { from, to } awaiting piece pick
     refreshTimer: null,       // online list periodic refresh
+    // Survives the async lobby render race when the user clicks
+    // "Челлендж" from a popover — enterOneVsOneView() awaits the
+    // active-match recovery API before rendering the lobby, which
+    // wipes #onevsone-form-host. Stashing the target here lets the
+    // eventual _renderOnevsoneLobby() restore the challenge form.
+    pendingChallenge: null,
   },
   // Global Leaderboard panel (right column on Rush + 1v1 views).
   // Pure dataset = every visitor that has appeared on /api/users.
@@ -4347,6 +4353,7 @@ function tryPuzzleMove(from, to) {
   try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
   if (!move) {
     setStatus("Нелегальный ход.", "error");
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
@@ -4376,11 +4383,11 @@ function tryPuzzleMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
-    // Sound feedback even on wrong moves: the chess.com Stockfish 18
-    // experience plays the regular move/capture SFX *and* a separate
-    // "incorrect" buzzer. Before this we played nothing on misses.
+    // Sound feedback even on wrong moves: play the regular move /
+    // capture SFX. The "incorrect" buzzer is reserved for rule-violating
+    // (illegal) moves only — a legal-but-wrong puzzle solution is still
+    // a real chess move, so we don't punish it with the buzzer here.
     try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
-    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     // Show the wrong-move position to spectators with the same red ✕
     // badge the player sees — without this they'd see the piece teleport
     // back to its origin (we never broadcast wrong moves before the
@@ -8688,6 +8695,7 @@ function tryDailyMove(from, to) {
   try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
   if (!move) {
     setStatus("Нелегальный ход.", "error");
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
@@ -8720,7 +8728,6 @@ function tryDailyMove(from, to) {
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
     try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
-    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     // Spectator mirror — without this the watcher only ever sees the
     // reverted FEN below, which makes the wrong piece teleport back.
     _partyReportPosition(c.fen(), {
@@ -9154,6 +9161,7 @@ function tryRushMove(from, to) {
   try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
   if (!move) {
     setStatus("Нелегальный ход.", "error");
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
@@ -9187,7 +9195,6 @@ function tryRushMove(from, to) {
     _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
     renderBoard();
     try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
-    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     // Mirror to spectators so they see the same red ✕ on the
     // wrong square instead of a piece teleport.
     _partyReportPosition(c.fen(), {
@@ -10007,13 +10014,21 @@ function _renderUserPopover(u, anchorEl) {
   card.querySelector(".user-popover-avatar").addEventListener("click", navigateToProfile);
   card.querySelector('[data-cy="user-popover-challenge"]').addEventListener("click", () => {
     host.hidden = true;
+    // Stash the target *before* setView() so the lobby render that
+    // happens at the end of enterOneVsOneView() picks it up. Without
+    // this, an earlier setTimeout-based render would briefly show the
+    // form and then get wiped when the (async) lobby render landed.
+    state.onevsone.pendingChallenge = {
+      client_id: u.client_id,
+      nickname: u.nickname || "Гость",
+      avatar: u.avatar,
+    };
     setView("onevsone");
     // Force the "Играть" subtab — without this the user lands on
     // whatever subtab they last selected (often "Лидерборд"), which
     // hides the challenge form and makes the Challenge button look
     // like a no-op.
     _activatePanelSubtab("onevsone", "play");
-    setTimeout(() => _onevsoneFocusChallengeFor(u), 60);
   });
   card.querySelector('[data-cy="user-popover-more"]').addEventListener("click", () => {
     // Right now there are no extra actions to show — just bounce to
@@ -10149,7 +10164,12 @@ function _renderOnevsoneLobby() {
     <div id="onevsone-form-host"></div>
   `;
   _renderOnevsoneOnlineList();
-  _renderOnevsoneChallengeForm(null);
+  // If the user clicked "Челлендж" from a popover before the lobby
+  // finished loading, restore the challenge form for the stashed
+  // target instead of clearing it.
+  const pending = state.onevsone.pendingChallenge;
+  state.onevsone.pendingChallenge = null;
+  _renderOnevsoneChallengeForm(pending || null);
   renderGlobalLeaderboard();
 }
 
@@ -10939,6 +10959,7 @@ function tryOpeningMove(from, to) {
   try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
   if (!move) {
     setStatus("Нелегальный ход.", "error");
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
@@ -10972,7 +10993,6 @@ function tryOpeningMove(from, to) {
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
     try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
-    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     _flashSquare(move.to, "puzzle-flash-bad");
     try { c.undo(); } catch (_) { /* ignore */ }
     _reportOpeningAttempt(false, false);
@@ -12078,6 +12098,16 @@ function handlePresenceSpectatorMessage(msg) {
         best_streak: Number(msg.best_streak || 0),
         score: Number(msg.streak || 0),
         solved: Number(msg.best_streak || 0),
+        // Mirror the player's local review-badge state (✓ "good" / ✗ "miss")
+        // so the spectator's mini-board renderer paints the same icon and
+        // from→to colour highlight on the same square. Without these the
+        // mini-board renderer falls back to "" and the badge is invisible.
+        review_badge_square: typeof msg.review_badge_square === "string"
+          ? msg.review_badge_square
+          : (prev.review_badge_square || ""),
+        review_badge_kind: typeof msg.review_badge_kind === "string"
+          ? msg.review_badge_kind
+          : (prev.review_badge_kind || ""),
       };
       sp.selectedId = cid;
       _spectatorRender();
