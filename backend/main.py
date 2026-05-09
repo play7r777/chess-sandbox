@@ -156,6 +156,7 @@ class OneVsOneChallengeRequest(BaseModel):
     target_id: str = Field(..., min_length=4, max_length=64)
     time_seconds: int = Field(..., ge=10, le=60 * 60)
     increment_seconds: int = Field(default=0, ge=0, le=60)
+    challenger_color: str = Field(default="random", pattern="^(w|b|random)$")
 
 
 class OneVsOneActionRequest(BaseModel):
@@ -1425,6 +1426,7 @@ async def onevsone_challenge(payload: OneVsOneChallengeRequest) -> dict[str, Any
             target_nickname=str(target.get("nickname") or ""),
             time_seconds=payload.time_seconds,
             increment_seconds=payload.increment_seconds,
+            challenger_color=payload.challenger_color,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

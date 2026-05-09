@@ -576,6 +576,7 @@ const state = {
   onevsone: {
     online: [],
     selectedTime: 300,        // 5 min default
+    selectedColor: "random", // "w" | "b" | "random" — challenger's preferred side
     outgoing: null,           // { challenge_id, target_id, target_nickname, time_seconds }
     incoming: {},             // challenge_id -> challenge payload (toast index)
     match: null,              // server-shaped match object
@@ -8678,6 +8679,11 @@ function startDailyPuzzle() {
   state.lastMove = null;
   renderBoard();
   renderDailyUi();
+  // Sync spectators to the new puzzle's pre-setup FEN + flip immediately.
+  _partyReportPosition(state.daily.fenStart, {
+    lastMove: null,
+    reviewBadge: { square: "", classification: "" },
+  });
   setTimeout(() => _playDailySetupMove(), 220);
 }
 
@@ -8698,6 +8704,11 @@ function _playDailySetupMove() {
   state.daily.startedAt = Date.now();
   _startDailyTimer();
   renderDailyUi();
+  // Mirror the setup move to spectators so they see the same animation.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: { square: "", classification: "" },
+  });
 }
 
 function tryDailyMove(from, to) {
@@ -8811,6 +8822,11 @@ function _playDailyOpponentReply() {
   state.daily.nextIdx += 1;
   state.daily.feedback = null;
   renderDailyUi();
+  // Mirror the bot's reply to spectators.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: keepBadge || { square: "", classification: "" },
+  });
   if (state.daily.nextIdx >= state.daily.moves.length) {
     finalizeDailyPuzzle("solved");
   }
@@ -9139,6 +9155,14 @@ function _serveNextRushPuzzle() {
   state.lastMove = null;
   renderBoard();
   renderRushUi();
+  // Sync spectators to the new puzzle's pre-setup FEN + flip immediately
+  // so they switch boards in lockstep with the player. Without this the
+  // watcher keeps showing the previous puzzle while the player is
+  // already dragging pieces in the next one.
+  _partyReportPosition(p.fen, {
+    lastMove: null,
+    reviewBadge: { square: "", classification: "" },
+  });
   setTimeout(() => _playRushSetupMove(), 200);
 }
 
@@ -9156,6 +9180,12 @@ function _playRushSetupMove() {
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.rush.nextIdx = 1;
+  // Mirror the setup move to spectators so they see the same animated
+  // opening as the player, not just the bare FEN.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: { square: "", classification: "" },
+  });
 }
 
 function _restoreRushBoard() {
@@ -9283,6 +9313,13 @@ function _playRushOpponentReply() {
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.rush.nextIdx += 1;
+  // Mirror the bot's reply to spectators so they don't see the player's
+  // green-check still on the previous square while the position has
+  // already advanced.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: keepBadge || { square: "", classification: "" },
+  });
   if (state.rush.nextIdx >= state.rush.moves.length) {
     state.rush.score += 1;
     state.rush.feedback = "solved";
@@ -10261,14 +10298,25 @@ function _renderOnevsoneChallengeForm(target) {
     return;
   }
   const sel = state.onevsone.selectedTime || 300;
+  const selColor = state.onevsone.selectedColor || "random";
   const buttons = ONEVSONE_TIME_OPTIONS.map((o) => {
     const active = o.sec === sel ? " is-active" : "";
     return `<button type="button" data-sec="${o.sec}" class="${active}">${o.label}</button>`;
+  }).join("");
+  const colorOpts = [
+    { v: "w", label: "⛪ Белые" },
+    { v: "random", label: "🎲 Случайно" },
+    { v: "b", label: "♚ Черные" },
+  ];
+  const colorButtons = colorOpts.map((o) => {
+    const active = o.v === selColor ? " is-active" : "";
+    return `<button type="button" data-color="${o.v}" class="${active}">${o.label}</button>`;
   }).join("");
   host.innerHTML = `
     <div class="onevsone-challenge-form">
       <div><b>Бросить вызов:</b> ${escapeHtml(target.nickname || "Гость")}</div>
       <div class="ov-times">${buttons}</div>
+      <div class="ov-colors">${colorButtons}</div>
       <div class="ov-actions">
         <button type="button" class="ov-cancel">Отмена</button>
         <button type="button" class="primary ov-send">Отправить вызов</button>
@@ -10278,6 +10326,13 @@ function _renderOnevsoneChallengeForm(target) {
   host.querySelectorAll(".ov-times button").forEach((b) => {
     b.onclick = () => {
       state.onevsone.selectedTime = parseInt(b.dataset.sec, 10) || 300;
+      _renderOnevsoneChallengeForm(target);
+    };
+  });
+  host.querySelectorAll(".ov-colors button").forEach((b) => {
+    b.onclick = () => {
+      const v = b.dataset.color;
+      state.onevsone.selectedColor = (v === "w" || v === "b") ? v : "random";
       _renderOnevsoneChallengeForm(target);
     };
   });
@@ -10296,6 +10351,7 @@ function _renderOnevsoneChallengeForm(target) {
 async function _onevsoneSendChallenge(targetId, targetNickname) {
   if (!state.user.client_id) throw new Error("Нет клиентского ID");
   const sec = state.onevsone.selectedTime || 300;
+  const color = state.onevsone.selectedColor || "random";
   const r = await api("/api/onevsone/challenge", {
     method: "POST",
     body: JSON.stringify({
@@ -10305,6 +10361,7 @@ async function _onevsoneSendChallenge(targetId, targetNickname) {
       target_id: targetId,
       target_nickname: targetNickname || "Гость",
       time_seconds: sec,
+      challenger_color: color,
     }),
   });
   if (r && r.challenge) {
@@ -10356,7 +10413,14 @@ function _onevsoneShowChallengeToast(ch) {
       _onevsoneDismissChallengeToast(ch.id);
       if (r && r.match) {
         state.onevsone.match = r.match;
+        // Drop any stale chess instance from a previous match so
+        // _renderOnevsoneMatchUi rebuilds it from the fresh m.fen.
+        // Without this the target keeps using the previous match's
+        // chess.js state and the board orientation / legal-move
+        // overlay desyncs from the new game.
+        state.onevsone.chess = null;
         setView("onevsone");
+        try { _activatePanelSubtab("onevsone", "play"); } catch (_) { /* ignore */ }
         _renderOnevsoneMatchUi();
         _onevsoneEnsureWs();
       }
@@ -10982,7 +11046,13 @@ function startOpeningPractice() {
   state.opening.active = true;
   try { loadFen(state.opening.chess.fen()); } catch (_) { /* ignore */ }
   state.lastMove = null;
+  state.reviewBadge = null;
   renderBoard();
+  // Sync spectators to the fresh opening start position.
+  _partyReportPosition(state.opening.chess.fen(), {
+    lastMove: null,
+    reviewBadge: { square: "", classification: "" },
+  });
   // If the line starts with the opponent's move, play it for them.
   const op = _selectedOpening();
   if (op && op.color === "black") {
@@ -11009,6 +11079,11 @@ function _playOpeningOpponentMove() {
   state.lastMove = { from: move.from, to: move.to };
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  // Mirror the opponent's reply to spectators.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: { square: "", classification: "" },
+  });
   state.opening.moveIdx += 1;
   state.opening.coachMsg = `Соперник: ${move.san}. Твой ход.`;
   if (state.opening.moveIdx >= line.moves.length) {
@@ -11062,6 +11137,12 @@ function tryOpeningMove(from, to) {
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
     try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
+    // Spectator mirror so the watcher sees the same red ✕ + pink
+    // from→to instead of a piece teleport when the visual reverts.
+    _partyReportPosition(c.fen(), {
+      reviewBadge: { square: move.to, classification: "miss" },
+      lastMove: { from: move.from, to: move.to },
+    });
     _flashSquare(move.to, "puzzle-flash-bad");
     try { c.undo(); } catch (_) { /* ignore */ }
     _reportOpeningAttempt(false, false);
@@ -11074,6 +11155,11 @@ function tryOpeningMove(from, to) {
       state.reviewBadge = null;
       state.lastMove = null;
       renderBoard();
+      // Mirror the revert to spectators.
+      _partyReportPosition(prevFen, {
+        reviewBadge: { square: "", classification: "" },
+        lastMove: null,
+      });
     }, 800);
     return;
   }

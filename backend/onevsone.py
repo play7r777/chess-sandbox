@@ -48,6 +48,10 @@ class Challenge:
     increment_seconds: int      # Fischer increment per move
     created_at: float
     status: str = "pending"     # pending | accepted | declined | expired | cancelled
+    # Challenger's preferred colour: "w" | "b" | "random". "random"
+    # makes the server flip a coin at accept time so neither side
+    # has a permanent edge.
+    challenger_color: str = "random"
 
     def public(self) -> dict[str, Any]:
         return {
@@ -61,6 +65,7 @@ class Challenge:
             "increment_seconds": self.increment_seconds,
             "created_at": int(self.created_at),
             "status": self.status,
+            "challenger_color": self.challenger_color,
         }
 
 
@@ -183,11 +188,15 @@ async def create_challenge(
     target_nickname: str,
     time_seconds: int,
     increment_seconds: int = 0,
+    challenger_color: str = "random",
 ) -> Challenge:
     if challenger_id == target_id:
         raise ValueError("cannot challenge yourself")
     time_seconds = max(10, min(int(time_seconds or 0), 60 * 60))
     increment_seconds = max(0, min(int(increment_seconds or 0), 60))
+    cc = (challenger_color or "random").lower().strip()
+    if cc not in ("w", "b", "random"):
+        cc = "random"
     async with _LOCK:
         _reap()
         # Idempotent: collapse repeated identical pending challenges.
@@ -198,6 +207,7 @@ async def create_challenge(
                 and existing.target_id == target_id
                 and existing.time_seconds == time_seconds
                 and existing.increment_seconds == increment_seconds
+                and existing.challenger_color == cc
             ):
                 return existing
         ch = Challenge(
@@ -210,6 +220,7 @@ async def create_challenge(
             time_seconds=time_seconds,
             increment_seconds=increment_seconds,
             created_at=time.time(),
+            challenger_color=cc,
         )
         _CHALLENGES[ch.challenge_id] = ch
     await notifications_db._push(
@@ -260,8 +271,14 @@ async def accept_challenge(
         if ch.status != "pending":
             return None
         ch.status = "accepted"
-        # Random colour assignment so neither side has a permanent edge.
-        challenger_white = secrets.choice([True, False])
+        # Honour the challenger's stated preference; "random" flips a
+        # coin so neither side has a permanent edge.
+        if ch.challenger_color == "w":
+            challenger_white = True
+        elif ch.challenger_color == "b":
+            challenger_white = False
+        else:
+            challenger_white = secrets.choice([True, False])
         if challenger_white:
             white = Player(
                 client_id=ch.challenger_id,
