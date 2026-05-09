@@ -4,8 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
-from typing import Any
+from io import BytesIO
+from pathlib import Path
+from typing import Annotated, Any
 
 import chess
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
@@ -13,9 +16,13 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import daily_puzzle as daily_puzzle_pack
 from . import notifications as notifications_db
+from . import onevsone as onevsone_room
+from . import opening_trainer as opening_trainer_pack
 from . import party as party_room
 from . import presence as presence_room
+from . import puzzle_rush as puzzle_rush_room
 from . import puzzles as puzzles_db
 from . import users as users_db
 from .analysis import analyse_game, import_game_async
@@ -71,7 +78,10 @@ class GameAnalyseRequest(BaseModel):
 class UserUpsertRequest(BaseModel):
     client_id: str = Field(..., min_length=4, max_length=64)
     nickname: str = Field(default="Гость", max_length=32)
-    avatar: str = Field(default="♟", max_length=8)
+    # 256 chars covers both single-glyph emoji avatars and the longer
+    # ``/api/avatars/<cid>.png?v=<ts>`` URLs produced by the upload
+    # endpoint after a player chooses a custom photo.
+    avatar: str = Field(default="♟", max_length=256)
 
 
 class HeartbeatRequest(BaseModel):
@@ -101,6 +111,55 @@ class PartyInviteRequest(BaseModel):
 
 
 class InviteActionRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+
+
+class PuzzleRushStartRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    mode: str = Field(..., description="3min | 5min | survival")
+
+
+class PuzzleRushAttemptRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    session_id: str = Field(..., min_length=4, max_length=64)
+    puzzle_id: str = Field(..., min_length=1, max_length=64)
+    outcome: str = Field(..., description="solved | failed | skipped")
+    solve_ms: int = Field(default=0, ge=0, le=10_000_000)
+
+
+class PuzzleRushFinalizeRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    session_id: str = Field(..., min_length=4, max_length=64)
+
+
+class DailyPuzzleAttemptRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    date: str = Field(..., min_length=10, max_length=10, description="ISO date YYYY-MM-DD (UTC)")
+    puzzle_id: str = Field(..., min_length=1, max_length=64)
+    outcome: str = Field(..., description="solved | failed")
+    solve_ms: int = Field(default=0, ge=0, le=10_000_000)
+
+
+class OpeningAttemptRequest(BaseModel):
+    client_id: str = Field(..., min_length=4, max_length=64)
+    opening_id: str = Field(..., min_length=1, max_length=64)
+    ply: int = Field(..., ge=0, le=64)
+    san: str = Field(..., min_length=1, max_length=12)
+
+
+class OneVsOneChallengeRequest(BaseModel):
+    """Body for ``POST /api/onevsone/challenge`` — challenger picks a
+    target client + a base time control. Increment is optional and
+    defaults to 0 (sudden-death). Validation lives in
+    :func:`onevsone.create_challenge`."""
+    client_id: str = Field(..., min_length=4, max_length=64)
+    target_id: str = Field(..., min_length=4, max_length=64)
+    time_seconds: int = Field(..., ge=10, le=60 * 60)
+    increment_seconds: int = Field(default=0, ge=0, le=60)
+
+
+class OneVsOneActionRequest(BaseModel):
+    """Body for accept/decline/cancel/resign endpoints."""
     client_id: str = Field(..., min_length=4, max_length=64)
 
 
@@ -480,6 +539,98 @@ def users_upsert(req: UserUpsertRequest) -> dict[str, Any]:
     )
 
 
+# ---- Avatar upload / serve ----
+#
+# Custom photos are stored on disk under ``data_dir/avatars/<cid>.png``.
+# We always re-encode through Pillow into PNG so:
+#   • untrusted SVG/animated content can't be hand-rolled past us,
+#   • output is bounded in pixels (max 256×256) and uniformly sized.
+# The path returned in the user row contains a cache-busting query
+# string so the client always re-fetches after an upload.
+
+_AVATAR_DIR = settings.data_dir / "avatars"
+_AVATAR_MAX_BYTES = 4 * 1024 * 1024  # 4 MB hard cap on the upload itself
+_AVATAR_MAX_PX = 256
+
+
+def _avatar_path(client_id: str) -> Path:
+    safe = "".join(ch for ch in client_id if ch.isalnum() or ch in ("-", "_"))[:64]
+    if not safe:
+        raise HTTPException(status_code=400, detail="Bad client_id.")
+    return _AVATAR_DIR / f"{safe}.png"
+
+
+@app.post("/api/users/avatar")
+async def users_avatar_upload(
+    file: Annotated[UploadFile, File(...)],
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """Accept a multipart image, normalise it to a 256×256 PNG, persist."""
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty upload.")
+    if len(raw) > _AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 4MB).")
+    try:
+        from PIL import Image, UnidentifiedImageError
+        from PIL.Image import Image as PILImage
+
+        try:
+            im: PILImage = Image.open(BytesIO(raw))
+            im.load()
+        except UnidentifiedImageError as exc:
+            raise HTTPException(status_code=415, detail="Unsupported image type.") from exc
+        # Normalise mode and centre-crop to a square.
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGBA")
+        side = min(im.width, im.height)
+        if side <= 0:
+            raise HTTPException(status_code=400, detail="Image has zero dimension.")
+        left = (im.width - side) // 2
+        top = (im.height - side) // 2
+        im = im.crop((left, top, left + side, top + side))
+        if im.width > _AVATAR_MAX_PX:
+            im = im.resize(
+                (_AVATAR_MAX_PX, _AVATAR_MAX_PX),
+                Image.Resampling.LANCZOS,
+            )
+        out = BytesIO()
+        im.save(out, format="PNG", optimize=True)
+        encoded = out.getvalue()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("avatar upload: failed to decode/encode")
+        raise HTTPException(status_code=400, detail="Bad image.") from exc
+
+    target = _avatar_path(client_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(encoded)
+
+    url = f"/api/avatars/{target.name}?v={int(time.time())}"
+    updated = users_db.set_avatar(client_id, url)
+    if updated is None:
+        # User row didn't exist yet — surface a sensible reply with the
+        # URL so the client can post a follow-up upsert with this avatar
+        # value once the row gets created.
+        return {"avatar": url, "user": None}
+    return {"avatar": url, "user": updated}
+
+
+@app.delete("/api/users/avatar")
+def users_avatar_delete(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """Remove the custom photo and revert the avatar to a default glyph."""
+    target = _avatar_path(client_id)
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
+        pass
+    updated = users_db.set_avatar(client_id, "♟")
+    return {"avatar": "♟", "user": updated}
+
+
 @app.post("/api/users/heartbeat")
 def users_heartbeat(req: HeartbeatRequest) -> dict[str, Any]:
     users_db.heartbeat(req.client_id)
@@ -529,18 +680,275 @@ def users_puzzle_attempt(req: PuzzleAttemptRequest) -> dict[str, Any]:
 # append to `parties[]`.
 
 
+# ---- Puzzle Rush ----
+
+@app.post("/api/puzzle_rush/start")
+def puzzle_rush_start(req: PuzzleRushStartRequest) -> dict[str, Any]:
+    if req.mode not in puzzle_rush_room.MODE_DURATION_SEC:
+        raise HTTPException(status_code=400, detail="mode must be 3min|5min|survival")
+    try:
+        return puzzle_rush_room.start_session(client_id=req.client_id, mode=req.mode)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/puzzle_rush/attempt")
+def puzzle_rush_attempt(req: PuzzleRushAttemptRequest) -> dict[str, Any]:
+    if req.outcome not in ("solved", "failed", "skipped"):
+        raise HTTPException(status_code=400, detail="outcome must be solved|failed|skipped")
+    try:
+        return puzzle_rush_room.attempt(
+            session_id=req.session_id,
+            client_id=req.client_id,
+            puzzle_id=req.puzzle_id,
+            outcome=req.outcome,
+            solve_ms=req.solve_ms,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/puzzle_rush/finalize")
+def puzzle_rush_finalize(req: PuzzleRushFinalizeRequest) -> dict[str, Any]:
+    try:
+        return puzzle_rush_room.finalize(
+            session_id=req.session_id, client_id=req.client_id
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.get("/api/puzzle_rush/state")
+def puzzle_rush_state(
+    session_id: str = Query(..., min_length=4, max_length=64),
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    try:
+        return puzzle_rush_room.get_state(session_id=session_id, client_id=client_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.get("/api/puzzle_rush/leaderboard")
+def puzzle_rush_leaderboard(
+    mode: str = Query(..., description="3min | 5min | survival"),
+    period: str = Query(default="all", description="all | today"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    if mode not in puzzle_rush_room.MODE_DURATION_SEC:
+        raise HTTPException(status_code=400, detail="mode must be 3min|5min|survival")
+    if period not in ("all", "today"):
+        raise HTTPException(status_code=400, detail="period must be all|today")
+    return {
+        "mode": mode,
+        "period": period,
+        "rows": users_db.puzzle_rush_leaderboard(mode=mode, period=period, limit=limit),
+    }
+
+
+# ---- Daily Puzzle ----
+
+@app.get("/api/daily_puzzle/today")
+def daily_puzzle_today() -> dict[str, Any]:
+    date = daily_puzzle_pack.today_iso()
+    p = daily_puzzle_pack.get_for_date(date)
+    if not p:
+        raise HTTPException(status_code=503, detail="No puzzle available for today.")
+    payload = daily_puzzle_pack.public_payload(p, date=date)
+    serialized = _serialize_puzzle(p)
+    payload["side_to_solve"] = serialized.get("side_to_solve")
+    payload["setup_san"] = serialized.get("setup_san")
+    payload["themes_ru"] = serialized.get("themes_ru") or []
+    return payload
+
+
+@app.post("/api/daily_puzzle/attempt")
+def daily_puzzle_attempt(req: DailyPuzzleAttemptRequest) -> dict[str, Any]:
+    if req.outcome not in ("solved", "failed"):
+        raise HTTPException(status_code=400, detail="outcome must be solved|failed")
+    expected = daily_puzzle_pack.get_for_date(req.date)
+    if not expected or str(expected.get("id") or "") != req.puzzle_id:
+        raise HTTPException(status_code=400, detail="puzzle_id does not match the daily puzzle")
+    u = users_db.record_daily_puzzle_attempt(
+        req.client_id,
+        date=req.date,
+        puzzle_id=req.puzzle_id,
+        outcome=req.outcome,
+        solve_ms=req.solve_ms,
+    )
+    if u is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return u
+
+
+@app.get("/api/daily_puzzle/leaderboard")
+def daily_puzzle_leaderboard(
+    date: str | None = Query(default=None, description="ISO date YYYY-MM-DD; defaults to today UTC"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    target = date or daily_puzzle_pack.today_iso()
+    return {
+        "date": target,
+        "rows": users_db.daily_puzzle_leaderboard(target, limit=limit),
+    }
+
+
+# ---- Opening Trainer ----
+
+@app.get("/api/opening_trainer/list")
+def opening_trainer_list() -> dict[str, Any]:
+    return {"openings": opening_trainer_pack.list_openings()}
+
+
+@app.get("/api/opening_trainer/{opening_id}")
+def opening_trainer_get(opening_id: str) -> dict[str, Any]:
+    op = opening_trainer_pack.get_opening(opening_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail="Opening not found.")
+    return op.to_dict()
+
+
+@app.get("/api/opening_trainer/{opening_id}/position")
+def opening_trainer_position(
+    opening_id: str,
+    ply: int = Query(default=0, ge=0, le=64),
+) -> dict[str, Any]:
+    try:
+        return opening_trainer_pack.position_at(opening_id, ply)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IndexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/opening_trainer/attempt")
+def opening_trainer_attempt(req: OpeningAttemptRequest) -> dict[str, Any]:
+    try:
+        evaluation = opening_trainer_pack.evaluate_move(
+            opening_id=req.opening_id,
+            ply=req.ply,
+            san=req.san,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IndexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    user = users_db.record_opening_attempt(
+        req.client_id,
+        opening_id=req.opening_id,
+        correct=bool(evaluation.get("correct")),
+        line_completed=bool(evaluation.get("finished")),
+    )
+    return {
+        "evaluation": evaluation,
+        "user": user,
+    }
+
+
+@app.get("/api/opening_trainer/leaderboard")
+def opening_trainer_leaderboard(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    return {"rows": users_db.opening_trainer_leaderboard(limit=limit)}
+
+
+# ---- Coach status stubs (AI removed) ----
+#
+# The previous build shipped an Ollama + Stockfish "AI coach" for the
+# Opening Trainer and the Game Review. The user explicitly asked us to
+# strip every AI surface from the project, so the coach endpoints below
+# now return a fixed `available: false` payload. The real chess.com-
+# style explanations are produced entirely on the frontend now from a
+# large hardcoded phrase bank (see `COACH_HEADLINES` / `COACH_IDEAS` in
+# `frontend/app.js`).
+
+
+def _coach_status_stub() -> dict[str, Any]:
+    """Shape-compatible reply for the legacy coach status probes.
+
+    Old clients that still poll `/api/opening_trainer/coach/status` or
+    `/api/analysis/coach/status` will read `available: false` and
+    silently skip showing any AI button — same fallback path they had
+    when Ollama was off.
+    """
+    return {
+        "available": False,
+        "model": "",
+        "base_url": "",
+        "installed_models": [],
+        "stockfish_running": engine.is_running,
+    }
+
+
+@app.get("/api/opening_trainer/coach/status")
+async def opening_trainer_coach_status() -> dict[str, Any]:
+    return _coach_status_stub()
+
+
+@app.get("/api/analysis/coach/status")
+async def analysis_coach_status() -> dict[str, Any]:
+    return _coach_status_stub()
+
+
 # ---- Party / Co-op puzzles ----
 
 class PartyCreateRequest(BaseModel):
     client_id: str = Field(..., min_length=4, max_length=64)
     nickname: str = Field(default="Гость", max_length=32)
-    avatar: str = Field(default="♟", max_length=8)
+    # `avatar` may be a glyph (e.g. "♟") or a URL pointing at the static
+    # avatars mount (e.g. "/api/avatars/<cid>.png?v=<ts>"), so the cap
+    # mirrors UserUpsertRequest at 256 chars.
+    avatar: str = Field(default="♟", max_length=256)
+    # Puzzle-rating mode picked by the host on the lobby screen:
+    #   "standard" — server picks puzzles around the lobby's average ELO
+    #   "custom"   — host explicitly types a [rating_min, rating_max]
+    # If `mode == "custom"` then both `rating_min` and `rating_max` must
+    # be set; otherwise both are ignored. Both bounds are clipped to
+    # ``PARTY_BAND_MIN..PARTY_BAND_MAX`` server-side so a tampered
+    # payload can't request a 0-rated bank.
+    mode: str = Field(default="standard", max_length=16)
+    rating_min: int = Field(default=0, ge=0, le=4000)
+    rating_max: int = Field(default=0, ge=0, le=4000)
 
 
 @app.post("/api/party/create")
 async def party_create(req: PartyCreateRequest) -> dict[str, Any]:
     party_room.reap_idle()
     p = await party_room.create_party(req.client_id, req.nickname, req.avatar)
+    # Persist the host-picked mode + rating window onto the freshly
+    # created Party. We do it *outside* `create_party()` so the helper
+    # signature stays generic for tests; the mode round-trips through
+    # `public_state()` so the lobby UI can show the badge to everyone.
+    mode = (req.mode or "standard").strip().lower()
+    if mode not in ("standard", "custom"):
+        mode = "standard"
+    p.mode = mode
+    if mode == "custom":
+        lo = int(req.rating_min or 0)
+        hi = int(req.rating_max or 0)
+        if lo > 0 and hi > 0 and lo < hi:
+            p.rating_min = lo
+            p.rating_max = hi
+        else:
+            # Invalid window — silently fall back to standard so the
+            # host doesn't lose the lobby on a typo. The frontend
+            # validates as well.
+            p.mode = "standard"
+            p.rating_min = 0
+            p.rating_max = 0
+    else:
+        p.rating_min = 0
+        p.rating_max = 0
     return {"party_id": p.party_id, "code": p.code, **p.public_state()}
 
 
@@ -707,13 +1115,23 @@ async def _party_ws_player(
                 continue
             mtype = msg.get("type")
             if mtype == "start":
-                # The host can pick a 2/3/5/10-min match length in the
-                # lobby; the value rides along on the start frame so we
-                # don't need a separate REST hop. party.start() validates
-                # against the allowlist, so passing through msg.get is safe.
+                # `duration_sec` is fixed at 180 server-side, but we
+                # still accept it on the wire so legacy clients don't
+                # error out. `mode` / `rating_min` / `rating_max` let
+                # the host switch the puzzle-rating window at start
+                # time without recreating the lobby.
                 duration_sec = msg.get("duration_sec")
+                mode = msg.get("mode")
+                rating_min = msg.get("rating_min")
+                rating_max = msg.get("rating_max")
                 try:
-                    await party.start(client_id, duration_sec=duration_sec)
+                    await party.start(
+                        client_id,
+                        duration_sec=duration_sec,
+                        mode=str(mode) if mode is not None else None,
+                        rating_min=int(rating_min) if rating_min is not None else None,
+                        rating_max=int(rating_max) if rating_max is not None else None,
+                    )
                 except party_room.PartyError as e:
                     await ws.send_json({"type": "error", "code": e.code, "message": e.message})
             elif mtype == "attempt":
@@ -913,6 +1331,15 @@ async def _presence_ws_player(
                     rating=int(msg.get("rating") or 0)
                     if "rating" in msg
                     else None,
+                    review_badge_square=str(
+                        msg.get("review_badge_square") or "",
+                    ) if "review_badge_square" in msg else None,
+                    review_badge_kind=str(
+                        msg.get("review_badge_kind") or "",
+                    ) if "review_badge_kind" in msg else None,
+                    mode=str(msg.get("mode") or "")
+                    if "mode" in msg
+                    else None,
                 )
             elif mtype == "select":
                 await presence_room.update_selection(
@@ -974,6 +1401,207 @@ async def _presence_ws_spectator(
         logger.warning("presence spectator ws error: %s", exc)
     finally:
         await presence_room.detach_spectator(target, spectator_id)
+
+
+# ---- 1 vs 1 mode (legal-move challenges + live match relay) ----
+
+
+@app.post("/api/onevsone/challenge")
+async def onevsone_challenge(payload: OneVsOneChallengeRequest) -> dict[str, Any]:
+    """Send a 1v1 challenge from ``client_id`` to ``target_id``. The
+    target receives a ``onevsone_challenge`` notification on the SSE
+    pipe; the response carries the persisted record so the challenger
+    can show "Awaiting reply…" UI."""
+    challenger = users_db.get_user(payload.client_id)
+    target = users_db.get_user(payload.target_id)
+    if challenger is None or target is None:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    try:
+        ch = await onevsone_room.create_challenge(
+            challenger_id=str(challenger.get("client_id") or payload.client_id),
+            challenger_nickname=str(challenger.get("nickname") or ""),
+            challenger_avatar=str(challenger.get("avatar") or ""),
+            target_id=str(target.get("client_id") or payload.target_id),
+            target_nickname=str(target.get("nickname") or ""),
+            time_seconds=payload.time_seconds,
+            increment_seconds=payload.increment_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"challenge": ch.public()}
+
+
+@app.get("/api/onevsone/challenges")
+async def onevsone_pending_challenges(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """Return any pending 1v1 challenges targeted at ``client_id``."""
+    return {"challenges": onevsone_room.pending_challenges_for(client_id)}
+
+
+@app.post("/api/onevsone/challenge/{challenge_id}/accept")
+async def onevsone_challenge_accept(
+    challenge_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    user = users_db.get_user(payload.client_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    user_cid = str(user.get("client_id") or payload.client_id)
+    result = await onevsone_room.accept_challenge(
+        challenge_id,
+        user_cid,
+        str(user.get("nickname") or ""),
+        str(user.get("avatar") or ""),
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
+    ch, match = result
+    return {"challenge": ch.public(), "match": match.public(user_cid)}
+
+
+@app.post("/api/onevsone/challenge/{challenge_id}/decline")
+async def onevsone_challenge_decline(
+    challenge_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    ch = await onevsone_room.decline_challenge(challenge_id, payload.client_id)
+    if ch is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
+    return {"challenge": ch.public()}
+
+
+@app.post("/api/onevsone/challenge/{challenge_id}/cancel")
+async def onevsone_challenge_cancel(
+    challenge_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    ch = await onevsone_room.cancel_challenge(challenge_id, payload.client_id)
+    if ch is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
+    return {"challenge": ch.public()}
+
+
+@app.get("/api/onevsone/match/{match_id}")
+async def onevsone_match_state(
+    match_id: str,
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    m = onevsone_room.get_match(match_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="match_not_found")
+    if m.player_for(client_id) is None:
+        raise HTTPException(status_code=403, detail="not_a_player")
+    return {"match": m.public(client_id)}
+
+
+@app.post("/api/onevsone/match/{match_id}/resign")
+async def onevsone_match_resign(
+    match_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    result = await onevsone_room.resign(match_id, payload.client_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="match_not_found_or_finished")
+    # Notify both peers via in-game WS broadcast (handled inside ws loop).
+    m = onevsone_room.get_match(match_id)
+    if m is not None:
+        await _onevsone_broadcast(m, {
+            "type": "resigned",
+            "by": payload.client_id,
+            "winner": result.get("winner"),
+            "finish_reason": "resign",
+        })
+    return result
+
+
+@app.get("/api/onevsone/online")
+async def onevsone_online_users(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """List of all visitors with online/offline status. ``client_id``
+    is the caller, used to mark themselves so the frontend can grey
+    them out / hide them from the challenge list."""
+    rows = users_db.list_users()
+    return {"me": client_id, "users": rows}
+
+
+async def _onevsone_broadcast(match: onevsone_room.Match, payload: dict[str, Any]) -> None:
+    """Fan-out a payload to both peers' live WebSockets, ignoring closed sockets."""
+    for cid, sock in list(match.sockets.items()):
+        if sock is None:
+            continue
+        try:
+            await sock.send_json(payload)
+        except Exception:
+            # Socket likely closed mid-send; drop the registration.
+            match.sockets.pop(cid, None)
+
+
+@app.websocket("/api/onevsone/ws")
+async def onevsone_ws(ws: WebSocket) -> None:
+    """Live match relay. Each peer connects with ``match_id`` +
+    ``client_id`` query params. Server validates moves, updates clocks
+    and broadcasts ``move`` / ``resigned`` / ``ended`` payloads to the
+    opposite peer."""
+    match_id = ws.query_params.get("match_id") or ""
+    client_id = ws.query_params.get("client_id") or ""
+    if not match_id or not client_id:
+        await ws.close(code=4400)
+        return
+    match = await onevsone_room.attach_socket(match_id, client_id, ws)
+    if match is None:
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    try:
+        await ws.send_json({"type": "state", "match": match.public(client_id)})
+    except Exception:
+        await onevsone_room.detach_socket(match_id, client_id)
+        return
+    try:
+        while True:
+            msg = await ws.receive_json()
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "move":
+                uci = str(msg.get("uci") or "")
+                result = await onevsone_room.apply_move(match_id, client_id, uci)
+                if result is None:
+                    await ws.send_json({"type": "error", "code": "match_gone"})
+                    continue
+                if result.get("error"):
+                    await ws.send_json({"type": "error", "code": result["error"]})
+                    continue
+                m_now = onevsone_room.get_match(match_id)
+                if m_now is not None:
+                    await _onevsone_broadcast(m_now, {"type": "move", **result})
+            elif mtype == "resign":
+                result = await onevsone_room.resign(match_id, client_id)
+                if result is not None:
+                    m_now = onevsone_room.get_match(match_id)
+                    if m_now is not None:
+                        await _onevsone_broadcast(m_now, {
+                            "type": "resigned",
+                            "by": client_id,
+                            "winner": result.get("winner"),
+                            "finish_reason": "resign",
+                        })
+            elif mtype == "ping":
+                await ws.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("onevsone ws error: %s", exc)
+    finally:
+        await onevsone_room.detach_socket(match_id, client_id)
+
+
+# ---- Static avatars ----
+#
+# Mount the on-disk avatars directory at ``/api/avatars``. Done before
+# the SPA fallback so requests like ``/api/avatars/<cid>.png`` aren't
+# captured by the catch-all ``/{path:path}`` handler at the bottom.
+
+_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/api/avatars", StaticFiles(directory=_AVATAR_DIR), name="avatars")
 
 
 # ---- Static frontend ----

@@ -306,6 +306,73 @@ API:
 | `CHESS_STOCKFISH_DEFAULT_SKILL_LEVEL` | 20         | UCI Skill Level (0..20)            |
 | `CHESS_HOST`                        | 127.0.0.1    | bind хост                          |
 | `CHESS_PORT`                        | 8001         | bind порт                          |
+| `CHESS_OLLAMA_BASE_URL`             | `http://127.0.0.1:11434` | URL локального Ollama-демона |
+| `CHESS_OLLAMA_MODEL`                | `qwen2.5:7b` | модель для AI-тренера дебютов (стоит понимать шахматную нотацию) |
+| `CHESS_OLLAMA_TIMEOUT_S`            | 60           | таймаут на ответ модели (сек)      |
+| `CHESS_OLLAMA_NUM_PREDICT`          | 320          | максимум токенов в ответе         |
+
+---
+
+## AI-тренер дебютов (Ollama + Stockfish)
+
+В таб **Opening** встроен AI-тренер: после любого хода в режиме практики
+жми **«🧠 Подробнее от тренера»** — бэкенд берёт текущий FEN, прогоняет
+его через Stockfish 18 (multipv=2), кладёт результат в промпт вместе с
+теорией дебюта и стримит объяснение от локальной LLM. Ничего не уходит
+в облако: всё крутится у тебя.
+
+### Установка
+
+1. Скачай и поставь **Ollama** с [ollama.com/download](https://ollama.com/download)
+   (Windows-инсталлер `OllamaSetup.exe`, macOS .app, Linux `curl …`).
+2. После установки демон Ollama стартует сам и слушает
+   `http://127.0.0.1:11434`. Проверить можно так:
+   ```powershell
+   curl http://127.0.0.1:11434/api/tags
+   ```
+3. Поставь рекомендованную модель (одной хватает):
+   ```powershell
+   # По умолчанию — лучше всего понимает шахматную нотацию (~4.5 GB)
+   ollama pull qwen2.5:7b
+
+   # Альтернативы (нужно явно прописать в CHESS_OLLAMA_MODEL):
+   ollama pull llama3.2:3b                       # ~2 GB, быстрее, но проще
+   ollama pull llama3.1:8b-instruct-q4_K_M       # ~5 GB, баланс
+   ```
+4. Запусти Chess Sandbox обычным способом (`uvicorn backend.main:app …`).
+   В таб Opening появится бейдж **«Ollama on · qwen2.5:7b»** — значит
+   AI-тренер подключён.
+
+### Как сменить модель
+
+Положи в окружение перед запуском:
+
+```powershell
+$env:CHESS_OLLAMA_MODEL = "qwen2.5:7b"
+.venv\Scripts\python -m uvicorn backend.main:app --host 127.0.0.1 --port 8001
+```
+
+Или в `.env` рядом с `pyproject.toml`:
+
+```
+CHESS_OLLAMA_MODEL=qwen2.5:7b
+CHESS_OLLAMA_BASE_URL=http://127.0.0.1:11434
+```
+
+### Что если Ollama не запущена?
+
+Тренер сам проверяет демон через `/api/opening_trainer/coach/status`.
+Если Ollama не отвечает, бейдж показывает **«Ollama off»** и инструкции
+по запуску, а кнопка «Подробнее от тренера» отдаёт **fallback** — теорию
+дебюта + оценку Stockfish 18 + canned-фразы тренера. То есть UX не
+ломается даже без LLM, просто разбор не такой подробный.
+
+### Stockfish 18 в промпте
+
+Каждый запрос к тренеру тянет с движка топ-2 PV на глубину 18.
+Эти линии попадают в системный промпт, чтобы модель опиралась на
+объективную оценку и не выдумывала анализ. Без сконфигурённого
+Stockfish-а тренер всё равно ответит, но без эталонных линий.
 
 ---
 

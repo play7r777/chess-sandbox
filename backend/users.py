@@ -37,14 +37,28 @@ def _rating_delta(
     outcome: str,
     solve_ms: int | None,
 ) -> int:
-    """Glicko-lite Elo delta. Mirrors the old frontend `_ratingDelta`.
+    """Non-linear Glicko-lite Elo delta.
+
+    The naive symmetric K-factor used to mean a 1200-rated user farming
+    600-rated puzzles climbed the leaderboard at the same speed as
+    someone grinding 2400-rated puzzles. We now multiply the raw delta
+    by an "upset" factor that scales with the rating gap:
+
+      • Solving a puzzle ≥ 200 above your rating gets a meaningful
+        bonus (capped at ~2.4× for a +600 upset).
+      • Solving a puzzle far below your rating shrinks the gain to a
+        token +1 minimum so beating beginners as a grandmaster never
+        moves you up the ladder.
+      • Symmetrically, failing a much weaker puzzle stings more than
+        failing a much harder one.
 
     Server-side rather than client-side so a tampered POST body can't
     inject an arbitrary ``new_rating`` into the leaderboard.
     """
     if outcome == "solved-hint":
         return 0
-    expected = 1.0 / (1.0 + 10.0 ** ((puzzle_rating - user_rating) / 400.0))
+    diff = puzzle_rating - user_rating
+    expected = 1.0 / (1.0 + 10.0 ** (-diff / 400.0))
     if user_rating >= 2200:
         k = 14
     elif user_rating >= 1700:
@@ -67,10 +81,22 @@ def _rating_delta(
             speed = 0.85
         else:
             speed = 0.7
-        raw = k * (1.0 - expected) * speed
-        return max(1, round(raw))
-    # failed / skipped — rating drops, capped at -1.
-    raw = -k * expected
+        # Upset factor for wins. Beating something far above your
+        # rating (positive diff) pays out, beating something far below
+        # tapers towards zero. Clamped to [0.15, 2.4].
+        upset = 0.85 + diff / 500.0
+        upset = max(0.15, min(2.4, upset))
+        raw = k * (1.0 - expected) * speed * upset
+        # Big upsets always pay at least a few points, otherwise the
+        # rounding can swallow a hard-fought win.
+        floor = 3 if diff >= 200 else 1
+        return max(floor, round(raw))
+    # failed / skipped — rating drops. Failing a weaker puzzle hurts
+    # more (regret factor); failing a much harder puzzle shrinks toward
+    # zero so we don't punish people who *tried* a stretch puzzle.
+    regret = 1.0 - diff / 500.0
+    regret = max(0.25, min(2.2, regret))
+    raw = -k * expected * regret
     return min(-1, round(raw))
 
 
@@ -120,9 +146,74 @@ def _blank_user(client_id: str, nickname: str, avatar: str) -> dict[str, Any]:
             {"ts": now, "rating": 1200, "delta": 0, "outcome": "init"},
         ],
         "parties": [],
+        # Per-mode personal best for Puzzle Rush (3min / 5min / survival).
+        # Each entry: {best, best_at, last, last_at}.
+        "puzzle_rush": {
+            "best": {},
+            "history": [],
+        },
+        # Daily Puzzle progress: per-day attempt log + streak counters.
+        # `attempts` is keyed by ISO date so we can serve the leaderboard
+        # for any past day on demand.
+        "daily_puzzle": {
+            "attempts": {},
+            "current_streak": 0,
+            "best_streak": 0,
+            "last_solved_date": None,
+        },
+        # Opening Trainer mastery: opening_id -> {attempts, correct,
+        # last_played, mastery (0-100)}.
+        "opening_trainer": {},
         "created_at": now,
         "last_seen": now,
     }
+
+
+def _ensure_extra_fields(u: dict[str, Any]) -> None:
+    """Backfill optional new-feature fields on legacy user rows."""
+    if "puzzle_rush" not in u or not isinstance(u.get("puzzle_rush"), dict):
+        u["puzzle_rush"] = {"best": {}, "history": []}
+    else:
+        u["puzzle_rush"].setdefault("best", {})
+        u["puzzle_rush"].setdefault("history", [])
+    if "daily_puzzle" not in u or not isinstance(u.get("daily_puzzle"), dict):
+        u["daily_puzzle"] = {
+            "attempts": {},
+            "current_streak": 0,
+            "best_streak": 0,
+            "last_solved_date": None,
+        }
+    else:
+        u["daily_puzzle"].setdefault("attempts", {})
+        u["daily_puzzle"].setdefault("current_streak", 0)
+        u["daily_puzzle"].setdefault("best_streak", 0)
+        u["daily_puzzle"].setdefault("last_solved_date", None)
+    if "opening_trainer" not in u or not isinstance(u.get("opening_trainer"), dict):
+        u["opening_trainer"] = {}
+    # Migrate avatars that an older client truncated to 8 chars from a
+    # ``/api/avatars/...`` URL (would otherwise render as the literal
+    # text "/api/ava" everywhere).
+    av = u.get("avatar")
+    if isinstance(av, str) and av.startswith("/api/") and not av.startswith("/api/avatars/"):
+        u["avatar"] = "♟"
+
+
+def _normalize_avatar(avatar: str) -> str:
+    """Trim and bound the avatar string.
+
+    Two shapes are accepted:
+      • a short glyph (emoji / single chess unicode), capped at 8 chars
+      • a relative URL (e.g. ``/api/avatars/<cid>.png?v=...``) pointing
+        at an uploaded image — capped at 256 chars so users.json can't
+        be bloated with arbitrary inline base64.
+    Anything else falls back to the ♟ glyph.
+    """
+    s = (avatar or "").strip()
+    if not s:
+        return "♟"
+    if s.startswith("/api/avatars/"):
+        return s[:256]
+    return s[:8]
 
 
 def upsert_user(
@@ -132,7 +223,7 @@ def upsert_user(
 ) -> dict[str, Any]:
     """Create the user row on first use, otherwise patch nickname/avatar."""
     nickname = (nickname or "").strip()[:32] or "Гость"
-    avatar = (avatar or "").strip()[:8] or "♟"
+    avatar = _normalize_avatar(avatar)
     with _LOCK:
         data = _load()
         users = data["users"]
@@ -143,6 +234,21 @@ def upsert_user(
         else:
             u["nickname"] = nickname
             u["avatar"] = avatar
+            _ensure_extra_fields(u)
+        u["last_seen"] = int(time.time())
+        _save(data)
+        return dict(u)
+
+
+def set_avatar(client_id: str, avatar: str) -> dict[str, Any] | None:
+    """Update only the avatar field. Returns the updated row or None."""
+    avatar = _normalize_avatar(avatar)
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        u["avatar"] = avatar
         u["last_seen"] = int(time.time())
         _save(data)
         return dict(u)
@@ -172,6 +278,36 @@ def _summarize(u: dict[str, Any]) -> dict[str, Any]:
     wrong = int(s.get("wrong") or 0)
     skipped = int(s.get("skipped") or 0)
     win_pct = (solved / games * 100.0) if games else 0.0
+    rush = (u.get("puzzle_rush") or {}).get("best") or {}
+    rush_best = 0
+    for mode_key in PUZZLE_RUSH_MODES:
+        cur = rush.get(mode_key) or {}
+        b = int(cur.get("best") or 0)
+        if b > rush_best:
+            rush_best = b
+    dp = u.get("daily_puzzle") or {}
+    daily_attempts = (dp.get("attempts") or {})
+    daily_solved = sum(
+        1 for a in daily_attempts.values()
+        if isinstance(a, dict) and a.get("outcome") == "solved"
+    )
+    parties = u.get("parties") or []
+    onevsone_wins = 0
+    onevsone_games = 0
+    if isinstance(parties, list):
+        for p in parties:
+            if not isinstance(p, dict):
+                continue
+            if p.get("kind") == "onevsone":
+                onevsone_games += 1
+                if p.get("outcome") == "win":
+                    onevsone_wins += 1
+    last_seen = int(u.get("last_seen") or 0)
+    # Single source of truth for "online" — used by /api/users (which
+    # feeds every leaderboard, the 1v1 lobby and the Battle landing).
+    # Heartbeat fires every ~30s from the frontend, so a 90s window
+    # covers a single missed beat.
+    online = bool(last_seen) and (int(time.time()) - last_seen) <= 90
     return {
         "client_id": u.get("client_id"),
         "nickname": u.get("nickname"),
@@ -184,7 +320,15 @@ def _summarize(u: dict[str, Any]) -> dict[str, Any]:
         "win_pct": round(win_pct, 1),
         "best_streak": int(s.get("best_streak") or 0),
         "current_streak": int(s.get("current_streak") or 0),
-        "last_seen": int(u.get("last_seen") or 0),
+        "last_seen": last_seen,
+        "online": online,
+        "created_at": int(u.get("created_at") or 0),
+        "puzzle_rush_best": rush_best,
+        "daily_best_streak": int(dp.get("best_streak") or 0),
+        "daily_current_streak": int(dp.get("current_streak") or 0),
+        "daily_solved_total": daily_solved,
+        "onevsone_wins": onevsone_wins,
+        "onevsone_games": onevsone_games,
     }
 
 
@@ -241,6 +385,10 @@ def record_puzzle_attempt(
                 s["current_streak"] = int(s.get("current_streak") or 0) + 1
                 if s["current_streak"] > int(s.get("best_streak") or 0):
                     s["best_streak"] = s["current_streak"]
+            else:
+                # Hint-assisted solve breaks the streak — pure clean
+                # solves only.
+                s["current_streak"] = 0
         elif outcome == "failed":
             s["wrong"] = int(s.get("wrong") or 0) + 1
             s["current_streak"] = 0
@@ -286,6 +434,300 @@ def record_party_result(client_id: str, summary: dict[str, Any]) -> None:
         if len(parties) > 200:
             del parties[: len(parties) - 200]
         _save(data)
+
+
+# ---------------------------------------------------------------------------
+# Puzzle Rush helpers
+# ---------------------------------------------------------------------------
+
+PUZZLE_RUSH_MODES = ("3min", "5min", "survival")
+
+
+def record_puzzle_rush_result(
+    client_id: str,
+    *,
+    mode: str,
+    score: int,
+    solved: int,
+    mistakes: int,
+    duration_ms: int,
+) -> dict[str, Any] | None:
+    """Persist a finished Puzzle Rush run. Returns the updated user row."""
+    if mode not in PUZZLE_RUSH_MODES:
+        return None
+    score = max(0, int(score))
+    solved = max(0, int(solved))
+    mistakes = max(0, int(mistakes))
+    duration_ms = max(0, int(duration_ms))
+    now = int(time.time())
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        _ensure_extra_fields(u)
+        rush = u["puzzle_rush"]
+        best_map = rush.setdefault("best", {})
+        cur = best_map.get(mode) or {}
+        prev_best = int(cur.get("best") or 0)
+        is_new_best = score > prev_best
+        best_map[mode] = {
+            "best": max(prev_best, score),
+            "best_at": int(cur.get("best_at") or 0) if not is_new_best else now,
+            "last": score,
+            "last_at": now,
+        }
+        history = rush.setdefault("history", [])
+        history.append(
+            {
+                "ts": now,
+                "mode": mode,
+                "score": score,
+                "solved": solved,
+                "mistakes": mistakes,
+                "duration_ms": duration_ms,
+                "new_best": bool(is_new_best),
+            }
+        )
+        if len(history) > 200:
+            del history[: len(history) - 200]
+        u["last_seen"] = now
+        _save(data)
+        return dict(u)
+
+
+def puzzle_rush_leaderboard(
+    *,
+    mode: str,
+    period: str = "all",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Best Puzzle Rush score per user for `mode`.
+
+    period == "today": only counts runs from the current UTC day.
+    period == "all":   uses each user's stored personal best for the mode.
+    """
+    if mode not in PUZZLE_RUSH_MODES:
+        return []
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    rows: list[dict[str, Any]] = []
+    data = _load()
+    for u in data["users"].values():
+        rush = u.get("puzzle_rush") or {}
+        if period == "today":
+            best_today = 0
+            best_today_at = 0
+            for entry in rush.get("history") or []:
+                if entry.get("mode") != mode:
+                    continue
+                ts = int(entry.get("ts") or 0)
+                if time.strftime("%Y-%m-%d", time.gmtime(ts)) != today:
+                    continue
+                score = int(entry.get("score") or 0)
+                if score > best_today:
+                    best_today = score
+                    best_today_at = ts
+            if best_today <= 0:
+                continue
+            rows.append(
+                {
+                    "client_id": u.get("client_id"),
+                    "nickname": u.get("nickname"),
+                    "avatar": u.get("avatar"),
+                    "score": best_today,
+                    "ts": best_today_at,
+                }
+            )
+        else:
+            best = (rush.get("best") or {}).get(mode) or {}
+            score = int(best.get("best") or 0)
+            if score <= 0:
+                continue
+            rows.append(
+                {
+                    "client_id": u.get("client_id"),
+                    "nickname": u.get("nickname"),
+                    "avatar": u.get("avatar"),
+                    "score": score,
+                    "ts": int(best.get("best_at") or 0),
+                }
+            )
+    rows.sort(key=lambda r: (-int(r["score"]), int(r["ts"]) or 1 << 62))
+    return rows[: max(1, int(limit))]
+
+
+# ---------------------------------------------------------------------------
+# Daily Puzzle helpers
+# ---------------------------------------------------------------------------
+
+def _daily_increment_streak(dp: dict[str, Any], date: str) -> None:
+    """Bump streak counters when a user solves the daily puzzle for ``date``.
+
+    Uses ISO date strings (UTC) so the math is independent of the user's
+    local timezone. Calling twice for the same date is a no-op.
+    """
+    last = dp.get("last_solved_date")
+    if last == date:
+        return
+    if last:
+        try:
+            last_t = time.mktime(time.strptime(last, "%Y-%m-%d"))
+            this_t = time.mktime(time.strptime(date, "%Y-%m-%d"))
+            gap_days = round((this_t - last_t) / 86400.0)
+        except ValueError:
+            gap_days = 99
+        if gap_days == 1:
+            dp["current_streak"] = int(dp.get("current_streak") or 0) + 1
+        else:
+            dp["current_streak"] = 1
+    else:
+        dp["current_streak"] = 1
+    if int(dp.get("current_streak") or 0) > int(dp.get("best_streak") or 0):
+        dp["best_streak"] = dp["current_streak"]
+    dp["last_solved_date"] = date
+
+
+def record_daily_puzzle_attempt(
+    client_id: str,
+    *,
+    date: str,
+    puzzle_id: str,
+    outcome: str,
+    solve_ms: int,
+) -> dict[str, Any] | None:
+    """Persist a daily-puzzle attempt. The first solve of the day starts /
+    extends the streak; subsequent attempts (failed or otherwise) leave
+    the streak alone but are still logged for the leaderboard.
+    """
+    if outcome not in ("solved", "failed"):
+        return None
+    solve_ms = max(0, int(solve_ms))
+    now = int(time.time())
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        _ensure_extra_fields(u)
+        dp = u["daily_puzzle"]
+        attempts = dp.setdefault("attempts", {})
+        prev = attempts.get(date) or {}
+        # First solve wins: don't downgrade an earlier "solved" with a
+        # later "failed" if the user pokes the endpoint twice.
+        if prev.get("outcome") == "solved":
+            return dict(u)
+        attempts[date] = {
+            "puzzle_id": puzzle_id,
+            "outcome": outcome,
+            "solve_ms": solve_ms if outcome == "solved" else int(prev.get("solve_ms") or 0),
+            "ts": now,
+        }
+        if outcome == "solved":
+            _daily_increment_streak(dp, date)
+        u["last_seen"] = now
+        _save(data)
+        return dict(u)
+
+
+def daily_puzzle_leaderboard(date: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    """Solvers ranked by solve time for `date`."""
+    rows: list[dict[str, Any]] = []
+    data = _load()
+    for u in data["users"].values():
+        dp = u.get("daily_puzzle") or {}
+        attempt = (dp.get("attempts") or {}).get(date)
+        if not attempt or attempt.get("outcome") != "solved":
+            continue
+        solve_ms = int(attempt.get("solve_ms") or 0)
+        if solve_ms <= 0:
+            continue
+        rows.append(
+            {
+                "client_id": u.get("client_id"),
+                "nickname": u.get("nickname"),
+                "avatar": u.get("avatar"),
+                "solve_ms": solve_ms,
+                "ts": int(attempt.get("ts") or 0),
+                "current_streak": int(dp.get("current_streak") or 0),
+            }
+        )
+    rows.sort(key=lambda r: (int(r["solve_ms"]), int(r["ts"]) or 1 << 62))
+    return rows[: max(1, int(limit))]
+
+
+# ---------------------------------------------------------------------------
+# Opening Trainer helpers
+# ---------------------------------------------------------------------------
+
+def record_opening_attempt(
+    client_id: str,
+    *,
+    opening_id: str,
+    correct: bool,
+    line_completed: bool = False,
+) -> dict[str, Any] | None:
+    """Bump per-opening mastery on a single move attempt."""
+    now = int(time.time())
+    with _LOCK:
+        data = _load()
+        u = data["users"].get(client_id)
+        if u is None:
+            return None
+        _ensure_extra_fields(u)
+        ot = u["opening_trainer"]
+        entry = ot.setdefault(
+            opening_id,
+            {"attempts": 0, "correct": 0, "completions": 0, "last_played": 0, "mastery": 0},
+        )
+        entry["attempts"] = int(entry.get("attempts") or 0) + 1
+        if correct:
+            entry["correct"] = int(entry.get("correct") or 0) + 1
+        if line_completed:
+            entry["completions"] = int(entry.get("completions") or 0) + 1
+        entry["last_played"] = now
+        # Mastery is a smoothed accuracy weighted by experience: needs ~30
+        # attempts to reach 100% even with perfect play, so casual users
+        # see steady progression rather than 100% after one move.
+        attempts = max(1, int(entry["attempts"]))
+        accuracy = int(entry.get("correct") or 0) / attempts
+        experience = min(1.0, attempts / 30.0)
+        entry["mastery"] = int(round(accuracy * experience * 100))
+        u["last_seen"] = now
+        _save(data)
+        return dict(u)
+
+
+def opening_trainer_leaderboard(*, limit: int = 100) -> list[dict[str, Any]]:
+    """Users ranked by their best opening mastery (then total completions)."""
+    rows: list[dict[str, Any]] = []
+    data = _load()
+    for u in data["users"].values():
+        ot = u.get("opening_trainer") or {}
+        if not ot:
+            continue
+        best_mastery = 0
+        best_opening = ""
+        completions = 0
+        for opening_id, e in ot.items():
+            m = int(e.get("mastery") or 0)
+            if m > best_mastery:
+                best_mastery = m
+                best_opening = opening_id
+            completions += int(e.get("completions") or 0)
+        if best_mastery <= 0 and completions <= 0:
+            continue
+        rows.append(
+            {
+                "client_id": u.get("client_id"),
+                "nickname": u.get("nickname"),
+                "avatar": u.get("avatar"),
+                "mastery": best_mastery,
+                "best_opening": best_opening,
+                "completions": completions,
+            }
+        )
+    rows.sort(key=lambda r: (-int(r["mastery"]), -int(r["completions"])))
+    return rows[: max(1, int(limit))]
 
 
 def reset_for_tests() -> None:

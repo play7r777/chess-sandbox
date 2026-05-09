@@ -28,20 +28,35 @@ from fastapi import WebSocket
 from . import puzzles as puzzle_pack
 from . import users as users_db
 
-# Duration the host can pick before pressing "Start". The default
-# (10 min) matches the original behaviour; 2/3/5 min are short
-# variants for faster matches. Anything outside this set is rejected
-# server-side so a tampered WS payload can't request a 10-hour lobby.
-PARTY_ALLOWED_DURATIONS_SEC: tuple[int, ...] = (120, 180, 300, 600)
-PARTY_DURATION_SEC = 600  # default if the host doesn't pick one
+# Match length is fixed at 3 min — chess.com Puzzle Battle style.
+# We keep the tuple/constant so legacy WS payloads (older clients) that
+# send `duration_sec` still validate, but only 180 is accepted.
+PARTY_ALLOWED_DURATIONS_SEC: tuple[int, ...] = (180,)
+PARTY_DURATION_SEC = 180
+# How many wrong answers each player can stack before they're out. As
+# soon as ANY player drains all of their lives the room finishes
+# immediately and the current scoreboard becomes the result table.
+PARTY_LIVES_PER_PLAYER = 3
+# Number of cells per vertical column in the scoreboard's streak grid;
+# matches the chess.com rendering. After every Nth solved/failed puzzle
+# a fresh column opens to the right of the previous one.
+PARTY_GRID_COL_HEIGHT = 10
 LOBBY_GRACE_SEC = 1800
 RECONNECT_GRACE_SEC = 30
-MAX_MEMBERS = 16
+MAX_MEMBERS = 30
 # How many puzzles each match samples up-front. With a 10-minute
 # duration even the fastest solver rarely cracks more than a few hundred,
 # so 1000 leaves plenty of headroom while keeping the queue cheap to
 # build (one SQLite call) regardless of total bank size.
 PARTY_QUEUE_SIZE = 1000
+# When picking a queue we pull puzzles within +-PARTY_BAND_HALF_WIDTH
+# of the average lobby rating, so a lobby of 1200-rated players gets
+# 1000-1400 puzzles instead of the bank's full spread. Tuned wide
+# enough that small lobbies still see variety; narrow enough that
+# beating beginners isn't the same as beating grandmasters.
+PARTY_BAND_HALF_WIDTH = 350
+PARTY_BAND_MIN = 600
+PARTY_BAND_MAX = 2800
 # Max attempts kept per player for the in-memory match log. A 10-min
 # match maxes out at <300 attempts even for the fastest solvers, so
 # 500 is a safe ceiling and keeps the per-room footprint bounded.
@@ -60,6 +75,27 @@ _LOCK = asyncio.Lock()
 _HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 _SQUARE_RE = re.compile(r"^[a-h][1-8]$")
 _PIECE_RE = re.compile(r"^[wb][KQRBNP]$")
+
+
+def _norm_avatar(s: Any) -> str:
+    """Trim and bound the avatar string for in-memory party state.
+
+    Mirrors :func:`backend.users._normalize_avatar` so a user with an
+    uploaded photo (URL like ``/api/avatars/<cid>.png?v=...``) shows the
+    full URL on the scoreboard / spectator list / invitation toast
+    instead of being truncated to 8 chars (which used to render as the
+    text "/api/ava" everywhere).
+    """
+    t = (s or "").strip() if isinstance(s, str) else ""
+    if not t:
+        return "♟"
+    if t.startswith("/api/avatars/"):
+        return t[:256]
+    if t.startswith("/api/"):
+        # Looks like a URL prefix that got truncated by an older client
+        # — drop it rather than show garbled text.
+        return "♟"
+    return t[:8]
 
 
 def _sanitize_hex_color(s: Any) -> str:
@@ -193,6 +229,20 @@ class Member:
     # Replicated into the player's profile by `Party.finish()` so the
     # detailed breakdown survives the room shutdown.
     attempts_log: list[dict[str, Any]] = field(default_factory=list)
+    # Lives remaining (chess.com Battle style — first to drain all of
+    # them ends the match for everyone). Reset to ``PARTY_LIVES_PER_PLAYER``
+    # on `Party.start()`.
+    lives: int = PARTY_LIVES_PER_PLAYER
+    # Per-attempt outcome row used to draw the vertical streak grid in
+    # the scoreboard. ``True`` for solved, ``False`` for failed. Skipped
+    # puzzles do NOT appear here so a "пропустить" doesn't paint a red
+    # cell. Capped at PARTY_MAX_ATTEMPT_LOG just like ``attempts_log``.
+    attempts_grid: list[bool] = field(default_factory=list)
+    # Wallclock when the player ran out of lives. ``None`` for active
+    # players. Used to (a) freeze the player's UI / stop dispatching
+    # next_puzzle, (b) order the elimination-order column in the result
+    # table — earlier eliminations rank below later ones.
+    eliminated_at: float | None = None
     disconnected_at: float | None = None
     is_host: bool = False
     # Wallclock of the last spectator broadcast for this member; used
@@ -229,6 +279,38 @@ class Party:
     # Shared, shuffled puzzle order for the whole match. Built in
     # `start()` from the entire pool, then re-used across every member.
     puzzle_queue: list[dict[str, Any]] = field(default_factory=list)
+    # Average rating of all members at the moment of `start()`. We use it
+    # to scope the puzzle bank for this match so a 1200-rated lobby
+    # doesn't end up grinding 600-rated puzzles. Mirrored back to the
+    # client in `public_state()` so the lobby UI can show "средний эло".
+    avg_rating: int = 0
+    # Puzzle-rating mode — either:
+    #   "standard": pick puzzles around the lobby's average ELO (legacy
+    #     behaviour). ``rating_min`` / ``rating_max`` are populated by
+    #     ``start()`` from the average ± band, but the *source of truth*
+    #     for the post-match summary is still the avg ELO.
+    #   "custom": host pre-selects an explicit ``[rating_min, rating_max]``
+    #     window in the lobby; we sample puzzles strictly from that range
+    #     (clipped to ``PARTY_BAND_MIN..PARTY_BAND_MAX``).
+    mode: str = "standard"
+    rating_min: int = 0
+    rating_max: int = 0
+
+    def average_member_rating(self) -> int:
+        """Live average of every member's profile rating.
+
+        Falls back to 1200 if no member has a rating set (fresh client_id
+        with no puzzle history).
+        """
+        ratings: list[int] = []
+        for m in self.members.values():
+            u = users_db.get_user(m.client_id) or {}
+            r = int(u.get("rating") or 0)
+            if r > 0:
+                ratings.append(r)
+        if not ratings:
+            return 1200
+        return int(round(sum(ratings) / len(ratings)))
 
     def public_member(self, m: Member) -> dict[str, Any]:
         return {
@@ -245,6 +327,14 @@ class Party:
             "theme": m.theme,
             "pieces": m.pieces,
             "online": m.ws is not None,
+            "lives": int(m.lives),
+            "lives_max": PARTY_LIVES_PER_PLAYER,
+            # Solved/failed sequence (chess.com vertical streak grid).
+            # Booleans (true=solved, false=failed); the frontend wraps
+            # at PARTY_GRID_COL_HEIGHT into multiple columns.
+            "attempts_grid": list(m.attempts_grid),
+            "eliminated": m.eliminated_at is not None,
+            "eliminated_at": int(m.eliminated_at) if m.eliminated_at else 0,
         }
 
     def public_state(self) -> dict[str, Any]:
@@ -259,6 +349,14 @@ class Party:
             "allowed_durations_sec": list(PARTY_ALLOWED_DURATIONS_SEC),
             "members": [self.public_member(m) for m in self.members.values()],
             "spectator_count": sum(1 for s in self.spectators.values() if s.ws is not None),
+            "avg_rating": int(self.avg_rating or self.average_member_rating()),
+            "lives_per_player": PARTY_LIVES_PER_PLAYER,
+            "grid_col_height": PARTY_GRID_COL_HEIGHT,
+            "mode": self.mode,
+            "rating_min": int(self.rating_min),
+            "rating_max": int(self.rating_max),
+            "rating_envelope_min": PARTY_BAND_MIN,
+            "rating_envelope_max": PARTY_BAND_MAX,
         }
 
     def scoreboard(self) -> list[dict[str, Any]]:
@@ -362,6 +460,12 @@ class Party:
         m.disconnected_at = time.time()
 
     def _next_puzzle_for(self, m: Member) -> dict[str, Any] | None:
+        # Don't dispatch any further puzzles to a player who has been
+        # eliminated (out of lives) — they can flip to spectator mode
+        # but the match keeps running for everyone else.
+        if m.eliminated_at is not None or m.lives <= 0:
+            m.current_puzzle = None
+            return None
         # Cycle the shared queue so a fast solver who exhausts it before
         # the timer ends keeps getting puzzles (in the same order — the
         # comparison stays fair because every member sees the same
@@ -402,7 +506,7 @@ class Party:
             existing = Member(
                 client_id=client_id,
                 nickname=nickname[:32] or "Гость",
-                avatar=avatar[:8] or "♟",
+                avatar=_norm_avatar(avatar),
                 ws=ws,
                 is_host=(client_id == self.host_id),
                 theme=(theme or "")[:32],
@@ -416,7 +520,7 @@ class Party:
             if nickname:
                 existing.nickname = nickname[:32]
             if avatar:
-                existing.avatar = avatar[:8]
+                existing.avatar = _norm_avatar(avatar)
             if theme:
                 existing.theme = theme[:32]
             if pieces:
@@ -506,7 +610,7 @@ class Party:
             existing = Spectator(
                 client_id=client_id,
                 nickname=nickname[:32] or "Гость",
-                avatar=avatar[:8] or "♟",
+                avatar=_norm_avatar(avatar),
                 ws=ws,
             )
             self.spectators[client_id] = existing
@@ -516,7 +620,7 @@ class Party:
             if nickname:
                 existing.nickname = nickname[:32]
             if avatar:
-                existing.avatar = avatar[:8]
+                existing.avatar = _norm_avatar(avatar)
 
         # Snapshot the room for the new spectator.
         await self._send_spectator(
@@ -659,7 +763,15 @@ class Party:
             }
         )
 
-    async def start(self, by_client_id: str, duration_sec: int | None = None) -> None:
+    async def start(
+        self,
+        by_client_id: str,
+        duration_sec: int | None = None,
+        *,
+        mode: str | None = None,
+        rating_min: int | None = None,
+        rating_max: int | None = None,
+    ) -> None:
         if by_client_id != self.host_id:
             raise PartyError("not_host", "Only the host can start")
         # Idempotent: if the host clicks the start button several times
@@ -672,28 +784,69 @@ class Party:
             return
         if not self.members:
             raise PartyError("empty", "No members")
-        # Validate the host-picked duration. Anything not in the allow-list
-        # silently falls back to the current value (set via lobby radio
-        # earlier or the 10-min default) — this way a missing/garbled
-        # field on a reconnect-and-replay doesn't change the deal.
-        if duration_sec is not None:
-            try:
-                requested = int(duration_sec)
-            except (TypeError, ValueError):
-                requested = self.duration_sec
-            if requested in PARTY_ALLOWED_DURATIONS_SEC:
-                self.duration_sec = requested
+        # Host can switch mode / rating range right at start time
+        # without recreating the lobby — useful when they realize
+        # right before the match begins they want a different bracket.
+        if mode is not None:
+            mode_norm = str(mode).strip().lower()
+            if mode_norm in ("standard", "custom"):
+                self.mode = mode_norm
+        if self.mode == "custom":
+            if rating_min is not None:
+                try:
+                    self.rating_min = max(0, min(4000, int(rating_min)))
+                except (TypeError, ValueError):
+                    pass
+            if rating_max is not None:
+                try:
+                    self.rating_max = max(0, min(4000, int(rating_max)))
+                except (TypeError, ValueError):
+                    pass
+        # Match length is hard-coded to 3 min (chess.com Battle style).
+        # `duration_sec` is still accepted on the wire so older clients
+        # don't error out, but anything other than the canonical value
+        # is silently clamped.
+        self.duration_sec = PARTY_DURATION_SEC
         now = time.time()
         self.status = "playing"
         self.started_at = now
         self.ends_at = now + self.duration_sec
+        # Reset per-player game-state on every start so a re-used room
+        # (host left → re-created) begins with a clean slate of lives
+        # and an empty streak grid for everyone.
+        for m in self.members.values():
+            m.lives = PARTY_LIVES_PER_PLAYER
+            m.attempts_grid = []
+            m.score = 0
+            m.solved = 0
+            m.failed = 0
+            m.skipped = 0
+            m.streak = 0
+            m.best_streak = 0
+            m.attempts_log = []
+            m.eliminated_at = None
         # Sample a fresh queue from the puzzle bank for each match. Every
         # member walks through that same ordered list, so the comparison
         # is fair (same puzzles, same order); a different sample per match
-        # keeps players from seeing identical openings. With the SQLite
-        # bank backing 500k+ puzzles repeats inside a match are
-        # essentially impossible.
-        self.puzzle_queue = list(puzzle_pack.sample_puzzles(PARTY_QUEUE_SIZE))
+        # keeps players from seeing identical openings.
+        avg_rating = self.average_member_rating()
+        self.avg_rating = avg_rating
+        if self.mode == "custom" and self.rating_min and self.rating_max and self.rating_min < self.rating_max:
+            lo = max(PARTY_BAND_MIN, int(self.rating_min))
+            hi = min(PARTY_BAND_MAX, int(self.rating_max))
+            self.rating_min = lo
+            self.rating_max = hi
+            self.puzzle_queue = _sample_custom_range_queue(lo, hi, PARTY_QUEUE_SIZE)
+        else:
+            # Standard: scoped to the lobby's *average* rating
+            # ±PARTY_BAND_HALF_WIDTH so a 1200-rated lobby drills
+            # 850–1550 puzzles instead of the bank's full spread; closes
+            # the door on rating farming when a strong player joins a
+            # beginner lobby.
+            self.mode = "standard"
+            self.rating_min = max(PARTY_BAND_MIN, avg_rating - PARTY_BAND_HALF_WIDTH)
+            self.rating_max = min(PARTY_BAND_MAX, avg_rating + PARTY_BAND_HALF_WIDTH)
+            self.puzzle_queue = _sample_band_queue(avg_rating, PARTY_QUEUE_SIZE)
         random.shuffle(self.puzzle_queue)
         for m in self.members.values():
             m.puzzle_index = 0
@@ -754,6 +907,11 @@ class Party:
         else:
             prev_themes = [str(t) for t in prev_themes_raw][:8]
         score_delta = 0
+        # Eliminated players (out of lives) shouldn't influence the
+        # scoreboard further — their attempts/state are frozen until
+        # `finish()`.
+        if m.lives <= 0 or m.eliminated_at is not None:
+            return
         if outcome == "solved":
             m.solved += 1
             m.last_solve_ms = int(solve_ms)
@@ -762,9 +920,14 @@ class Party:
             m.streak += 1
             if m.streak > m.best_streak:
                 m.best_streak = m.streak
+            if len(m.attempts_grid) < PARTY_MAX_ATTEMPT_LOG:
+                m.attempts_grid.append(True)
         elif outcome == "failed":
             m.failed += 1
             m.streak = 0
+            m.lives = max(0, m.lives - 1)
+            if len(m.attempts_grid) < PARTY_MAX_ATTEMPT_LOG:
+                m.attempts_grid.append(False)
         else:
             m.skipped += 1
             m.streak = 0
@@ -779,13 +942,42 @@ class Party:
                     "themes": prev_themes,
                 }
             )
-        nxt = self._next_puzzle_for(m)
-        if nxt is not None:
+        # Player just ran out of lives — they're eliminated. Mark the
+        # timestamp (drives placement order in `finish()`), drop them
+        # from active dispatch (no next_puzzle), tell the client so it
+        # can offer "watch the rest of the match" via the existing
+        # spectator flow, and broadcast the new scoreboard so the
+        # cards on every screen show their dimmed/red state.
+        just_eliminated = False
+        if m.lives <= 0 and m.eliminated_at is None:
+            m.eliminated_at = time.time()
+            m.current_puzzle = None
+            just_eliminated = True
             await self._send(
                 client_id,
-                {"type": "next_puzzle", "puzzle": _puzzle_payload(nxt)},
+                {
+                    "type": "eliminated",
+                    "client_id": client_id,
+                    "lives": int(m.lives),
+                    "lives_max": PARTY_LIVES_PER_PLAYER,
+                    "score": int(m.score),
+                    "solved": int(m.solved),
+                    "failed": int(m.failed),
+                    "skipped": int(m.skipped),
+                    "eliminated_at": int(m.eliminated_at),
+                },
             )
-            await self.broadcast_player_state(m, force=True)
+        # Push next puzzle iff the player is still alive — eliminated
+        # players keep their stale board for a beat (until they switch
+        # to spectator mode) instead of yanking it instantly.
+        if not just_eliminated and m.eliminated_at is None:
+            nxt = self._next_puzzle_for(m)
+            if nxt is not None:
+                await self._send(
+                    client_id,
+                    {"type": "next_puzzle", "puzzle": _puzzle_payload(nxt)},
+                )
+                await self.broadcast_player_state(m, force=True)
         await self.broadcast(
             {
                 "type": "scoreboard",
@@ -793,6 +985,16 @@ class Party:
                 "scoreboard": self.scoreboard(),
             }
         )
+        # Last-man-standing finish: only end the match when at most
+        # one player still has lives left. With 1 player solo (no
+        # opponents) we don't auto-finish on elimination — the timer
+        # still owns that case.
+        survivors = sum(1 for mm in self.members.values() if mm.lives > 0 and mm.eliminated_at is None)
+        total_started = sum(1 for mm in self.members.values() if mm.score or mm.solved or mm.failed or mm.skipped or mm.eliminated_at is not None or mm.lives > 0)
+        if just_eliminated and total_started >= 2 and survivors <= 1:
+            if self.finish_task and not self.finish_task.done():
+                self.finish_task.cancel()
+            await self.finish()
 
     async def finish(self) -> None:
         if self.status == "finished":
@@ -831,6 +1033,9 @@ class Party:
                 "avg_solve_ms": avg_solve_ms,
                 "best_solve_ms": best_solve_ms,
                 "party_elo": party_elo,
+                "lives_left": int(m.lives) if m else 0,
+                "eliminated_at": int(m.eliminated_at) if (m and m.eliminated_at) else 0,
+                "attempts_grid": list(m.attempts_grid) if m else [],
             }
             results.append(entry)
         # Second pass: write per-player profile history. We pass the
@@ -861,6 +1066,22 @@ class Party:
                         "duration_sec": int(self.duration_sec),
                         "started_at": int(self.started_at),
                         "ended_at": finished_at,
+                        # Mode the host picked + the rating window
+                        # actually used. For "standard" the window is
+                        # avg±band so the profile-history modal can
+                        # show "ср. ELO 1320 (1170–1470)"; for "custom"
+                        # it's the explicit ``[min, max]`` the host
+                        # typed.
+                        "mode": self.mode,
+                        "rating_min": int(self.rating_min),
+                        "rating_max": int(self.rating_max),
+                        "avg_rating": int(self.avg_rating),
+                        # Last-man-standing flag — false if the match
+                        # ended on the timer, true if the result
+                        # broadcast was triggered by the elimination
+                        # branch in attempt(). The frontend uses it to
+                        # paint a "Победа нокаутом" badge.
+                        "lives_per_player": PARTY_LIVES_PER_PLAYER,
                         # Full scoreboard so the profile detail modal
                         # can show every opponent's row, not just the
                         # owner's stats.
@@ -883,8 +1104,75 @@ class Party:
                 "party_id": self.party_id,
                 "started_at": int(self.started_at),
                 "ended_at": finished_at,
+                "mode": self.mode,
+                "rating_min": int(self.rating_min),
+                "rating_max": int(self.rating_max),
+                "avg_rating": int(self.avg_rating),
+                "lives_per_player": PARTY_LIVES_PER_PLAYER,
             }
         )
+
+
+def _sample_custom_range_queue(lo: int, hi: int, n: int) -> list[dict[str, Any]]:
+    """Sample ``n`` puzzles strictly from ``[lo, hi]`` (custom mode).
+
+    Falls back to ``_sample_band_queue`` around the midpoint if the
+    explicit window is too narrow to fill the queue, so a host who
+    types a tiny range (e.g. 1500..1505) doesn't end up with an empty
+    match.
+    """
+    if n <= 0:
+        return []
+    lo = max(PARTY_BAND_MIN, int(lo))
+    hi = min(PARTY_BAND_MAX, int(hi))
+    if hi <= lo:
+        hi = min(PARTY_BAND_MAX, lo + 50)
+    pool = puzzle_pack.filter_puzzles(min_rating=lo, max_rating=hi)
+    if len(pool) >= n:
+        random.shuffle(pool)
+        return pool[:n]
+    if pool:
+        random.shuffle(pool)
+        # Top up with the standard band fallback so the queue never
+        # comes out short — the host's window stays the *primary*
+        # source, the rest are sampled around the midpoint.
+        midpoint = (lo + hi) // 2
+        backfill = _sample_band_queue(midpoint, n - len(pool))
+        return pool + backfill
+    return _sample_band_queue((lo + hi) // 2, n)
+
+
+def _sample_band_queue(avg_rating: int, n: int) -> list[dict[str, Any]]:
+    """Sample ``n`` puzzles centred on ``avg_rating``.
+
+    Two-pass strategy:
+
+    1. Try the strict band ``[avg-HALF_WIDTH, avg+HALF_WIDTH]``.
+    2. If that comes up short (small bank, edge of the rating spectrum),
+       widen one band's worth at a time until we either fill the queue
+       or hit the global ``[PARTY_BAND_MIN, PARTY_BAND_MAX]`` envelope.
+
+    Falls back to ``puzzle_pack.sample_puzzles`` only if the bank can't
+    even produce one match, so we never break a lobby.
+    """
+    if n <= 0:
+        return []
+    width = PARTY_BAND_HALF_WIDTH
+    while True:
+        lo = max(PARTY_BAND_MIN, avg_rating - width)
+        hi = min(PARTY_BAND_MAX, avg_rating + width)
+        pool = puzzle_pack.filter_puzzles(min_rating=lo, max_rating=hi)
+        if len(pool) >= n:
+            random.shuffle(pool)
+            return pool[:n]
+        if width >= (PARTY_BAND_MAX - PARTY_BAND_MIN):
+            # Even the maximum envelope can't fill the queue: top up
+            # with whatever the bank does have.
+            if pool:
+                random.shuffle(pool)
+                return pool
+            return list(puzzle_pack.sample_puzzles(n))
+        width += PARTY_BAND_HALF_WIDTH
 
 
 def _party_elo_award(placement: int, participants: int, solved: int, score: int) -> int:
@@ -919,7 +1207,7 @@ async def create_party(host_id: str, host_nickname: str, host_avatar: str) -> Pa
         party.members[host_id] = Member(
             client_id=host_id,
             nickname=host_nickname[:32] or "Гость",
-            avatar=host_avatar[:8] or "♟",
+            avatar=_norm_avatar(host_avatar),
             ws=None,
             is_host=True,
         )

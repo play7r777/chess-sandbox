@@ -50,6 +50,14 @@ class Presence:
     current_puzzle_rating: int = 0
     streak: int = 0
     best_streak: int = 0
+    # Last review badge the player painted on their own board
+    # ("good" green check / "miss" red cross). Spectators render the
+    # same icon so they see what the player sees on a wrong drop.
+    review_badge_square: str = ""
+    review_badge_kind: str = ""
+    # Mode label so the spectator UI can announce what the player is
+    # actually doing ("Puzzle", "Daily", "Rush", "1v1", "Battle").
+    mode: str = ""
     started_at: float = field(default_factory=time.time)
     last_update: float = field(default_factory=time.time)
     spectators: dict[str, WebSocket] = field(default_factory=dict)
@@ -57,6 +65,20 @@ class Presence:
 
 _PRESENCES: dict[str, Presence] = {}
 _LOCK = asyncio.Lock()
+
+
+def _norm_avatar(s: Any) -> str:
+    """Trim/bound an avatar string. Accepts a glyph (≤8 chars) or an
+    uploaded-image URL (``/api/avatars/<cid>.png?v=...``, ≤256 chars).
+    Truncated ``/api/...`` stubs from older clients fall back to ♟."""
+    t = (s or "").strip() if isinstance(s, str) else ""
+    if not t:
+        return "♟"
+    if t.startswith("/api/avatars/"):
+        return t[:256]
+    if t.startswith("/api/"):
+        return "♟"
+    return t[:8]
 
 
 def _public_state(p: Presence) -> dict[str, Any]:
@@ -78,6 +100,9 @@ def _public_state(p: Presence) -> dict[str, Any]:
         "puzzle_rating": int(p.current_puzzle_rating or 0),
         "streak": int(p.streak or 0),
         "best_streak": int(p.best_streak or 0),
+        "review_badge_square": p.review_badge_square or "",
+        "review_badge_kind": p.review_badge_kind or "",
+        "mode": p.mode or "",
         "started_at": int(p.started_at),
         "last_update": int(p.last_update),
     }
@@ -149,7 +174,7 @@ async def attach_player(
             existing = Presence(
                 client_id=client_id,
                 nickname=(nickname or "Гость")[:32],
-                avatar=(avatar or "♟")[:8],
+                avatar=_norm_avatar(avatar),
                 ws=ws,
                 theme=(theme or "")[:32],
                 pieces=(pieces or "")[:32],
@@ -165,7 +190,7 @@ async def attach_player(
             if nickname:
                 existing.nickname = nickname[:32]
             if avatar:
-                existing.avatar = avatar[:8]
+                existing.avatar = _norm_avatar(avatar)
             if theme:
                 existing.theme = theme[:32]
             if pieces:
@@ -248,6 +273,9 @@ async def update_position(
     streak: int | None = None,
     best_streak: int | None = None,
     rating: int | None = None,
+    review_badge_square: str | None = None,
+    review_badge_kind: str | None = None,
+    mode: str | None = None,
 ) -> None:
     p = _PRESENCES.get(client_id)
     if p is None:
@@ -257,6 +285,22 @@ async def update_position(
         p.flipped = bool(flipped)
     if last_move is not None:
         p.last_move = str(last_move or "")
+    if review_badge_square is not None:
+        p.review_badge_square = (
+            _sanitize_square(review_badge_square) or ""
+        )
+    if review_badge_kind is not None:
+        # Tight allowlist — anything else clears the badge.
+        kind = str(review_badge_kind or "").strip().lower()
+        p.review_badge_kind = kind if kind in {
+            "good", "miss", "great", "brilliant", "book",
+            "inaccuracy", "mistake", "blunder",
+        } else ""
+    if mode is not None:
+        m = str(mode or "").strip().lower()
+        p.mode = m if m in {
+            "puzzle", "daily", "rush", "onevsone", "battle", "main",
+        } else ""
     if puzzle_id is not None:
         p.current_puzzle_id = str(puzzle_id or "")[:64]
     if puzzle_rating is not None:

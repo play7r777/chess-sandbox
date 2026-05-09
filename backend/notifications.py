@@ -60,6 +60,20 @@ _SUBSCRIBERS: dict[str, list[_Subscriber]] = {}
 _LOCK = asyncio.Lock()
 
 
+def _norm_avatar(s: Any) -> str:
+    """Trim/bound an avatar string. Accepts a glyph (≤8 chars) or an
+    uploaded-image URL (``/api/avatars/<cid>.png?v=...``, ≤256 chars).
+    Truncated ``/api/...`` stubs from older clients fall back to ♟."""
+    t = (s or "").strip() if isinstance(s, str) else ""
+    if not t:
+        return "♟"
+    if t.startswith("/api/avatars/"):
+        return t[:256]
+    if t.startswith("/api/"):
+        return "♟"
+    return t[:8]
+
+
 def _new_invite_id() -> str:
     while True:
         candidate = secrets.token_urlsafe(8)
@@ -137,7 +151,7 @@ async def create_invitation(
             party_id=party_id,
             host_id=host_id,
             host_nickname=host_nickname[:32] or "Гость",
-            host_avatar=host_avatar[:8] or "♟",
+            host_avatar=_norm_avatar(host_avatar),
             target_id=target_id,
             created_at=time.time(),
         )

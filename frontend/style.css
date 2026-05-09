@@ -27,8 +27,28 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 14px;
+  /* Inter is the default chess.com / lichess body font; we ship the
+     full system stack so when Inter is unavailable we fall back to a
+     properly hinted UI sans serif rather than the thin "Segoe UI"
+     light weight that browsers used to pick. */
+  font-family: "Inter", "Inter Variable", "SF Pro Text", -apple-system,
+    BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 14.5px;
+  font-weight: 450;
+  line-height: 1.45;
+  letter-spacing: 0.005em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+h1, h2, h3, h4, h5, h6 { font-weight: 650; letter-spacing: -0.005em; }
+strong, b { font-weight: 600; }
+code, kbd, samp, pre {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono",
+    Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  font-size: 0.93em;
+  font-feature-settings: "ss02";
 }
 button, input, select, textarea {
   font: inherit;
@@ -101,21 +121,75 @@ input:focus, select:focus, button:focus-visible {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
 }
 .view-tab:focus-visible { outline: 2px solid #5eaa46; outline-offset: 2px; }
+.view-tab.view-tab-icon {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+}
+.view-tab.view-tab-icon .view-tab-svg { width: 18px; height: 18px; flex: none; }
 
-/* When a view is active we hide every sidebar section that doesn't
-   belong to it. The board area itself is always visible. */
-body.view-main     .sidebar    [data-view="analysis"],
-body.view-main     .board-area [data-view="analysis"],
-body.view-main     .sidebar    [data-view="puzzle"],
-body.view-main     .board-area [data-view="puzzle"] { display: none !important; }
-body.view-analysis .sidebar    [data-view="main"],
-body.view-analysis .board-area [data-view="main"],
-body.view-analysis .sidebar    [data-view="puzzle"],
-body.view-analysis .board-area [data-view="puzzle"] { display: none !important; }
-body.view-puzzle   .sidebar    [data-view="main"],
-body.view-puzzle   .board-area [data-view="main"],
-body.view-puzzle   .sidebar    [data-view="analysis"],
-body.view-puzzle   .board-area [data-view="analysis"] { display: none !important; }
+/* When a view is active we hide every sidebar / board-area section that
+   doesn't belong to it. The board area itself is always visible.
+
+   IMPORTANT: scope to `main [data-view=...]` so the topbar tab buttons
+   (which also carry data-view to highlight the active tab) stay visible.
+   Without this scope the tabs themselves would get display:none and the
+   navigation would collapse to "only the active tab". */
+body.view-main     main [data-view="analysis"],
+body.view-main     main [data-view="puzzle"],
+body.view-main     main [data-view="daily"],
+body.view-main     main [data-view="rush"],
+body.view-main     main [data-view="battle"],
+body.view-main     main [data-view="opening"],
+body.view-main     main [data-view="onevsone"] { display: none !important; }
+body.view-analysis main [data-view="main"],
+body.view-analysis main [data-view="puzzle"],
+body.view-analysis main [data-view="daily"],
+body.view-analysis main [data-view="rush"],
+body.view-analysis main [data-view="battle"],
+body.view-analysis main [data-view="opening"],
+body.view-analysis main [data-view="onevsone"] { display: none !important; }
+body.view-puzzle   main [data-view="main"],
+body.view-puzzle   main [data-view="analysis"],
+body.view-puzzle   main [data-view="daily"],
+body.view-puzzle   main [data-view="rush"],
+body.view-puzzle   main [data-view="battle"],
+body.view-puzzle   main [data-view="opening"],
+body.view-puzzle   main [data-view="onevsone"] { display: none !important; }
+body.view-daily    main [data-view="main"],
+body.view-daily    main [data-view="analysis"],
+body.view-daily    main [data-view="puzzle"],
+body.view-daily    main [data-view="rush"],
+body.view-daily    main [data-view="battle"],
+body.view-daily    main [data-view="opening"],
+body.view-daily    main [data-view="onevsone"] { display: none !important; }
+body.view-rush     main [data-view="main"],
+body.view-rush     main [data-view="analysis"],
+body.view-rush     main [data-view="puzzle"],
+body.view-rush     main [data-view="daily"],
+body.view-rush     main [data-view="battle"],
+body.view-rush     main [data-view="opening"],
+body.view-rush     main [data-view="onevsone"] { display: none !important; }
+body.view-battle   main [data-view="main"],
+body.view-battle   main [data-view="analysis"],
+body.view-battle   main [data-view="puzzle"],
+body.view-battle   main [data-view="daily"],
+body.view-battle   main [data-view="rush"],
+body.view-battle   main [data-view="opening"],
+body.view-battle   main [data-view="onevsone"] { display: none !important; }
+body.view-opening  main [data-view="main"],
+body.view-opening  main [data-view="analysis"],
+body.view-opening  main [data-view="puzzle"],
+body.view-opening  main [data-view="daily"],
+body.view-opening  main [data-view="battle"],
+body.view-opening  main [data-view="rush"],
+body.view-opening  main [data-view="onevsone"] { display: none !important; }
+body.view-onevsone main [data-view="main"],
+body.view-onevsone main [data-view="analysis"],
+body.view-onevsone main [data-view="puzzle"],
+body.view-onevsone main [data-view="daily"],
+body.view-onevsone main [data-view="rush"],
+body.view-onevsone main [data-view="battle"],
+body.view-onevsone main [data-view="opening"] { display: none !important; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .mode-toggle { display: flex; align-items: center; gap: 6px; padding-left: 6px; }
 .mode-switch { display: inline-flex; border: 1px solid #2a3140; border-radius: 8px; overflow: hidden; margin-left: 8px; }
@@ -132,27 +206,125 @@ body.mode-legal .mode-toggle { display: none !important; }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 500px;
-  gap: 24px;
-  max-width: 1500px;
+  /* The board area gets a generous min so it stays large; the right
+     sidebar gets a fixed lane. Larger max-width lets the board grow
+     toward the centre/right of the viewport on big screens. */
+  grid-template-columns: minmax(560px, 1fr) 520px;
+  gap: 28px;
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 28px 32px;
 }
-@media (max-width: 1100px) {
+@media (max-width: 1180px) {
   .layout { grid-template-columns: 1fr; }
 }
 
-.board-area { min-width: 0; }
+.board-area {
+  min-width: 0;
+  /* Push the board towards the centre/right of its column so it
+     visually leads the layout. The sidebar still sits on the right;
+     the board breathes in the middle of the screen. */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  /* User-controlled scale knob: dragging the board edges updates
+     --board-scale (see app.js board-scale handles). Defaults to 1
+     and ranges 0.6 .. 1.6 so the board can be shrunk on small
+     screens or expanded to fill big ones. */
+  --board-scale: 1;
+}
+/* Wrapper around the board so its scale doesn't disturb sibling
+   layout (board-meta, etc.). */
+.board-scale-wrap {
+  position: relative;
+  width: min(86vh, 100%, 820px);
+  aspect-ratio: 1 / 1;
+  margin-left: clamp(0px, calc((100% - min(86vh, 100%, 820px)) * 0.4), 220px);
+  /* Apply user-driven scale around the top-left so the right edge
+     handle "grows out" instead of pulling the whole board off-screen. */
+  transform-origin: top left;
+  transform: scale(var(--board-scale, 1));
+  transition: transform 60ms ease-out;
+  will-change: transform;
+}
+/* Reserve the post-scale space so siblings (meta row, FEN box) don't
+   overlap when the scale is > 1. */
+.board-scale-wrap::after {
+  content: "";
+  display: block;
+  width: 0; height: 0;
+  margin-left: calc(min(86vh, 100%, 820px) * (var(--board-scale, 1) - 1));
+}
+.board-scale-host {
+  position: relative;
+  /* Account for the scaled width *and* a bit of bottom padding so the
+     meta row (FEN, status) never overlaps a scaled-up board. */
+  margin-bottom: calc(min(86vh, 100%, 820px) * max(var(--board-scale, 1) - 1, 0));
+}
+/* Edge handles for live scaling. Right + bottom + corner. They sit
+   *outside* the board so the SVG arrows / piece grid stays clickable.
+   When the user starts dragging, app.js writes the new scale into
+   --board-scale on .board-area. */
+.board-scale-handle {
+  position: absolute;
+  background: transparent;
+  z-index: 5;
+  user-select: none;
+  touch-action: none;
+}
+.board-scale-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 2px;
+  background: rgba(110, 167, 255, 0);
+  transition: background 120ms ease;
+}
+.board-scale-handle:hover::after,
+.board-scale-handle.is-dragging::after {
+  background: rgba(110, 167, 255, 0.45);
+}
+.board-scale-handle.h-right {
+  top: 6%; bottom: 6%; right: -8px; width: 10px;
+  cursor: ew-resize;
+}
+.board-scale-handle.h-bottom {
+  left: 6%; right: 6%; bottom: -8px; height: 10px;
+  cursor: ns-resize;
+}
+.board-scale-handle.h-corner {
+  right: -10px; bottom: -10px; width: 18px; height: 18px;
+  cursor: nwse-resize;
+}
+.board-scale-handle.h-corner::after {
+  border: 2px solid rgba(110, 167, 255, 0.55);
+  background: rgba(110, 167, 255, 0.12);
+}
+.board-scale-handle.h-corner:hover::after,
+.board-scale-handle.h-corner.is-dragging::after {
+  border-color: rgba(110, 167, 255, 0.95);
+  background: rgba(110, 167, 255, 0.35);
+}
+body.is-board-resizing { cursor: nwse-resize; }
+body.is-board-resizing * { user-select: none !important; }
+
 .board {
-  width: min(80vh, 100%);
+  width: 100%;
+  height: 100%;
   aspect-ratio: 1 / 1;
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   grid-template-rows: repeat(8, 1fr);
   border: 3px solid #2a2017;
-  border-radius: 4px;
+  border-radius: 6px;
   user-select: none;
   position: relative;
+  /* Subtle outer glow so the board doesn't look pasted onto the dark
+     background once it's been scaled up. */
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 18px 36px -22px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(0, 0, 0, 0.45);
   /* Image-backed board themes (e.g. preset "#1") set --board-image to a
      full 8x8 sprite that we stretch behind the (transparent) squares. */
   background-image: var(--board-image, none);
@@ -672,8 +844,11 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   100% { box-shadow: inset 0 0 0 0px rgba(237, 94, 110, 0); }
 }
 
-/* Centred celebration glyph that pops over the board on correct /
-   wrong / finish events. */
+/* Legacy centred celebration glyph — kept for `drill-burst-finish`
+   (the trophy that pops on opening-trainer completion). The OK/BAD
+   variants are no-ops now: per-move feedback lives in the top-right
+   corner of the *played square* via `.review-badge` (the same badge
+   the Analysis page uses) so we never cover the pieces. */
 .drill-burst {
   position: absolute;
   left: 50%; top: 50%;
@@ -684,10 +859,9 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   z-index: 30;
   opacity: 0;
   text-shadow: 0 0 18px rgba(0,0,0,0.55);
-  animation: drillBurstPop 0.85s ease-out forwards;
 }
-.drill-burst.drill-burst-ok  { color: #6dd58c; text-shadow: 0 0 24px rgba(109, 213, 140, 0.6); }
-.drill-burst.drill-burst-bad { color: #ff7676; text-shadow: 0 0 24px rgba(255, 118, 118, 0.6); }
+.drill-burst.drill-burst-ok,
+.drill-burst.drill-burst-bad { display: none; }
 .drill-burst.drill-burst-finish {
   font-size: 120px;
   animation: drillBurstFinish 1.6s ease-out forwards;
@@ -1747,6 +1921,53 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 .onboarding-actions { margin-top: 18px; display: flex; justify-content: flex-end; }
 
+/* Custom-photo block above the glyph grid */
+.onboarding-photo-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 12px;
+  background: #11161f;
+  border: 1px solid #2c3950;
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+.onboarding-photo-preview {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #2a3a55, #18222f);
+  border: 1px solid #324059;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 30px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.onboarding-photo-preview img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.onboarding-photo-actions {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px;
+}
+.onboarding-photo-status { font-size: 11px; }
+.onboarding-photo-hint { margin: 0 0 6px; font-size: 11px; }
+
+/* Generic avatar image rendering. Used wherever the `avatar` field
+   resolves to an `<img>` instead of a glyph (uploaded photo). */
+.avatar-img {
+  display: inline-block;
+  width: 1em; height: 1em;
+  vertical-align: middle;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #11161f;
+}
+.avatar-glyph {
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  line-height: 1;
+}
+
 /* ---------- Profile ---------- */
 .profile-body { display: flex; flex-direction: column; gap: 14px; }
 .profile-header {
@@ -1764,6 +1985,14 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border: 1px solid #324059;
   display: flex; align-items: center; justify-content: center;
   font-size: 32px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+/* Override the 1em sizing for the round profile slot — we want the
+   uploaded photo to fill the entire 64×64 frame, not just one em. */
+.profile-avatar .avatar-img {
+  width: 100%; height: 100%;
+  border-radius: 50%;
 }
 .profile-name h3 {
   margin: 0 0 2px;
@@ -2038,65 +2267,57 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .party-solved { color: #6cf2a6; font-weight: 700; font-variant-numeric: tabular-nums; }
 .party-elo { color: #ffd75e; font-weight: 700; font-size: 12px; text-align: right; }
 
-/* Lobby: host-picked match length (2/3/5/10 min). */
-.party-duration-section {
+/* Lobby: fixed-duration / fixed-lives info row (chess.com Battle). */
+.party-rules {
   margin: 14px 0 6px;
-  padding: 12px;
+  padding: 12px 14px;
   background: #1a2538;
   border: 1px solid #2c3950;
   border-radius: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
 }
-.party-duration-label {
-  color: #c0cce0;
-  font-size: 13px;
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-.party-duration-options {
+.party-rule {
   display: flex;
+  align-items: baseline;
   gap: 8px;
-  flex-wrap: wrap;
 }
-.party-duration-opt {
-  flex: 1 1 0;
-  min-width: 84px;
-  padding: 10px 12px;
-  background: #0f1521;
-  border: 1px solid #2a3550;
-  border-radius: 10px;
-  color: #c0cce0;
-  font-weight: 700;
-  font-size: 14px;
-  cursor: pointer;
-  transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.12s;
+.party-rule-key {
+  color: #94a4be;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
 }
-.party-duration-opt:hover:not(:disabled) {
-  border-color: #6da7ff;
-  color: #e7eef9;
-}
-.party-duration-opt.is-active {
-  background: linear-gradient(180deg, #1f3a64, #182748);
-  border-color: #6da7ff;
+.party-rule-val {
   color: #ffd75e;
-  box-shadow: 0 4px 14px rgba(109, 167, 255, 0.18);
+  font-weight: 800;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
 }
-.party-duration-opt:disabled {
-  cursor: default;
-  opacity: 0.85;
+.party-rule.party-rule-note {
+  grid-column: 1 / -1;
+  color: #c0cce0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  font-weight: 500;
 }
 
 /* Detailed end-of-match results. */
-.party-card.party-card-results { width: min(960px, 96vw); }
+.party-card.party-card-results {
+  width: min(1400px, 99vw);
+  padding: 20px 18px;
+}
 .party-results-card {
   margin: 12px 0;
-  padding: 14px;
+  padding: 12px;
   background: #131c2c;
   border: 1px solid #2c3950;
   border-radius: 12px;
 }
 .party-results-meta {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   flex-wrap: wrap;
   font-size: 13px;
   color: #c0cce0;
@@ -2105,26 +2326,46 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border-bottom: 1px solid #2c3950;
 }
 .party-results-meta strong { color: #e7eef9; }
+/* Wrapper used to scroll horizontally if the table overflows; we keep
+   the property defined so legacy mobile zoom doesn't visually clip
+   content, but tighten cell sizing below so it never triggers. */
 .party-results-tablewrap { overflow-x: auto; }
 .party-results-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
   color: #e7eef9;
+  table-layout: auto;
 }
 .party-results-table thead th {
   text-align: left;
-  padding: 8px 10px;
+  padding: 6px 6px;
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.3px;
   color: #94a4be;
   font-weight: 700;
   border-bottom: 1px solid #2c3950;
+  white-space: nowrap;
 }
 .party-results-table tbody td {
-  padding: 9px 10px;
+  padding: 7px 6px;
   border-bottom: 1px solid #1f2a3d;
+}
+.party-results-table .col-rank { width: 32px; }
+.party-results-table .col-num { white-space: nowrap; }
+.party-results-table .col-time { white-space: nowrap; }
+.party-results-table .col-player { width: auto; }
+.party-results-table .party-results-player {
+  min-width: 0;
+}
+.party-results-table .party-results-player .party-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
 }
 .party-results-table tbody tr:last-child td { border-bottom: none; }
 .party-results-table tbody tr:hover { background: rgba(109, 167, 255, 0.06); }
@@ -2159,9 +2400,12 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   flex-direction: row;
   flex-wrap: wrap;
   gap: 8px;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 .party-actions-results > button { flex: 0 1 auto; }
+/* Push only the trailing primary (Закрыть) to the far right;
+   share/save buttons stay grouped on the left so the new Discord
+   button sits directly next to "Сохранить в галерею". */
 .party-actions-results .puzzle-primary { margin-left: auto; }
 
 /* Profile: clickable battle history row. */
@@ -2173,7 +2417,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .profile-party-row {
   width: 100%;
   display: grid;
-  grid-template-columns: 48px minmax(120px, 1fr) minmax(180px, 1.2fr) 80px 90px 16px;
+  grid-template-columns: 48px minmax(120px, 1fr) minmax(180px, 1.2fr) 80px 16px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -2222,12 +2466,6 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   color: #6da7ff;
   text-align: right;
 }
-.profile-party-row .pp-elo {
-  font-size: 12px;
-  font-weight: 700;
-  color: #ffd75e;
-  text-align: right;
-}
 .profile-party-row .pp-chevron {
   font-size: 18px;
   font-weight: 700;
@@ -2236,15 +2474,29 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 }
 
 @media (max-width: 720px) {
-  .party-card.party-card-results { width: 96vw; padding: 14px; }
-  .party-results-meta { font-size: 12px; gap: 10px; }
-  .party-results-table { font-size: 12px; }
-  .party-results-table thead th, .party-results-table tbody td { padding: 6px 8px; }
+  .party-card.party-card-results {
+    width: 100vw;
+    max-width: 100vw;
+    padding: 10px 6px;
+    border-radius: 0;
+  }
+  .party-results-card { padding: 8px 6px; margin: 8px 0; }
+  .party-results-meta { font-size: 11px; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; }
+  .party-results-table { font-size: 11px; }
+  .party-results-table thead th {
+    padding: 4px 3px;
+    font-size: 9px;
+    letter-spacing: 0.2px;
+  }
+  .party-results-table tbody td { padding: 4px 3px; }
+  .party-results-table .party-avatar { font-size: 13px; }
+  .party-results-table .party-results-player { gap: 4px; }
+  .party-results-table .party-results-num.muted { font-size: 10px; }
   .profile-party-row {
     grid-template-columns: 40px 1fr 80px 14px;
     grid-template-areas:
       "rank meta score chev"
-      "stats stats elo elo";
+      "stats stats stats stats";
     row-gap: 4px;
   }
   .profile-party-row .pp-rank { grid-area: rank; }
@@ -2260,13 +2512,16 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   position: fixed;
   top: 80px;
   right: 16px;
-  width: 280px;
+  width: 320px;
+  max-height: calc(100vh - 110px);
   background: linear-gradient(180deg, #1f2a3a, #161e2c);
   border: 1px solid #2c3950;
   border-radius: 14px;
   padding: 14px;
   z-index: 80;
   box-shadow: 0 18px 36px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
 }
 .party-side-header {
   display: flex;
@@ -2274,26 +2529,146 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   justify-content: space-between;
   margin-bottom: 10px;
 }
-.party-side-title { font-weight: 800; color: #e7eef9; letter-spacing: 0.3px; }
+.party-side-title { font-weight: 800; color: #e7eef9; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 6px; }
 .party-side-timer {
   font: 800 22px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color: #ffd75e;
   font-variant-numeric: tabular-nums;
 }
-.party-side-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.party-side-list .party-row {
+.party-side-avg { font-size: 12px; color: #94a4be; margin-bottom: 8px; }
+
+.party-side-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2c3950 transparent;
+}
+.party-side-list::-webkit-scrollbar { width: 6px; }
+.party-side-list::-webkit-scrollbar-thumb { background: #2c3950; border-radius: 4px; }
+
+/* chess.com Puzzle Battle scoreboard row (per player). */
+.battle-rows .battle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 9px;
+  border-radius: 10px;
+  background: #131c2c;
+  border: 1px solid #1f2a3d;
+  transition: border-color 0.18s, background 0.18s, opacity 0.18s;
+}
+.battle-rows .battle-row.is-self {
+  background: rgba(109, 167, 255, 0.14);
+  border-color: rgba(109, 167, 255, 0.55);
+}
+.battle-rows .battle-row.is-out {
+  opacity: 0.55;
+  background: rgba(255, 118, 118, 0.08);
+  border-color: rgba(255, 118, 118, 0.35);
+}
+.battle-row-head {
   display: grid;
-  grid-template-columns: 36px 22px 1fr 56px 46px;
+  grid-template-columns: 24px 22px 1fr auto;
   align-items: center;
   gap: 6px;
-  padding: 4px 6px;
-  border-radius: 8px;
   font-size: 13px;
 }
-.party-side-list .party-row.is-self { background: rgba(109, 167, 255, 0.18); }
-.party-side-list .party-name { color: #e7eef9; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.party-side-list .party-score { color: #6da7ff; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; font-size: 13px; }
-.party-side-list .party-solved { color: #6cf2a6; font-size: 12px; }
+.battle-row-head .party-rank { color: #94a4be; font-weight: 700; font-size: 12px; }
+.battle-row-head .party-avatar { font-size: 18px; line-height: 1; }
+.battle-row-head .party-name {
+  color: #e7eef9;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.battle-row-head .party-score {
+  color: #6da7ff;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+}
+.battle-row-head .battle-you {
+  color: #94a4be;
+  font-weight: 500;
+  font-size: 11px;
+  margin-left: 2px;
+}
+
+.battle-row-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+/* "Lives" — small squares (chess.com style). Default = green ✓; spent = red ✗. */
+.battle-lives {
+  display: flex;
+  flex-direction: row;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.battle-life {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+}
+.battle-life svg { width: 14px; height: 14px; display: block; }
+.battle-life.is-alive {
+  background: rgba(108, 242, 166, 0.18);
+  border-color: rgba(108, 242, 166, 0.55);
+  color: #6cf2a6;
+}
+.battle-life.is-dead {
+  background: rgba(255, 118, 118, 0.16);
+  border-color: rgba(255, 118, 118, 0.5);
+  color: #ff7676;
+}
+
+/* Vertical streak grid — 10 cells per column, fresh column per 10 attempts. */
+.battle-streak-grid {
+  display: flex;
+  flex-direction: row;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.battle-streak-col {
+  display: grid;
+  grid-template-rows: repeat(10, 1fr);
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.battle-streak-cell {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: #1c2740;
+  border: 1px solid #243352;
+  display: block;
+}
+.battle-streak-cell.is-solved {
+  background: linear-gradient(180deg, #4ec47a, #2d8e4f);
+  border-color: #6cf2a6;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+.battle-streak-cell.is-failed {
+  background: linear-gradient(180deg, #d8554f, #8a2c28);
+  border-color: #ff7676;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
 .party-side-leave {
   margin-top: 10px;
   width: 100%;
@@ -2351,7 +2726,7 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .toast-btn-decline { background: transparent; color: #94a4be; border: 1px solid #2a3a52; }
 .toast-btn-decline:hover { background: rgba(255,255,255,0.05); color: #e7eef9; }
 
-/* ---------- Friend picker inside party-create ---------- */
+/* ---------- Friend picker inside party lobby ---------- */
 .party-friends {
   max-height: 260px;
   overflow-y: auto;
@@ -2364,14 +2739,29 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   display: flex; align-items: center; gap: 10px;
   padding: 6px 8px;
   border-radius: 8px;
-  cursor: pointer;
   user-select: none;
 }
 .party-friend-row:hover { background: rgba(255,255,255,0.03); }
-.party-friend-row input[type="checkbox"] { accent-color: #6da7ff; width: 16px; height: 16px; }
-.party-friend-name { flex: 1; }
+.party-friend-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .party-friend-meta { font-size: 11px; color: #7c8da9; }
+.party-friend-online { color: #6cf2a6; }
 .party-friend-empty { padding: 12px; color: #7c8da9; text-align: center; }
+.party-friend-invite-btn {
+  background: #2d6cdf;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font: 600 12px/1 inherit;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.06s;
+  white-space: nowrap;
+}
+.party-friend-invite-btn:hover:not(:disabled) { background: #2557b8; }
+.party-friend-invite-btn:active:not(:disabled) { transform: scale(0.97); }
+.party-friend-invite-btn:disabled { opacity: 0.7; cursor: default; }
+.party-friend-invite-btn.is-sent { background: #1f7a4a; }
+.party-invite-section { margin-top: 4px; }
 
 .party-open-list {
   max-height: 200px;
@@ -2503,6 +2893,17 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   padding: 14px;
 }
 .spectator-single .meta-host .row { margin-bottom: 6px; font-size: 13px; color: #b3c2d8; }
+.spectator-single .meta-host .spectator-mode-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #1b3458;
+  color: #cfe1ff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-bottom: 8px;
+}
 
 /* Grid view: every player's board side by side */
 .spectator-grid {
@@ -2828,3 +3229,2072 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
    (so the user can still pinch-zoom the page outside the board). */
 .board, .square { touch-action: manipulation; }
 .modal-card { -webkit-overflow-scrolling: touch; }
+
+/* ============================================================
+   Daily Puzzle / Puzzle Rush / Opening Trainer
+   ============================================================ */
+
+#panel-daily h2,
+#panel-rush h2,
+#panel-opening h2 {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 6px 0 12px;
+  color: #f5f8fc;
+}
+#panel-daily h2 .puzzle-h-sub,
+#panel-rush h2 .puzzle-h-sub,
+#panel-opening h2 .puzzle-h-sub {
+  font-size: 13px;
+  font-weight: 500;
+  color: #94a4be;
+  letter-spacing: 0.02em;
+  margin-left: 6px;
+}
+
+.puzzle-banner {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
+  color: #cfd9ea;
+}
+.puzzle-banner-ok {
+  background: rgba( 65, 163,  93, 0.16);
+  border-color: rgba( 65, 163,  93, 0.4);
+  color: #b6efc6;
+}
+.puzzle-banner-bad {
+  background: rgba(176,  51,  64, 0.16);
+  border-color: rgba(176,  51,  64, 0.45);
+  color: #f5a8b0;
+}
+
+.puzzle-theme-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  margin: 2px 4px 2px 0;
+  border-radius: 999px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #c9d4e6;
+}
+.puzzle-themes { margin: 6px 0 8px; }
+.puzzle-id     { font-size: 13px; font-weight: 600; color: #d8e3f5; }
+.puzzle-rating { font-size: 13px; color: #f0c958; }
+.puzzle-side   { font-size: 13px; color: #c9d4e6; margin-top: 4px; }
+.puzzle-meta   { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+
+/* Leaderboard rows shared by daily/rush. */
+.lb-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8aa0c0;
+  margin: 8px 0 6px;
+}
+.lb-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.lb-tabs-scope { margin-bottom: 12px; }
+.lb-tab {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.03);
+  color: #97a8c2;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.lb-tab.is-active {
+  background: rgba(120, 170, 240, 0.12);
+  color: #f0f4fb;
+  border-color: rgba(120, 170, 240, 0.3);
+}
+.lb-tab:hover:not(.is-active) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #d8e3f5;
+}
+.lb-row {
+  display: grid;
+  grid-template-columns: 24px 26px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.lb-row:nth-child(odd) { background: rgba(255, 255, 255, 0.025); }
+.lb-rank  { color: #8aa0c0; font-weight: 600; text-align: right; }
+.lb-av    { font-size: 18px; line-height: 1; }
+.lb-nick  { color: #e6efff; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-time, .lb-score { color: #cfd9ea; font-variant-numeric: tabular-nums; font-weight: 600; }
+.lb-row .muted { color: #8aa0c0; font-weight: 400; }
+
+/* ---------- Puzzle Rush ---------- */
+.rush-pick { padding: 8px 0 4px; }
+.rush-pick h3 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: #e6efff;
+}
+.rush-pick-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.rush-mode-btn {
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f5f8fc;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 120ms, background 120ms;
+}
+.rush-mode-btn:hover {
+  border-color: rgba(247, 198, 49, 0.45);
+  background: linear-gradient(180deg, rgba(247,198,49,0.08), rgba(247,198,49,0.02));
+}
+.rush-mode-label { font-size: 16px; font-weight: 800; letter-spacing: -0.005em; }
+.rush-mode-sub   { font-size: 12px; color: #97a8c2; }
+.rush-running { display: flex; flex-direction: column; gap: 8px; }
+.rush-stats {
+  display: flex;
+  gap: 14px;
+  font-size: 13px;
+  color: #cfd9ea;
+}
+.rush-stats b { color: #f5f8fc; font-weight: 800; }
+.rush-stats b.rush-bad { color: #f5a8b0; }
+.rush-result { text-align: center; padding: 12px 8px 6px; }
+.rush-result h3 {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0 0 6px;
+  color: #f7c66c;
+}
+.rush-bests {
+  display: flex;
+  justify-content: center;
+  gap: 18px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #cfd9ea;
+}
+.rush-bests b { color: #f5f8fc; font-weight: 800; }
+
+/* ---------- Opening Trainer ---------- */
+.opening-layout {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+.opening-catalog {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 560px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  padding-right: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 170, 240, 0.35) transparent;
+}
+.opening-catalog::-webkit-scrollbar { width: 8px; }
+.opening-catalog::-webkit-scrollbar-thumb {
+  background: rgba(120, 170, 240, 0.3);
+  border-radius: 999px;
+}
+.opening-catalog::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 170, 240, 0.55);
+}
+.opening-cat-item {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: #cfd9ea;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+}
+.opening-cat-item:hover { background: rgba(255, 255, 255, 0.04); }
+.opening-cat-item.is-active {
+  background: rgba(120, 170, 240, 0.12);
+  border-color: rgba(120, 170, 240, 0.3);
+  color: #f5f8fc;
+}
+.opening-color { font-size: 14px; line-height: 1; }
+.opening-name  { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.opening-eco   { color: #8aa0c0; font-size: 11px; }
+.opening-detail { min-width: 0; }
+.opening-meta h3 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 800;
+  color: #f5f8fc;
+}
+.opening-meta .muted { font-size: 12px; color: #97a8c2; }
+.opening-lines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 6px;
+}
+.opening-line-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: #c9d4e6;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.opening-line-item.is-active {
+  background: rgba(247, 198, 49, 0.14);
+  border-color: rgba(247, 198, 49, 0.4);
+  color: #f7c66c;
+}
+.opening-line-item:hover:not(.is-active) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f8fc;
+}
+.opening-mastery { font-size: 10px; color: #8aa0c0; font-weight: 500; }
+.opening-line-name { font-weight: 600; }
+.opening-theory {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.opening-theory-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-variant-numeric: tabular-nums;
+}
+.opening-san {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #d8e3f5;
+  font-size: 13px;
+  font-weight: 600;
+}
+.opening-theory p.muted {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #97a8c2;
+}
+.puzzle-secondary.is-active,
+.puzzle-primary.is-active {
+  outline: 2px solid rgba(247, 198, 49, 0.55);
+  outline-offset: 1px;
+}
+
+@media (max-width: 720px) {
+  .opening-layout { grid-template-columns: 1fr; }
+  .opening-catalog {
+    border-right: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    padding-right: 0;
+    padding-bottom: 8px;
+    max-height: 200px;
+  }
+  .rush-pick-grid { grid-template-columns: 1fr; }
+}
+
+/* AI coach panel (Opening Trainer): Ollama + Stockfish 18. */
+.opening-ai-panel {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(120, 180, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(20, 30, 48, 0.55);
+}
+.opening-ai-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #d8e3f5;
+}
+.opening-ai-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.opening-ai-badge-ok    { background: rgba(74, 199, 124, 0.16); color: #6ad48b; border-color: rgba(74, 199, 124, 0.4); }
+.opening-ai-badge-off   { background: rgba(255, 96, 96, 0.14);  color: #ff8b8b; border-color: rgba(255, 96, 96, 0.35); }
+.opening-ai-badge-checking { background: rgba(247, 198, 49, 0.15); color: #ffd75e; border-color: rgba(247, 198, 49, 0.4); }
+.opening-ai-badge-sf    { background: rgba(120, 180, 255, 0.15); color: #9bc6ff; border-color: rgba(120, 180, 255, 0.35); }
+.opening-ai-badge-sf-off{ background: rgba(255, 255, 255, 0.04); color: #97a8c2; border-color: rgba(255, 255, 255, 0.08); }
+.opening-ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.opening-ai-actions button { font-size: 12px; }
+.opening-ai-tuning {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: #b9c5d8;
+}
+.opening-ai-tuning label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.opening-ai-tuning input[type="number"] {
+  width: 56px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(120, 180, 255, 0.25);
+  background: rgba(0, 0, 0, 0.25);
+  color: #e8eef9;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.opening-ai-text {
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-size: 13px;
+  color: #d6e0f0;
+  min-height: 18px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.opening-ai-text.is-error { color: #ffb3b3; }
+.opening-ai-text.muted    { color: #8aa0c0; font-style: italic; }
+.opening-ai-verdict {
+  display: block;
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 800;
+  letter-spacing: 0.005em;
+  color: #f5f8fc;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+}
+.opening-ai-verdict-good { color: #6ad48b; }
+.opening-ai-verdict-warn { color: #ffd75e; }
+.opening-ai-verdict-bad  { color: #ff8b8b; }
+.opening-ai-body {
+  display: block;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: #cfd9ea;
+  white-space: pre-wrap;
+}
+.opening-ai-body:empty { display: none; }
+/* Hybrid coach output: eval row sits between the bold headline and the
+   one-sentence «idea». ``opening-ai-eval`` shows Stockfish numbers,
+   ``opening-ai-best`` shows the recommended SAN as a small chip — both
+   are deterministic so we render them in muted/numeric style instead of
+   compete-with-the-headline weight. */
+.opening-ai-evalrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: baseline;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  color: #aab8d0;
+  font-variant-numeric: tabular-nums;
+}
+.opening-ai-eval {
+  white-space: nowrap;
+}
+.opening-ai-best code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(106, 212, 139, 0.14);
+  border: 1px solid rgba(106, 212, 139, 0.32);
+  color: #b8eccc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+/* The LLM-written sentence — soft / italic so it visually defers to the
+   Stockfish-driven block above. */
+.opening-ai-idea {
+  display: block;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: #cfd9ea;
+  font-style: italic;
+  white-space: pre-wrap;
+}
+.opening-ai-idea.muted { color: #8aa0c0; }
+.opening-ai-idea:empty { display: none; }
+.opening-ai-help {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.opening-ai-help code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #ffd75e;
+}
+
+/* Party avg-ELO chips (lobby header + side panel HUD). */
+.party-avg-pill {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(247, 198, 49, 0.12);
+  border: 1px solid rgba(247, 198, 49, 0.35);
+  color: #ffd75e;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+.party-side-avg {
+  margin: 2px 0 8px;
+  font-size: 12px;
+  color: #c9d4e6;
+  font-weight: 500;
+}
+.party-side-avg strong {
+  color: #ffd75e;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Slim HUD + below-board scoreboard panel ---- */
+
+/* The HUD that lives in the top-right is now intentionally tiny —
+ * it carries only the title, timer, and the rating line. The full
+ * scoreboard moved to .party-board-panel below the board so the
+ * playing area no longer competes with the right-edge resize
+ * handle of the board. */
+.party-side-panel {
+  width: 260px;
+  max-height: none;
+  padding: 10px 12px 12px;
+}
+.party-side-panel .party-side-list,
+.party-side-panel .party-side-leave {
+  display: none;
+}
+.party-side-header { margin-bottom: 4px; }
+
+.party-board-panel {
+  width: 100%;
+  margin: 12px 0 4px;
+  background: linear-gradient(180deg, #1f2a3a, #161e2c);
+  border: 1px solid #2c3950;
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+}
+.party-board-panel .party-side-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2c3950 transparent;
+}
+.party-board-panel .party-side-list::-webkit-scrollbar { width: 6px; }
+.party-board-panel .party-side-list::-webkit-scrollbar-thumb {
+  background: #2c3950; border-radius: 4px;
+}
+.party-board-panel .party-side-leave {
+  margin-top: 12px;
+  width: auto;
+  padding: 8px 18px;
+  font-weight: 600;
+}
+
+/* "You're out" notice that replaces the hint/skip row in the puzzle
+ * card after the server's `eliminated` frame. */
+.puzzle-eliminated {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 118, 118, 0.08);
+  border: 1px solid rgba(255, 118, 118, 0.35);
+  border-radius: 10px;
+  font-size: 13px;
+  color: #e7eef9;
+}
+.puzzle-eliminated .puzzle-eliminated-icon {
+  font-size: 18px;
+  color: #ff7676;
+  flex: 0 0 auto;
+}
+.puzzle-eliminated .puzzle-eliminated-text {
+  flex: 1 1 auto;
+  line-height: 1.35;
+  color: #c9d4e6;
+}
+.puzzle-eliminated button { flex: 0 0 auto; }
+
+/* ---- Lobby: rating-mode picker (standard / custom) ---- */
+.party-mode-section {
+  margin: 14px 0 6px;
+  padding: 12px 14px;
+  background: #1a2538;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+}
+.party-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #94a4be;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+.party-mode-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.party-mode-opt {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: center;
+  padding: 10px 12px;
+  background: #131c2c;
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s;
+}
+.party-mode-opt:hover { border-color: #3c5078; }
+.party-mode-opt input[type="radio"] {
+  grid-row: 1 / 3;
+  grid-column: 1 / 2;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #6da7ff;
+}
+.party-mode-opt .party-mode-title {
+  grid-row: 1 / 2;
+  grid-column: 2 / 3;
+  color: #e7eef9;
+  font-weight: 700;
+  font-size: 14px;
+}
+.party-mode-opt .party-mode-hint {
+  grid-row: 2 / 3;
+  grid-column: 2 / 3;
+  color: #94a4be;
+  font-size: 11.5px;
+}
+.party-mode-opt.is-active {
+  background: rgba(109, 167, 255, 0.14);
+  border-color: rgba(109, 167, 255, 0.55);
+}
+.party-custom-range {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.party-custom-range[hidden] { display: none; }
+.party-range-input {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #94a4be;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.party-range-input input {
+  background: #0d1421;
+  border: 1px solid #2c3950;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: 600 14px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: #ffd75e;
+  font-variant-numeric: tabular-nums;
+}
+.party-range-input input:focus {
+  outline: none;
+  border-color: #6da7ff;
+  box-shadow: 0 0 0 3px rgba(109, 167, 255, 0.18);
+}
+.party-range-note {
+  grid-column: 1 / -1;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.party-mode-readonly {
+  font-size: 13px;
+  color: #c9d4e6;
+}
+.party-mode-readonly strong {
+  color: #ffd75e;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.party-refresh-btn {
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 8px;
+}
+
+/* ---- Profile match-history mode badge ---- */
+.profile-party-row .pp-mode {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.profile-party-row .pp-mode.is-standard {
+  background: rgba(108, 242, 166, 0.12);
+  border-color: rgba(108, 242, 166, 0.35);
+  color: #6cf2a6;
+}
+.profile-party-row .pp-mode.is-custom {
+  background: rgba(247, 198, 49, 0.14);
+  border-color: rgba(247, 198, 49, 0.4);
+  color: #ffd75e;
+}
+
+/* ---- Elimination modal header ---- */
+.party-header.party-header-elim h2 {
+  color: #ff9b6e;
+}
+.party-header.party-header-elim h2 span[aria-hidden="true"] {
+  color: #ffb486;
+  margin-right: 6px;
+}
+
+/* =============================================================
+ * Chess.com-style sidebar (Puzzle Rush + Puzzle Battle landing)
+ *
+ * Rendered into the right-column panel (#panel-rush / #panel-battle)
+ * before a session is started. Three regions stacked vertically:
+ *   .cc-sidebar-head   — back-arrow + glyph + title row
+ *   .cc-sidebar-stats  — two stat tiles side by side
+ *   .cc-sidebar-tabs   — Play / Watch / Leaderboard tabs
+ *   .cc-sidebar-body   — per-tab content (scrollable)
+ *   .cc-sidebar-cta    — sticky bottom green Play button
+ * ============================================================= */
+.cc-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: linear-gradient(180deg, #1c2434, #161d2a);
+  border: 1px solid #2c3950;
+  border-radius: 16px;
+  padding: 14px 14px 16px;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.34);
+  margin-bottom: 14px;
+}
+.cc-sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cc-sidebar-head .cc-sidebar-glyph {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cc-sidebar-head .cc-sidebar-glyph svg { width: 22px; height: 22px; }
+.cc-sidebar-head .cc-sidebar-title {
+  flex: 1;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.005em;
+  color: #f3f7ff;
+}
+.cc-sidebar-head .cc-sidebar-sub {
+  font-size: 12px;
+  color: #8295b0;
+}
+.cc-sidebar-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.cc-sidebar-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cc-sidebar-stat .cc-stat-label {
+  font-size: 11px;
+  color: #8395b0;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.cc-sidebar-stat .cc-stat-value {
+  font-size: 22px;
+  font-weight: 800;
+  color: #f3f7ff;
+  letter-spacing: -0.01em;
+}
+.cc-sidebar-stat .cc-stat-value small {
+  font-size: 12px;
+  color: #94a4be;
+  font-weight: 500;
+  margin-left: 4px;
+}
+.cc-sidebar-tabs {
+  display: flex;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 4px;
+}
+.cc-sidebar-tabs .cc-tab {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: transparent;
+  border: none;
+  color: #94a4be;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.cc-sidebar-tabs .cc-tab:hover { color: #cfd9ea; }
+.cc-sidebar-tabs .cc-tab.is-active {
+  background: linear-gradient(180deg, #2c3a55, #233048);
+  color: #f3f7ff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+.cc-sidebar-body { display: flex; flex-direction: column; gap: 8px; min-height: 60px; }
+.cc-sidebar-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8395b0;
+  margin: 4px 0 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cc-sidebar-section-title button {
+  font-size: 14px;
+  background: transparent;
+  border: none;
+  color: #8395b0;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.cc-sidebar-section-title button:hover { color: #cfd9ea; }
+.cc-sidebar-cta {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cc-sidebar-cta .cc-play-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 18px;
+  border-radius: 12px;
+  border: none;
+  background: linear-gradient(180deg, #5fb85f, #4a9c4a);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: transform 80ms, filter 120ms, box-shadow 160ms;
+  box-shadow: 0 6px 16px rgba(74, 156, 74, 0.32);
+}
+.cc-sidebar-cta .cc-play-btn:hover { filter: brightness(1.08); }
+.cc-sidebar-cta .cc-play-btn:active { transform: scale(0.98); }
+.cc-sidebar-cta .cc-play-btn[disabled] {
+  filter: grayscale(0.6) brightness(0.85);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.cc-sidebar-cta .cc-play-secondary {
+  align-self: center;
+  background: transparent;
+  border: none;
+  color: #94a4be;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+.cc-sidebar-cta .cc-play-secondary:hover { color: #cfd9ea; }
+
+/* ---- Rush mode list (3 min / 5 min / Survival pickable rows) ---- */
+.cc-mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cc-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015));
+  color: #f5f8fc;
+  cursor: pointer;
+  transition: border-color 140ms, background 140ms, transform 80ms;
+  text-align: left;
+}
+.cc-mode-row:hover {
+  border-color: rgba(120, 200, 120, 0.45);
+  background: linear-gradient(180deg, rgba(95,184,95,0.08), rgba(95,184,95,0.02));
+}
+.cc-mode-row.is-active {
+  border-color: #5fb85f;
+  background: linear-gradient(180deg, rgba(95,184,95,0.16), rgba(95,184,95,0.04));
+  box-shadow: 0 4px 14px rgba(95, 184, 95, 0.18);
+}
+.cc-mode-row .cc-mode-icon {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+.cc-mode-row .cc-mode-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cc-mode-row .cc-mode-name { font-size: 15px; font-weight: 700; color: #f3f7ff; }
+.cc-mode-row .cc-mode-sub  { font-size: 12px; color: #94a4be; }
+.cc-mode-row .cc-mode-best {
+  font-size: 12px;
+  color: #f7c66c;
+  font-weight: 700;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.cc-mode-row.is-active .cc-mode-icon {
+  background: rgba(95, 184, 95, 0.22);
+  color: #b9eab9;
+}
+
+/* ---- Online/offline pill toggle inside Battle Play tab ---- */
+.cc-toggle {
+  display: inline-flex;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  padding: 3px;
+  align-self: stretch;
+  margin-bottom: 6px;
+}
+.cc-toggle .cc-toggle-btn {
+  flex: 1;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: transparent;
+  border: none;
+  color: #94a4be;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: background 120ms, color 120ms;
+}
+.cc-toggle .cc-toggle-btn:hover { color: #cfd9ea; }
+.cc-toggle .cc-toggle-btn.is-active {
+  background: linear-gradient(180deg, #2c3a55, #233048);
+  color: #f3f7ff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+.cc-toggle .cc-toggle-btn .cc-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 2px;
+  background: #6cf2a6;
+}
+.cc-toggle .cc-toggle-btn[data-toggle="offline"] .cc-dot { background: #94a4be; }
+
+/* ---- Online players list (Battle Play tab) ---- */
+.cc-player-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.cc-player-list::-webkit-scrollbar { width: 6px; }
+.cc-player-list::-webkit-scrollbar-thumb { background: #2c3950; border-radius: 4px; }
+.cc-player-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: background 120ms;
+}
+.cc-player-row:hover { background: rgba(255, 255, 255, 0.04); }
+.cc-player-row .cc-player-av {
+  width: 30px; height: 30px; flex-shrink: 0;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+.cc-player-row .cc-player-av img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+.cc-player-row .cc-player-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cc-player-row .cc-player-name {
+  font-size: 13px; font-weight: 700; color: #f3f7ff;
+  white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+}
+.cc-player-row .cc-player-meta { font-size: 11px; color: #8395b0; display: flex; gap: 6px; align-items: center; }
+.cc-player-row .cc-player-meta .cc-online-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: #6cf2a6;
+  display: inline-block;
+}
+.cc-player-row .cc-player-meta .cc-offline-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: #5b6a85;
+  display: inline-block;
+}
+.cc-invite-btn {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border-radius: 9px;
+  border: none;
+  background: linear-gradient(180deg, #5fb85f, #4a9c4a);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: filter 120ms, transform 80ms;
+  box-shadow: 0 3px 9px rgba(74, 156, 74, 0.28);
+}
+.cc-invite-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.cc-invite-btn:active:not(:disabled) { transform: scale(0.96); }
+.cc-invite-btn:disabled { filter: grayscale(0.5) brightness(0.85); cursor: default; }
+.cc-invite-btn.is-sent { background: linear-gradient(180deg, #3ea65a, #2d8345); }
+.cc-spectate-btn {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #cfd9ea;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.cc-spectate-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.cc-empty {
+  padding: 14px 12px;
+  font-size: 13px;
+  color: #8395b0;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.06);
+}
+
+/* ---- Open parties row (Battle Watch tab) ---- */
+.cc-party-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.cc-party-row .cc-party-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.cc-party-row .cc-party-host { font-size: 13px; font-weight: 700; color: #f3f7ff; }
+.cc-party-row .cc-party-meta { font-size: 11px; color: #8395b0; }
+.cc-party-row .cc-party-status {
+  font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px;
+  background: rgba(108, 242, 166, 0.14); color: #6cf2a6; letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.cc-party-row .cc-party-status.is-playing { background: rgba(247, 198, 49, 0.15); color: #f7c66c; }
+.cc-join-btn {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border-radius: 9px;
+  border: none;
+  background: linear-gradient(180deg, #4280e6, #2d6cdf);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: filter 120ms;
+}
+.cc-join-btn:hover { filter: brightness(1.08); }
+
+/* ---- Code-join fallback row ---- */
+.cc-code-join {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+.cc-code-join input {
+  flex: 1;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  color: #f3f7ff;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-align: center;
+  text-transform: uppercase;
+}
+.cc-code-join input::placeholder { color: #5b6a85; letter-spacing: 0.2em; }
+.cc-code-join button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f3f7ff;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.cc-code-join button:hover { background: rgba(255, 255, 255, 0.1); }
+.cc-code-fallback summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: #5b6a85;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 4px 0;
+  list-style: none;
+}
+.cc-code-fallback summary::-webkit-details-marker { display: none; }
+.cc-code-fallback summary::before { content: "▸ "; color: inherit; }
+.cc-code-fallback[open] summary::before { content: "▾ "; }
+
+/* =============================================================
+ * Chess.com Puzzle Rush picker — 1:1 reproduction of the markup
+ * shipped at chess.com/puzzles/rush. Class names mirror the source
+ * (cc-section, sidebar-component, cc-sidebar-header-*, stats-overview-*,
+ * cc-tab-group-*, cc-tab-item-*, sidebar-start-*, cc-button-*,
+ * cc-bg-primary/secondary, cc-selected-border, cc-icon-*, …) so the
+ * structure is recognisable side-by-side with the chess.com DOM.
+ *
+ * Colours use chess.com's actual brand tokens lifted from their
+ * stylesheet:
+ *   --cc-green-200: #b2e068   (top inset highlight)
+ *   --cc-green-300: #81b64c   (gradient start, selected outline)
+ *   --cc-green-400: #5d9948   (gradient end)
+ *   --cc-green-500: #45753c   (bottom inset shadow)
+ *   --cc-gray-700:  #4b4847   (card background, dark mode)
+ *   --cc-gray-800:  #312e2b   (panel background, dark mode)
+ *   --cc-gray-900:  #262421   (deepest dark)
+ *
+ * The proprietary chess.com fonts (Chess Sans / Montserrat) are
+ * approximated with the system stack already used by the app — the
+ * sidebar inherits whatever the body font is.
+ * ============================================================= */
+.cc-section.sidebar-component {
+  --cc-green-200: #b2e068;
+  --cc-green-300: #81b64c;
+  --cc-green-400: #5d9948;
+  --cc-green-500: #45753c;
+  --cc-gray-700: #4b4847;
+  --cc-gray-800: #312e2b;
+  --cc-gray-900: #262421;
+  background: linear-gradient(180deg, #312e2b 0%, #262421 100%);
+  border: 1px solid #1d1b1a;
+  border-radius: 12px;
+  color: #d6d2cb;
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+  margin-bottom: 14px;
+}
+
+/* ---- Header (back · feature icon + title · spacer) ---- */
+.cc-section.sidebar-component .cc-sidebar-header-component {
+  display: grid;
+  grid-template-columns: 32px 1fr 32px;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  position: relative;
+}
+.cc-section.sidebar-component .cc-sidebar-header-header-start {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+.cc-section.sidebar-component .cc-sidebar-header-header-center {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cc-section.sidebar-component .cc-sidebar-header-icon-start {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  color: #c8c5be;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.cc-section.sidebar-component .cc-sidebar-header-icon-start:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+.cc-section.sidebar-component .cc-sidebar-header-feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+.cc-section.sidebar-component .cc-sidebar-header-feature-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.cc-section.sidebar-component .cc-sidebar-header-title {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.005em;
+  color: #f5f2ec;
+  margin: 0;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Generic icon-size helpers (chess.com cc-icon-size-* utilities) ---- */
+.cc-section.sidebar-component .cc-icon-glyph,
+.cc-section.sidebar-component .cc-icon-img {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+.cc-section.sidebar-component .cc-icon-size-20 svg,
+.cc-section.sidebar-component .cc-icon-size-20 { width: 20px; height: 20px; }
+.cc-section.sidebar-component .cc-icon-size-24 svg,
+.cc-section.sidebar-component .cc-icon-size-24 { width: 24px; height: 24px; }
+.cc-section.sidebar-component .cc-icon-size-40 svg,
+.cc-section.sidebar-component .cc-icon-size-40 { width: 40px; height: 40px; }
+.cc-section.sidebar-component .cc-icon-size-20 svg { display: block; }
+.cc-section.sidebar-component .cc-icon-size-24 svg { display: block; }
+.cc-section.sidebar-component .cc-icon-size-40 svg { display: block; }
+
+/* ---- Stats overview (Best Today + Top Score) ---- */
+.cc-section.sidebar-component .stats-overview-component {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.cc-section.sidebar-component .stats-overview-stat {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 10px;
+  padding: 12px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cc-section.sidebar-component .stats-overview-icon {
+  grid-row: 1 / span 2;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.cc-section.sidebar-component .stats-overview-icon svg { width: 100%; height: 100%; display: block; }
+.cc-section.sidebar-component .stats-overview-value {
+  grid-column: 2;
+  font-size: 18px;
+  font-weight: 800;
+  color: #f5f2ec;
+  letter-spacing: -0.005em;
+  line-height: 1.1;
+}
+.cc-section.sidebar-component .cc-monospace { font-variant-numeric: tabular-nums; }
+.cc-section.sidebar-component .stats-overview-label {
+  grid-column: 2;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #a09b91;
+}
+
+/* ---- Tab group (Play / Leaderboard) ---- */
+.cc-section.sidebar-component .cc-tab-group-component.cc-tab-group-secondary,
+.panel-subtabs.cc-tab-group-component.cc-tab-group-secondary {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 4px;
+}
+.panel-subtabs.cc-tab-group-component.cc-tab-group-secondary {
+  margin: 4px 0 12px;
+}
+.cc-section.sidebar-component .cc-tab-item-component,
+.panel-subtabs .cc-tab-item-component {
+  position: relative;
+  background: transparent;
+  border: none;
+  color: #a09b91;
+  padding: 10px 8px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: color 120ms;
+  font-family: inherit;
+}
+.cc-section.sidebar-component .cc-tab-item-component:hover,
+.panel-subtabs .cc-tab-item-component:hover { color: #f5f2ec; }
+.cc-section.sidebar-component .cc-tab-item-component.cc-tab-item-active,
+.panel-subtabs .cc-tab-item-component.cc-tab-item-active {
+  color: #f5f2ec;
+}
+.cc-section.sidebar-component .cc-tab-item-component.cc-tab-item-active::after,
+.panel-subtabs .cc-tab-item-component.cc-tab-item-active::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 2px;
+  background: var(--cc-green-300, #81b64c);
+  border-radius: 2px;
+}
+.cc-section.sidebar-component .cc-tab-item-label,
+.panel-subtabs .cc-tab-item-label { line-height: 1; }
+
+/* Per-panel sub-tabpane visibility — hide whichever subpane is
+   inactive without letting the surrounding flex/grid layout leak
+   the leaderboard view in. */
+.panel-subpane[hidden] { display: none !important; }
+
+/* ---- Tab panel + mode card stack ---- */
+.cc-section.sidebar-component .sidebar-start-tabpanel-rush-start {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 60px;
+}
+/* Class-level `display: flex` above outweighs the UA stylesheet's
+   `[hidden] { display: none }` rule, so without this override an
+   explicit `hidden` attribute on the inactive tabpanel still
+   leaves the leaderboard pane stacked under the Play tab. */
+.cc-section.sidebar-component .sidebar-start-tabpanel-rush-start[hidden] {
+  display: none !important;
+}
+.cc-section.sidebar-component .sidebar-start-content { display: flex; flex-direction: column; gap: 8px; }
+.cc-section.sidebar-component .sidebar-start-cardContainer { display: flex; flex-direction: column; gap: 8px; }
+.cc-section.sidebar-component .cc-rush-leaderboard-hint {
+  margin: 0;
+  font-size: 13px;
+  color: #a09b91;
+  padding: 12px 8px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+/* ---- Buttons (cc-button-component base + secondary/primary variants) ---- */
+.cc-section.sidebar-component .cc-button-component,
+#rush-actions .cc-button-component {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.005em;
+  transition: filter 120ms, transform 80ms, background 140ms, box-shadow 140ms;
+  padding: 0 18px;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.cc-section.sidebar-component .cc-button-full,
+#rush-actions .cc-button-full { width: 100%; }
+.cc-section.sidebar-component .cc-button-x-large,
+#rush-actions .cc-button-x-large {
+  height: 56px;
+  font-size: 17px;
+}
+.cc-section.sidebar-component .cc-button-xx-large,
+#rush-actions .cc-button-xx-large {
+  height: 64px;
+  font-size: 20px;
+  border-radius: 8px;
+}
+
+/* Secondary (translucent) — used by mode cards */
+.cc-section.sidebar-component .cc-button-secondary.cc-bg-secondary,
+#rush-actions .cc-button-secondary.cc-bg-secondary {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0.05) 100%);
+  color: #f5f2ec;
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.10),
+    0 1px 2px rgba(0, 0, 0, 0.14),
+    0 2px 4px rgba(0, 0, 0, 0.10);
+}
+.cc-section.sidebar-component .cc-button-secondary.cc-bg-secondary:hover,
+#rush-actions .cc-button-secondary.cc-bg-secondary:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.05) 100%);
+}
+
+/* Primary green — used by the big Play CTA */
+.cc-section.sidebar-component .cc-button-primary.cc-bg-primary,
+#rush-actions .cc-button-primary.cc-bg-primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  color: #fff;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  box-shadow:
+    inset 0 1px 0 0 rgba(178, 224, 104, 0.55),
+    inset 0 -1px 0 0 #45753c,
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    0 2px 4px rgba(0, 0, 0, 0.12);
+}
+.cc-section.sidebar-component .cc-button-primary.cc-bg-primary:hover,
+#rush-actions .cc-button-primary.cc-bg-primary:hover {
+  background:
+    linear-gradient(180deg, rgba(178, 224, 104, 0.5) 0%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+}
+.cc-section.sidebar-component .cc-button-component:active,
+#rush-actions .cc-button-component:active {
+  transform: translateY(1px);
+}
+
+.cc-section.sidebar-component .cc-button-icon { flex-shrink: 0; color: #d6d2cb; }
+.cc-section.sidebar-component .cc-button-secondary.cc-bg-secondary .cc-button-icon { color: #c8c5be; }
+.cc-section.sidebar-component .cc-button-one-line {
+  flex: 0 0 auto;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+/* Selected outline (chosen mode card) — chess.com uses outline 3px */
+.cc-section.sidebar-component .cc-selected-border {
+  outline: 3px solid var(--cc-green-300, #81b64c);
+  outline-offset: 2px;
+}
+.cc-section.sidebar-component .cc-button-secondary.cc-bg-secondary.cc-selected-border .cc-button-icon { color: #c2e09a; }
+
+/* ---- Bottom Play CTA wrapper ---- */
+.cc-rush-cta {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  margin-top: 4px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 540px) {
+  .cc-sidebar-stats { grid-template-columns: 1fr; }
+  .cc-sidebar { padding: 12px; }
+  .cc-section.sidebar-component .stats-overview-component { grid-template-columns: 1fr; }
+  .cc-section.sidebar-component { padding: 12px; }
+}
+
+/* ===========================================================
+   Premove highlight (Play vs Stockfish — unlimited queue).
+   Marks every from/to of every queued premove until it drains
+   or gets cancelled by an illegal one (sound + reset live in JS).
+   =========================================================== */
+.board .square.premove::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 196, 60, 0.32);
+  box-shadow: inset 0 0 0 2px rgba(255, 196, 60, 0.85);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* ===========================================================
+   Puzzle Rush: drop the heavy panel-rush gradient (the
+   linear-gradient(rgb(31,42,58), rgb(22,30,44)) painted behind
+   the Puzzle Rush card). Keep the chess.com-style sidebar look
+   but on the same flat surface as the rest of the app.
+   =========================================================== */
+#panel-rush #rush-card.puzzle-card,
+#panel-rush #rush-actions.puzzle-actions,
+#panel-rush #rush-history.puzzle-history {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+#panel-rush #rush-card.puzzle-card { margin-bottom: 0; }
+
+/* The rush leaderboard tab pane gets a self-rendered list
+   (avatar/nick/stats) instead of a "see below" hint. */
+.cc-section.sidebar-component .cc-rush-lb-tab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row {
+  display: grid;
+  grid-template-columns: 28px 28px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-rank {
+  font-weight: 700;
+  color: #f7c66c;
+  text-align: center;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-av img,
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-av .avatar-placeholder {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-nick {
+  font-weight: 600;
+  color: #f5f2ec;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-row .lb-score {
+  font-weight: 800;
+  color: #f7c66c;
+  font-variant-numeric: tabular-nums;
+}
+.cc-section.sidebar-component .cc-rush-lb-tab-empty {
+  padding: 14px 8px;
+  text-align: center;
+  font-size: 13px;
+  color: #a09b91;
+}
+
+/* ===========================================================
+   1 vs 1 mode (legal real-time chess between two visitors).
+   Layout mirrors Puzzle / Rush — board on the left, sidebar on
+   the right (online players, challenge dialog, live game info).
+   =========================================================== */
+#panel-onevsone {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+.onevsone-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.onevsone-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.onevsone-header h2 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.02em;
+  color: #f5f8fc;
+}
+.onevsone-header .onevsone-sub {
+  font-size: 12px;
+  color: #94a4be;
+}
+.onevsone-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.onevsone-tab {
+  background: transparent;
+  border: 0;
+  color: #94a4be;
+  padding: 8px 12px;
+  font-weight: 600;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.onevsone-tab.is-active {
+  color: #f5f8fc;
+  border-bottom-color: #81b64c;
+}
+.onevsone-online-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.onevsone-online-row {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.025);
+  cursor: pointer;
+}
+.onevsone-online-row:hover { background: rgba(255, 255, 255, 0.05); }
+.onevsone-online-row.is-offline { opacity: 0.55; cursor: default; }
+.onevsone-online-row .ov-av img,
+.onevsone-online-row .ov-av .avatar-placeholder {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.onevsone-online-row .ov-nick {
+  font-weight: 600;
+  color: #f5f8fc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.onevsone-online-row .ov-status {
+  font-size: 12px;
+  color: #6a7d96;
+}
+.onevsone-online-row .ov-status.is-online::before {
+  content: "•";
+  color: #81b64c;
+  margin-right: 4px;
+  font-size: 16px;
+  line-height: 0;
+}
+.onevsone-empty {
+  padding: 18px 10px;
+  text-align: center;
+  color: #94a4be;
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
+
+/* Challenge dialog (time selection + send). */
+.onevsone-challenge-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.025);
+}
+.onevsone-challenge-form .ov-times {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.onevsone-challenge-form .ov-times button {
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  border: 1px solid #2c3950;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.onevsone-challenge-form .ov-times button.is-active {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+.onevsone-challenge-form .ov-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.onevsone-challenge-form .ov-actions button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+.onevsone-challenge-form .ov-actions button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+
+/* Bottom-right toast for incoming challenges. */
+.onevsone-toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 90;
+  pointer-events: none;
+}
+.onevsone-toast {
+  pointer-events: auto;
+  min-width: 280px;
+  background: linear-gradient(180deg, #1f2a3a, #161e2c);
+  border: 1px solid #2c3950;
+  border-radius: 12px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #f5f8fc;
+}
+.onevsone-toast .ov-toast-title {
+  font-weight: 700;
+  font-size: 14px;
+}
+.onevsone-toast .ov-toast-body {
+  font-size: 13px;
+  color: #cfd9ea;
+}
+.onevsone-toast .ov-toast-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.onevsone-toast .ov-toast-actions button {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+.onevsone-toast .ov-toast-actions button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+
+/* ============================================================
+   #user-popover — chess.com-style mini profile.
+   Anchored next to the trigger (leaderboard row, online list row).
+   No backdrop dim; click-away closes it via JS pointerdown handler.
+   Layout mirrors the cc-* class names in the reference attachment so
+   the chess.com data-cy hooks still resolve.
+   ============================================================ */
+#user-popover {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9003;
+}
+#user-popover[hidden] { display: none; }
+.user-popover-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+#user-popover-component {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: min(320px, calc(100vw - 16px));
+  pointer-events: auto;
+}
+.user-popover-content {
+  background: #1f2a3a;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45), 0 4px 8px rgba(0, 0, 0, 0.25);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  row-gap: 16px;
+  color: #f5f8fc;
+}
+.user-popover-user-info {
+  display: flex;
+  column-gap: 12px;
+  align-items: flex-start;
+}
+.user-popover-avatar {
+  flex-shrink: 0;
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+}
+.user-popover-avatar img,
+.user-popover-avatar .avatar-placeholder {
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  object-fit: cover;
+  font-size: 36px;
+}
+.user-popover-about {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.user-popover-tagline {
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.user-popover-username {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f5f8fc;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.user-popover-username:hover {
+  color: #81b64c;
+  text-decoration: underline;
+}
+.user-popover-full-name {
+  color: #94a4be;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-popover-ratings {
+  align-items: center;
+  color: #94a4be;
+  display: flex;
+  gap: 10px;
+  padding: 2px 0;
+  flex-wrap: wrap;
+}
+.user-popover-ratings .user-rating-component {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #f7c66c;
+  font-weight: 700;
+}
+.user-popover-ratings .cc-icon-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: currentColor;
+}
+.user-popover-ratings .cc-icon-glyph svg {
+  fill: currentColor;
+}
+.user-popover-divider {
+  background-color: #94a4be;
+  border-radius: 50%;
+  height: 3px;
+  width: 3px;
+  flex-shrink: 0;
+}
+.user-popover-actions {
+  display: flex;
+  width: 100%;
+}
+.user-popover-actions-component {
+  column-gap: 8px;
+  display: flex;
+  width: 100%;
+}
+.user-popover-actions-more {
+  position: relative;
+}
+.user-popover-actions-button-more {
+  width: 56px;
+  min-height: 40px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #d6def0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.user-popover-actions-button-more:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.user-popover-actions-button-more svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+.user-popover-primary-action-button {
+  flex: 1 1 auto;
+}
+.user-popover-primary-action-button .cc-button-component {
+  width: 100%;
+  min-height: 40px;
+  border: 0;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #8fbf52 0%, #6c9a3f 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 1px 2px rgba(0, 0, 0, 0.25);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 0 14px;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+}
+.user-popover-primary-action-button .cc-button-component:hover {
+  background: linear-gradient(180deg, #99c75b 0%, #79a847 100%);
+}
+.user-popover-primary-action-button .cc-icon-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.user-popover-primary-action-button svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+
+/* ===========================================================
+   Global Leaderboard panel (right column under the board on
+   every view that has a Leaderboard tab — currently rush, soon
+   1 vs 1). Pure dataset = every visitor; no Friends/Personal.
+   =========================================================== */
+.global-leaderboard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.global-leaderboard .gl-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #f7c66c;
+  text-transform: uppercase;
+}
+.global-leaderboard .gl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.global-leaderboard .gl-row {
+  display: grid;
+  grid-template-columns: 28px 28px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+.global-leaderboard .gl-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.global-leaderboard .gl-row .gl-rank { text-align: center; font-weight: 700; color: #f7c66c; }
+.global-leaderboard .gl-row .gl-av img,
+.global-leaderboard .gl-row .gl-av .avatar-placeholder {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.global-leaderboard .gl-row .gl-nick {
+  font-weight: 600;
+  color: #f5f8fc;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.global-leaderboard .gl-row .gl-nick-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Online/offline pill next to a user name. The colour decides on its
+   own — no extra JS needed. Lives next to .gl-nick-line so it inherits
+   the row's flex sizing (won't push the nickname out). */
+.global-leaderboard .gl-row .gl-dot,
+.onevsone-online-row .gl-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.04);
+}
+.gl-dot.is-online   { background: #5db04e; }
+.gl-dot.is-offline  { background: #6b7790; }
+/* Why a user is ranked where they are (e.g. "Серия · решено 12",
+   "Победы 1v1 · 4 игр"). One muted line under the nickname. */
+.global-leaderboard .gl-row .gl-metric,
+.onevsone-online-row .ov-meta {
+  font-size: 11px;
+  color: #94a4be;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.global-leaderboard .gl-row .gl-score {
+  font-weight: 800;
+  color: #f7c66c;
+  font-variant-numeric: tabular-nums;
+}
+/* "авто" pill that replaced the manual ⟳ refresh on Battle landing.
+   Mirrors the auto-poll cadence so the user knows the list is live. */
+.cc-auto-refresh-hint {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #5db04e;
+  background: rgba(93, 176, 78, 0.12);
+  border: 1px solid rgba(93, 176, 78, 0.3);
+  padding: 2px 6px;
+  border-radius: 999px;
+  margin-left: auto;
+}
