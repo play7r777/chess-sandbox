@@ -87,6 +87,11 @@ class Match:
     finished: bool = False
     finish_reason: str = ""
     winner: str = ""  # "w" | "b" | "draw" | ""
+    # client_id of the player who currently has an outstanding draw
+    # offer pending. Empty when no offer is on the table. Cleared on
+    # accept/decline and on every move (a fresh move auto-cancels the
+    # offer to mirror chess.com behaviour).
+    draw_offer_by: str = ""
     # Live WS sockets per client_id (one per side, additional spectators
     # could be supported later but aren't right now).
     sockets: dict[str, Any] = field(default_factory=dict)
@@ -122,6 +127,7 @@ class Match:
             "finished": self.finished,
             "finish_reason": self.finish_reason,
             "winner": self.winner,
+            "draw_offer_by": self.draw_offer_by,
             "started_at": int(self.created_at),
         }
 
@@ -393,6 +399,8 @@ async def apply_move(
             "fen_after": m.chess.fen(),
             "ts": int(now),
         })
+        # Any move auto-revokes a pending draw offer (chess.com rule).
+        m.draw_offer_by = ""
         # Game termination?
         if m.chess.is_checkmate():
             m.finished = True
@@ -430,6 +438,70 @@ async def apply_move(
             "white_clock": round(m.white.clock_remaining, 2),
             "black_clock": round(m.black.clock_remaining, 2),
         }
+
+
+def find_active_match(client_id: str) -> Match | None:
+    """Return the first non-finished match ``client_id`` is a player in,
+    or ``None``. Used by the active-match recovery endpoint so a user
+    whose page reloaded mid-game can pick the match back up."""
+    _reap()
+    for m in _MATCHES.values():
+        if m.finished:
+            continue
+        if m.player_for(client_id) is not None:
+            return m
+    return None
+
+
+async def offer_draw(match_id: str, client_id: str) -> dict[str, Any] | None:
+    async with _LOCK:
+        m = _MATCHES.get(match_id)
+        if m is None or m.finished:
+            return None
+        me = m.player_for(client_id)
+        if me is None:
+            return None
+        if m.draw_offer_by == client_id:
+            return {"ok": True, "already": True}
+        m.draw_offer_by = client_id
+        return {"ok": True, "by": client_id}
+
+
+async def accept_draw(match_id: str, client_id: str) -> dict[str, Any] | None:
+    async with _LOCK:
+        m = _MATCHES.get(match_id)
+        if m is None or m.finished:
+            return None
+        me = m.player_for(client_id)
+        if me is None:
+            return None
+        if not m.draw_offer_by or m.draw_offer_by == client_id:
+            return None
+        m.finished = True
+        m.finish_reason = "agreed_draw"
+        m.winner = "draw"
+        m.draw_offer_by = ""
+        m.last_move_at = time.time()
+        return {
+            "ok": True,
+            "finished": True,
+            "finish_reason": "agreed_draw",
+            "winner": "draw",
+        }
+
+
+async def decline_draw(match_id: str, client_id: str) -> dict[str, Any] | None:
+    async with _LOCK:
+        m = _MATCHES.get(match_id)
+        if m is None or m.finished:
+            return None
+        me = m.player_for(client_id)
+        if me is None:
+            return None
+        if not m.draw_offer_by or m.draw_offer_by == client_id:
+            return None
+        m.draw_offer_by = ""
+        return {"ok": True, "declined_by": client_id}
 
 
 async def resign(match_id: str, client_id: str) -> dict[str, Any] | None:

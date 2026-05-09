@@ -3001,6 +3001,45 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 220, 80, 0.42);
   pointer-events: none;
 }
+
+/* Classification-tinted square (chess.com analysis style) for the
+   spectator mini-board: when the watched player makes a wrong move
+   the from + to squares glow red; on a correct move they glow green.
+   Mirror of .square.last-move-cls.cls-* on the main board. The
+   ::before yellow strip stays underneath, but we override it via
+   higher specificity (no ::before pseudo here). */
+.mini-board .mb-square.last-move-cls.cls-brilliant  { background-image: linear-gradient(rgba( 38, 194, 163, 0.55), rgba( 38, 194, 163, 0.55)); }
+.mini-board .mb-square.last-move-cls.cls-great      { background-image: linear-gradient(rgba(116, 155, 191, 0.55), rgba(116, 155, 191, 0.55)); }
+.mini-board .mb-square.last-move-cls.cls-best       { background-image: linear-gradient(rgba(129, 182,  76, 0.55), rgba(129, 182,  76, 0.55)); }
+.mini-board .mb-square.last-move-cls.cls-excellent  { background-image: linear-gradient(rgba(129, 182,  76, 0.50), rgba(129, 182,  76, 0.50)); }
+.mini-board .mb-square.last-move-cls.cls-good       { background-image: linear-gradient(rgba(149, 183, 118, 0.50), rgba(149, 183, 118, 0.50)); }
+.mini-board .mb-square.last-move-cls.cls-book       { background-image: linear-gradient(rgba(213, 164, 125, 0.50), rgba(213, 164, 125, 0.50)); }
+.mini-board .mb-square.last-move-cls.cls-forced     { background-image: linear-gradient(rgba(150, 175, 139, 0.50), rgba(150, 175, 139, 0.50)); }
+.mini-board .mb-square.last-move-cls.cls-inaccuracy { background-image: linear-gradient(rgba(247, 198,  49, 0.60), rgba(247, 198,  49, 0.60)); }
+.mini-board .mb-square.last-move-cls.cls-mistake    { background-image: linear-gradient(rgba(255, 164,  89, 0.60), rgba(255, 164,  89, 0.60)); }
+.mini-board .mb-square.last-move-cls.cls-blunder    { background-image: linear-gradient(rgba(250,  65,  45, 0.62), rgba(250,  65,  45, 0.62)); }
+.mini-board .mb-square.last-move-cls.cls-miss       { background-image: linear-gradient(rgba(255, 119, 105, 0.60), rgba(255, 119, 105, 0.60)); }
+
+/* Review badge (✓ / ✗ chess.com-style icon) painted in the corner of
+   the destination square on the spectator mini-board. Mirror of
+   `.square .review-badge` on the main board, scaled down a bit so
+   the SVG doesn't dwarf the smaller mini-board squares. */
+.mini-board .mb-square .review-badge {
+  position: absolute;
+  top: -8%; right: -8%;
+  width: 46%; height: 46%;
+  min-width: 14px; min-height: 14px;
+  max-width: 28px; max-height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+  z-index: 6;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+}
+.mini-board .mb-square .review-badge svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
 /* Source square of the player's current selection (the piece they
    clicked / are dragging). Same colour the main board uses so the
    visual is identical. */
@@ -4942,6 +4981,87 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .onevsone-challenge-form .ov-actions button.primary {
   background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
   border-color: #5d9948;
+}
+
+/* Action row inside an *active* match panel (resign / offer-draw /
+   leave). Outside the challenge form, `.ov-actions` lives directly
+   under #onevsone-body, so we restyle the bare buttons to match the
+   challenge-form look without leaning on form-scoped selectors. */
+#onevsone-body .ov-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+#onevsone-body .ov-actions button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+#onevsone-body .ov-actions button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+#onevsone-body .ov-actions button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+#onevsone-body .ov-actions #btn-onevsone-resign {
+  background: linear-gradient(180deg, #c0504d 0%, #8c3a37 100%);
+  border-color: #8c3a37;
+}
+#onevsone-body .ov-actions #btn-onevsone-resign:hover {
+  background: linear-gradient(180deg, #d56864 0%, #a04340 100%);
+}
+#onevsone-body .ov-actions #btn-onevsone-draw {
+  background: linear-gradient(180deg, #4a6391 0%, #344e7a 100%);
+  border-color: #344e7a;
+}
+#onevsone-body .ov-actions #btn-onevsone-draw:hover {
+  background: linear-gradient(180deg, #5b78ad 0%, #425e90 100%);
+}
+
+/* Draw-offer banner: shown above .ov-actions while a draw offer is
+   pending. is-incoming = opponent offered, render Accept/Decline.
+   is-outgoing = we offered, render a passive "waiting" hint. */
+#onevsone-body .ov-draw-offer {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.025);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #f5f8fc;
+}
+#onevsone-body .ov-draw-offer.is-incoming {
+  border-color: #5d9948;
+  background: rgba(129, 182, 76, 0.10);
+}
+#onevsone-body .ov-draw-offer.is-incoming span {
+  flex: 1 1 auto;
+}
+#onevsone-body .ov-draw-offer button {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+#onevsone-body .ov-draw-offer button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+#onevsone-body .ov-draw-offer.is-outgoing {
+  font-style: italic;
+  color: #b9c5d6;
 }
 
 /* Bottom-right toast for incoming challenges. */

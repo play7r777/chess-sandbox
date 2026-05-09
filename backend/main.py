@@ -1492,6 +1492,71 @@ async def onevsone_match_state(
     return {"match": m.public(client_id)}
 
 
+@app.get("/api/onevsone/active")
+async def onevsone_active_match(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """Return the caller's currently active match (if any) so a player
+    whose page reloaded mid-game — or who never received the
+    ``onevsone_match`` notification because their SSE stream hiccupped
+    — can re-enter their live match instead of being stuck in the
+    lobby."""
+    m = onevsone_room.find_active_match(client_id)
+    if m is None:
+        return {"match": None}
+    return {"match": m.public(client_id)}
+
+
+@app.post("/api/onevsone/match/{match_id}/draw_offer")
+async def onevsone_match_draw_offer(
+    match_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    result = await onevsone_room.offer_draw(match_id, payload.client_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="match_not_found_or_finished")
+    m = onevsone_room.get_match(match_id)
+    if m is not None and not result.get("already"):
+        await _onevsone_broadcast(m, {
+            "type": "draw_offer",
+            "by": payload.client_id,
+        })
+    return result
+
+
+@app.post("/api/onevsone/match/{match_id}/draw_accept")
+async def onevsone_match_draw_accept(
+    match_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    result = await onevsone_room.accept_draw(match_id, payload.client_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="no_pending_draw_offer")
+    m = onevsone_room.get_match(match_id)
+    if m is not None:
+        await _onevsone_broadcast(m, {
+            "type": "draw_accepted",
+            "by": payload.client_id,
+            "winner": "draw",
+            "finish_reason": "agreed_draw",
+        })
+    return result
+
+
+@app.post("/api/onevsone/match/{match_id}/draw_decline")
+async def onevsone_match_draw_decline(
+    match_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    result = await onevsone_room.decline_draw(match_id, payload.client_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="no_pending_draw_offer")
+    m = onevsone_room.get_match(match_id)
+    if m is not None:
+        await _onevsone_broadcast(m, {
+            "type": "draw_declined",
+            "by": payload.client_id,
+        })
+    return result
+
+
 @app.post("/api/onevsone/match/{match_id}/resign")
 async def onevsone_match_resign(
     match_id: str, payload: OneVsOneActionRequest,
@@ -1583,6 +1648,35 @@ async def onevsone_ws(ws: WebSocket) -> None:
                             "by": client_id,
                             "winner": result.get("winner"),
                             "finish_reason": "resign",
+                        })
+            elif mtype == "draw_offer":
+                result = await onevsone_room.offer_draw(match_id, client_id)
+                if result is not None and not result.get("already"):
+                    m_now = onevsone_room.get_match(match_id)
+                    if m_now is not None:
+                        await _onevsone_broadcast(m_now, {
+                            "type": "draw_offer",
+                            "by": client_id,
+                        })
+            elif mtype == "draw_accept":
+                result = await onevsone_room.accept_draw(match_id, client_id)
+                if result is not None:
+                    m_now = onevsone_room.get_match(match_id)
+                    if m_now is not None:
+                        await _onevsone_broadcast(m_now, {
+                            "type": "draw_accepted",
+                            "by": client_id,
+                            "winner": "draw",
+                            "finish_reason": "agreed_draw",
+                        })
+            elif mtype == "draw_decline":
+                result = await onevsone_room.decline_draw(match_id, client_id)
+                if result is not None:
+                    m_now = onevsone_room.get_match(match_id)
+                    if m_now is not None:
+                        await _onevsone_broadcast(m_now, {
+                            "type": "draw_declined",
+                            "by": client_id,
                         })
             elif mtype == "ping":
                 await ws.send_json({"type": "pong"})

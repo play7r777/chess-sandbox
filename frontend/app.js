@@ -332,6 +332,7 @@ const SOUND_FILES = {
   "castle":        "/static/sounds/castle.wav",
   "promote":       "/static/sounds/promote.wav",
   "illegal":       "/static/sounds/illegal.wav",
+  "incorrect":     "/static/sounds/incorrect.wav",
 };
 const _soundCache = {};
 function _getSound(name) {
@@ -4375,6 +4376,11 @@ function tryPuzzleMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
+    // Sound feedback even on wrong moves: the chess.com Stockfish 18
+    // experience plays the regular move/capture SFX *and* a separate
+    // "incorrect" buzzer. Before this we played nothing on misses.
+    try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     // Show the wrong-move position to spectators with the same red ✕
     // badge the player sees — without this they'd see the piece teleport
     // back to its origin (we never broadcast wrong moves before the
@@ -8713,6 +8719,8 @@ function tryDailyMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
+    try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     // Spectator mirror — without this the watcher only ever sees the
     // reverted FEN below, which makes the wrong piece teleport back.
     _partyReportPosition(c.fen(), {
@@ -9178,6 +9186,8 @@ function tryRushMove(from, to) {
     state.lastMove = { from: move.from, to: move.to };
     _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
     renderBoard();
+    try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     // Mirror to spectators so they see the same red ✕ on the
     // wrong square instead of a piece teleport.
     _partyReportPosition(c.fen(), {
@@ -10030,10 +10040,31 @@ async function enterOneVsOneView() {
     try { _puzzleViewSnapshotFlipped("onevsone"); } catch (_) { /* ignore */ }
   }
   if (state.legalMode === false && typeof setBoardMode === "function") setBoardMode(true);
+  // Spectators following this player from /api/presence need the
+  // solo-presence relay open whether we land in the lobby or in an
+  // active match. presenceConnect() is a no-op if a party owns the
+  // channel or if we're already connected, so it's safe to call
+  // unconditionally.
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   if (state.onevsone.match) {
     _renderOnevsoneMatchUi();
     _onevsoneEnsureWs();
     return;
+  }
+  // Active-match recovery: if the SSE "onevsone_challenge_accepted"
+  // notification got dropped (page reload, lost connection, etc.) the
+  // server still has our match — ask for it before showing the lobby
+  // so the player isn't stuck unable to rejoin.
+  if (state.user.client_id) {
+    try {
+      const r = await api(`/api/onevsone/active?client_id=${encodeURIComponent(state.user.client_id)}`);
+      if (r && r.match) {
+        state.onevsone.match = r.match;
+        _renderOnevsoneMatchUi();
+        _onevsoneEnsureWs();
+        return;
+      }
+    } catch (_) { /* ignore — fall through to lobby */ }
   }
   _renderOnevsoneLobby();
   await _refreshOnevsoneOnline(true);
@@ -10065,6 +10096,12 @@ function leaveOneVsOneView() {
   }
   if (typeof _puzzleResetBoardCommon === "function" && !state.onevsone.match) {
     try { _puzzleResetBoardCommon(); } catch (_) { /* ignore */ }
+  }
+  // Tear down the solo-presence relay only when leaving 1v1 without
+  // an active match — if a match is in flight (player tabbed away),
+  // keep broadcasting so spectators can keep watching.
+  if (!state.onevsone.match && !state.party.active) {
+    try { presenceDisconnect(); } catch (_) { /* ignore */ }
   }
 }
 
@@ -10337,6 +10374,10 @@ function _onevsoneHandleWsEvent(msg) {
   if (!m) return;
   switch (msg.type) {
     case "hello":
+    case "state":
+      // "state" is a full match snapshot the server sends on demand /
+      // after a reconnect. Treated identically to "hello" — swap in
+      // the fresh public-view payload and re-render.
       if (msg.match) {
         state.onevsone.match = msg.match;
         _renderOnevsoneMatchUi();
@@ -10364,6 +10405,10 @@ function _onevsoneHandleWsEvent(msg) {
       m.finished = !!msg.finished;
       m.finish_reason = msg.finish_reason || "";
       m.winner = msg.winner || "";
+      // A move auto-cancels any pending draw offer (server already
+      // does this; mirror locally so the offer banner disappears
+      // immediately for both sides).
+      m.draw_offer_by = "";
       try {
         if (state.onevsone.chess) {
           state.onevsone.chess.load(m.fen);
@@ -10377,12 +10422,36 @@ function _onevsoneHandleWsEvent(msg) {
         _playWav(sound);
       } catch (_) { /* ignore */ }
       _renderOnevsoneMatchUi();
+      // Spectator mirror: relay the new position to the solo-presence
+      // viewer so they see the opponent's reply on their mini-board
+      // instead of a stale pre-move FEN.
+      try {
+        _partyReportPosition(m.fen, {
+          lastMove: { from: msg.from, to: msg.to },
+          mode: "onevsone",
+        });
+      } catch (_) { /* ignore */ }
       break;
     }
     case "finished":
+    case "resigned":
+    case "draw_accepted":
       m.finished = true;
-      m.finish_reason = msg.finish_reason || m.finish_reason || "";
+      m.finish_reason = msg.finish_reason
+        || (msg.type === "resigned" ? "resign"
+          : msg.type === "draw_accepted" ? "agreed_draw"
+          : m.finish_reason)
+        || "";
       m.winner = msg.winner || m.winner || "";
+      m.draw_offer_by = "";
+      _renderOnevsoneMatchUi();
+      break;
+    case "draw_offer":
+      m.draw_offer_by = msg.by || "";
+      _renderOnevsoneMatchUi();
+      break;
+    case "draw_declined":
+      m.draw_offer_by = "";
       _renderOnevsoneMatchUi();
       break;
   }
@@ -10398,6 +10467,24 @@ function _onevsoneSendResign() {
   const ws = state.onevsone.ws;
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   try { ws.send(JSON.stringify({ type: "resign" })); return true; } catch (_) { return false; }
+}
+
+function _onevsoneSendDrawOffer() {
+  const ws = state.onevsone.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try { ws.send(JSON.stringify({ type: "draw_offer" })); return true; } catch (_) { return false; }
+}
+
+function _onevsoneSendDrawAccept() {
+  const ws = state.onevsone.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try { ws.send(JSON.stringify({ type: "draw_accept" })); return true; } catch (_) { return false; }
+}
+
+function _onevsoneSendDrawDecline() {
+  const ws = state.onevsone.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try { ws.send(JSON.stringify({ type: "draw_decline" })); return true; } catch (_) { return false; }
 }
 
 // Public hook used by the board click/drag handlers when state.view
@@ -10438,6 +10525,15 @@ function tryOneVsOneMove(from, to) {
   state.lastMove = { from: move.from, to: move.to };
   renderBoard();
   try { _playWav(move.flags && move.flags.includes("c") ? "capture" : "move-self"); } catch (_) { /* ignore */ }
+  // Spectator mirror so anyone watching from /api/presence sees our
+  // move on their mini-board instantly (the server-side relay only
+  // covers party WS — 1 vs 1 needs an explicit position push).
+  try {
+    _partyReportPosition(m.fen, {
+      lastMove: { from: move.from, to: move.to },
+      mode: "onevsone",
+    });
+  } catch (_) { /* ignore */ }
   _onevsoneSendMove(move.from + move.to + (move.promotion || "q"));
   _renderOnevsoneMatchUi();
   return true;
@@ -10485,8 +10581,47 @@ function _renderOnevsoneMatchUi() {
       txt = "Правило 50 ходов — ничья";
     } else if (m.finish_reason === "time") {
       txt = m.winner === (you.color || "w") ? "Время вышло у соперника — победа" : "Ваше время вышло";
+    } else if (m.finish_reason === "agreed_draw") {
+      txt = "Ничья по согласию";
     }
     finishedHtml = `<div class="onevsone-empty"><b>${escapeHtml(txt)}</b></div>`;
+  }
+  // Draw-offer banner: chess.com-style accept/decline strip when the
+  // opponent has an outstanding draw offer; "вы предложили" hint when
+  // it's our offer waiting to be answered.
+  const youCid = (you && you.client_id) || "";
+  const drawOfferBy = m.draw_offer_by || "";
+  const drawOfferIncoming = !!finished ? false : !!drawOfferBy && drawOfferBy !== youCid;
+  const drawOfferOutgoing = !!finished ? false : !!drawOfferBy && drawOfferBy === youCid;
+  let drawOfferHtml = "";
+  if (drawOfferIncoming) {
+    drawOfferHtml = `
+      <div class="ov-draw-offer is-incoming">
+        <span>Соперник предлагает ничью</span>
+        <button type="button" class="primary" id="btn-onevsone-draw-accept">Принять</button>
+        <button type="button" id="btn-onevsone-draw-decline">Отклонить</button>
+      </div>
+    `;
+  } else if (drawOfferOutgoing) {
+    drawOfferHtml = `<div class="ov-draw-offer is-outgoing">Вы предложили ничью — ожидаем ответа…</div>`;
+  }
+  // Action row layout:
+  //   • finished match     → only "Leave"
+  //   • outgoing draw     → only Resign (we already offered draw,
+  //                         hide the "offer" button to avoid spam)
+  //   • normal           → Resign + "Offer draw"
+  let actionsHtml;
+  if (finished) {
+    actionsHtml = `<button type="button" class="primary" id="btn-onevsone-leave">Выйти</button>`;
+  } else if (drawOfferIncoming) {
+    actionsHtml = `<button type="button" id="btn-onevsone-resign">Сдаться</button>`;
+  } else if (drawOfferOutgoing) {
+    actionsHtml = `<button type="button" id="btn-onevsone-resign">Сдаться</button>`;
+  } else {
+    actionsHtml = `
+      <button type="button" id="btn-onevsone-resign">Сдаться</button>
+      <button type="button" id="btn-onevsone-draw">Предложить ничью</button>
+    `;
   }
   host.innerHTML = `
     <div class="onevsone-header">
@@ -10504,8 +10639,9 @@ function _renderOnevsoneMatchUi() {
       <span class="ov-status">⏱ ${_fmtMmSs((youClock || 0) * 1000)}</span>
     </div>
     ${finishedHtml}
+    ${drawOfferHtml}
     <div class="ov-actions">
-      ${finished ? `<button type="button" class="primary" id="btn-onevsone-leave">Выйти</button>` : `<button type="button" id="btn-onevsone-resign">Сдаться</button>`}
+      ${actionsHtml}
     </div>
     <div id="onevsone-history" class="puzzle-history"></div>
   `;
@@ -10522,6 +10658,30 @@ function _renderOnevsoneMatchUi() {
     btnResign.onclick = () => {
       if (!confirm("Сдаться?")) return;
       _onevsoneSendResign();
+    };
+  }
+  const btnDraw = document.getElementById("btn-onevsone-draw");
+  if (btnDraw) {
+    btnDraw.onclick = () => {
+      if (!_onevsoneSendDrawOffer()) {
+        setStatus("Не удалось отправить предложение ничьи. Соединение потеряно?", "error");
+      }
+    };
+  }
+  const btnDrawAccept = document.getElementById("btn-onevsone-draw-accept");
+  if (btnDrawAccept) {
+    btnDrawAccept.onclick = () => {
+      if (!_onevsoneSendDrawAccept()) {
+        setStatus("Не удалось принять ничью.", "error");
+      }
+    };
+  }
+  const btnDrawDecline = document.getElementById("btn-onevsone-draw-decline");
+  if (btnDrawDecline) {
+    btnDrawDecline.onclick = () => {
+      if (!_onevsoneSendDrawDecline()) {
+        setStatus("Не удалось отклонить ничью.", "error");
+      }
     };
   }
   const btnLeave = document.getElementById("btn-onevsone-leave");
@@ -10619,6 +10779,12 @@ async function enterBattleView() {
     }
     return;
   }
+  // Open the solo-presence relay so anyone watching this player from
+  // /api/presence will see Battle activity (lobby / scoreboard / live
+  // puzzle attempts). When the player joins an actual party the
+  // party WS supersedes presence; presenceConnect bails out cleanly
+  // because party.active = true.
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   if (state.party.active && state.party.status === "lobby") {
     renderPartyLobby();
     return;
@@ -10641,6 +10807,12 @@ function leaveBattleView() {
   // Hide the legacy modal in case some legacy code path opened it.
   const m = document.getElementById("party-modal");
   if (m) m.hidden = true;
+  // Drop the solo-presence socket if the player is leaving Battle
+  // without entering a party (otherwise the party WS owns the
+  // relay and we shouldn't kill it).
+  if (!state.party.active) {
+    try { presenceDisconnect(); } catch (_) { /* ignore */ }
+  }
 }
 
 async function enterOpeningView() {
@@ -10799,6 +10971,8 @@ function tryOpeningMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
+    try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     _flashSquare(move.to, "puzzle-flash-bad");
     try { c.undo(); } catch (_) { /* ignore */ }
     _reportOpeningAttempt(false, false);
