@@ -1137,10 +1137,10 @@ class Party:
 def _sample_custom_range_queue(lo: int, hi: int, n: int) -> list[dict[str, Any]]:
     """Sample ``n`` puzzles strictly from ``[lo, hi]`` (custom mode).
 
-    Falls back to ``_sample_band_queue`` around the midpoint if the
-    explicit window is too narrow to fill the queue, so a host who
-    types a tiny range (e.g. 1500..1505) doesn't end up with an empty
-    match.
+    Uses ``sample_in_range`` (rowid rejection sampling) so a wide
+    window doesn't materialise tens of thousands of rows from SQLite —
+    the previous ``filter_puzzles`` path was the main reason a Battle
+    lobby took several seconds to start.
     """
     if n <= 0:
         return []
@@ -1148,50 +1148,56 @@ def _sample_custom_range_queue(lo: int, hi: int, n: int) -> list[dict[str, Any]]
     hi = min(PARTY_BAND_MAX, int(hi))
     if hi <= lo:
         hi = min(PARTY_BAND_MAX, lo + 50)
-    pool = puzzle_pack.filter_puzzles(min_rating=lo, max_rating=hi)
+    pool = puzzle_pack.sample_in_range(min_rating=lo, max_rating=hi, n=n)
     if len(pool) >= n:
-        random.shuffle(pool)
         return pool[:n]
     if pool:
-        random.shuffle(pool)
         # Top up with the standard band fallback so the queue never
         # comes out short — the host's window stays the *primary*
         # source, the rest are sampled around the midpoint.
         midpoint = (lo + hi) // 2
-        backfill = _sample_band_queue(midpoint, n - len(pool))
+        seen = {str(p.get("id") or "") for p in pool}
+        backfill = _sample_band_queue(midpoint, n - len(pool), exclude_ids=seen)
         return pool + backfill
     return _sample_band_queue((lo + hi) // 2, n)
 
 
-def _sample_band_queue(avg_rating: int, n: int) -> list[dict[str, Any]]:
+def _sample_band_queue(
+    avg_rating: int,
+    n: int,
+    *,
+    exclude_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Sample ``n`` puzzles centred on ``avg_rating``.
 
-    Two-pass strategy:
-
-    1. Try the strict band ``[avg-HALF_WIDTH, avg+HALF_WIDTH]``.
-    2. If that comes up short (small bank, edge of the rating spectrum),
-       widen one band's worth at a time until we either fill the queue
-       or hit the global ``[PARTY_BAND_MIN, PARTY_BAND_MAX]`` envelope.
-
-    Falls back to ``puzzle_pack.sample_puzzles`` only if the bank can't
-    even produce one match, so we never break a lobby.
+    Tries the strict band ``[avg-HALF_WIDTH, avg+HALF_WIDTH]`` first;
+    if the bank only barely populates that window we widen out by one
+    band's worth at a time until we either fill the queue or hit the
+    global envelope. Each attempt uses ``sample_in_range`` (rowid
+    rejection sampling) instead of pulling every matching row.
     """
     if n <= 0:
         return []
+    seen: set[str] = set(exclude_ids or [])
     width = PARTY_BAND_HALF_WIDTH
+    out: list[dict[str, Any]] = []
     while True:
         lo = max(PARTY_BAND_MIN, avg_rating - width)
         hi = min(PARTY_BAND_MAX, avg_rating + width)
-        pool = puzzle_pack.filter_puzzles(min_rating=lo, max_rating=hi)
-        if len(pool) >= n:
-            random.shuffle(pool)
-            return pool[:n]
+        deficit = n - len(out)
+        rows = puzzle_pack.sample_in_range(
+            min_rating=lo, max_rating=hi, n=deficit, exclude_ids=seen,
+        )
+        for r in rows:
+            pid = str(r.get("id") or "")
+            if pid and pid not in seen:
+                seen.add(pid)
+                out.append(r)
+                if len(out) >= n:
+                    return out[:n]
         if width >= (PARTY_BAND_MAX - PARTY_BAND_MIN):
-            # Even the maximum envelope can't fill the queue: top up
-            # with whatever the bank does have.
-            if pool:
-                random.shuffle(pool)
-                return pool
+            if out:
+                return out
             return list(puzzle_pack.sample_puzzles(n))
         width += PARTY_BAND_HALF_WIDTH
 

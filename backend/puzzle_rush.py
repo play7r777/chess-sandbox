@@ -133,30 +133,26 @@ def _new_session_id() -> str:
 def _build_queue(start_rating: int) -> list[dict[str, Any]]:
     """Pre-sample a queue that ramps from ``start_rating-200`` upward.
 
-    Strategy: we pull a window-sized batch from the puzzle bank centred
-    near the user's rating, then a wider sweep up to a hard puzzle, and
-    interleave so the first puzzles are gentle and the queue gets harder
-    as the run progresses. Any extra is shuffled in by the caller's
-    ``cursor`` walk; we don't need a perfect ramp.
+    Pulls three nested rating bands (easy / target / stretch) using
+    ``sample_in_range`` — rowid rejection sampling, so the queue is
+    built in O(SESSION_QUEUE_SIZE) bank lookups rather than the
+    previous "fetch every matching row, then stride-sample" path that
+    materialised tens of thousands of rows per band and was the main
+    reason the 3-min Rush timer "lost" minutes before the first puzzle.
     """
     base = max(MIN_BAND_RATING, min(MAX_BAND_RATING, int(start_rating)))
-    bands: list[tuple[int, int]] = []
-    # Three nested bands: easy / target / stretch. Sum capped at SESSION_QUEUE_SIZE.
-    bands.append((max(MIN_BAND_RATING, base - 250), base + 50))
-    bands.append((max(MIN_BAND_RATING, base - 50), base + 350))
-    bands.append((max(MIN_BAND_RATING, base + 200), min(MAX_BAND_RATING, base + 700)))
+    bands: list[tuple[int, int]] = [
+        (max(MIN_BAND_RATING, base - 250), base + 50),
+        (max(MIN_BAND_RATING, base - 50), base + 350),
+        (max(MIN_BAND_RATING, base + 200), min(MAX_BAND_RATING, base + 700)),
+    ]
     pool: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    per_band = SESSION_QUEUE_SIZE // len(bands)
+    per_band = max(1, SESSION_QUEUE_SIZE // len(bands))
     for lo, hi in bands:
-        rows = puzzle_pack.filter_puzzles(min_rating=lo, max_rating=hi)
-        # SQLite gives us everything in a band; pick a small random
-        # sample. JSON fallback already returns a small set.
-        if len(rows) > per_band:
-            # Stride sample without random module to keep order stable
-            # for tests; we shuffle bands at the end anyway.
-            step = max(1, len(rows) // per_band)
-            rows = rows[::step][:per_band]
+        rows = puzzle_pack.sample_in_range(
+            min_rating=lo, max_rating=hi, n=per_band, exclude_ids=seen_ids,
+        )
         for r in rows:
             pid = str(r.get("id") or "")
             if pid and pid not in seen_ids:

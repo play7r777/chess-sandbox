@@ -89,6 +89,39 @@ def sample_puzzles(n: int) -> list[dict[str, Any]]:
     return pool[:n] if n > 0 else pool
 
 
+def sample_in_range(
+    *,
+    min_rating: int | None = None,
+    max_rating: int | None = None,
+    n: int,
+    exclude_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Random sample of up to ``n`` puzzles in the rating window.
+
+    Fast O(n)-ish path on SQLite (rowid rejection sampling), with a
+    clean fallback for the bundled JSON pack.
+    """
+    if n <= 0:
+        return []
+    if using_sqlite():
+        return puzzle_db.sample_in_range(
+            min_rating=min_rating, max_rating=max_rating,
+            n=n, exclude_ids=exclude_ids,
+        )
+    pool: list[dict[str, Any]] = []
+    for p in _json_puzzles():
+        if exclude_ids and p.get("id") in exclude_ids:
+            continue
+        rating = int(p.get("rating") or 0)
+        if min_rating is not None and rating < min_rating:
+            continue
+        if max_rating is not None and rating > max_rating:
+            continue
+        pool.append(p)
+    random.shuffle(pool)
+    return pool[:n]
+
+
 def filter_puzzles(
     *,
     difficulty: str | None = None,

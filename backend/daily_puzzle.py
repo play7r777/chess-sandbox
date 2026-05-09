@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from functools import lru_cache
 from typing import Any
 
 from . import puzzles as puzzle_pack
@@ -51,15 +52,29 @@ def _index_for(date: str, pool_size: int) -> int:
     return n % pool_size
 
 
-def get_for_date(date: str | None = None) -> dict[str, Any] | None:
-    """Return the puzzle picked for ``date`` (defaults to today UTC)."""
-    target = date or today_iso()
+@lru_cache(maxsize=64)
+def _puzzle_for_date_cached(date: str) -> dict[str, Any] | None:
+    """Compute the puzzle of the day once per date.
+
+    The puzzle bank is read-only at runtime so the deterministic
+    selection only needs to materialise + sort the candidate pool the
+    first time anyone asks for ``date`` — every subsequent request for
+    the same date returns the cached row immediately. Without this the
+    daily-puzzle endpoint would re-fetch / re-sort tens of thousands of
+    rows on every refresh, which is several seconds of CPU per call on
+    the full Lichess bank.
+    """
     pool = _candidate_pool()
     if not pool:
         return None
     pool.sort(key=lambda p: str(p.get("id") or ""))
-    idx = _index_for(target, len(pool))
+    idx = _index_for(date, len(pool))
     return pool[idx]
+
+
+def get_for_date(date: str | None = None) -> dict[str, Any] | None:
+    """Return the puzzle picked for ``date`` (defaults to today UTC)."""
+    return _puzzle_for_date_cached(date or today_iso())
 
 
 def public_payload(p: dict[str, Any], *, date: str) -> dict[str, Any]:
