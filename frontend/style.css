@@ -2893,6 +2893,17 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   padding: 14px;
 }
 .spectator-single .meta-host .row { margin-bottom: 6px; font-size: 13px; color: #b3c2d8; }
+.spectator-single .meta-host .spectator-mode-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #1b3458;
+  color: #cfe1ff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-bottom: 8px;
+}
 
 /* Grid view: every player's board side by side */
 .spectator-grid {

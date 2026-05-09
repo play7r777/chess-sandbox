@@ -2191,16 +2191,46 @@ document.getElementById("btn-copy-fen").addEventListener("click", async () => {
 // ---------- Engine / API ----------
 
 async function api(path, options = {}) {
-  const resp = await fetch(path, options);
+  // Auto-attach a JSON Content-Type when a body is being sent and the
+  // caller didn't already set one. FastAPI rejects POST bodies without
+  // `Content-Type: application/json` with a 422 array of validation
+  // errors, which used to surface to the user as the cryptic
+  // "Ошибка: [object Object]" toast in the 1 vs 1 challenge flow.
+  const opts = { ...options };
+  if (opts.body && (!opts.headers || !Object.keys(opts.headers).some(
+    (k) => k.toLowerCase() === "content-type",
+  ))) {
+    opts.headers = { ...(opts.headers || {}), "Content-Type": "application/json" };
+  }
+  const resp = await fetch(path, opts);
   if (!resp.ok) {
     let msg = resp.statusText;
     try {
       const j = await resp.json();
-      if (j && j.detail) msg = j.detail;
+      if (j && j.detail !== undefined) msg = _formatApiDetail(j.detail);
     } catch { /* ignore */ }
     throw new Error(msg);
   }
   return resp.json();
+}
+
+// FastAPI emits validation errors as ``{detail: [{loc, msg, type, ...}]}``
+// which `String(arr)` flattens to "[object Object]". Pull the human
+// `msg` field out (or the type code as a last resort) so the user
+// sees something actionable in the toast.
+function _formatApiDetail(detail) {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail.map((e) => {
+      if (e && typeof e === "object") return e.msg || e.type || JSON.stringify(e);
+      return String(e);
+    }).join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    if (typeof detail.msg === "string") return detail.msg;
+    try { return JSON.stringify(detail); } catch (_) { return String(detail); }
+  }
+  return String(detail);
 }
 
 async function refreshEngineStatus() {
@@ -2854,21 +2884,32 @@ function _initPanelSubtabs() {
     if (!panel) return;
     group.querySelectorAll('[data-subtab]').forEach((btn) => {
       btn.addEventListener("click", () => {
-        const target = btn.dataset.subtab;
-        group.querySelectorAll('[data-subtab]').forEach((x) => {
-          const isActive = x.dataset.subtab === target;
-          x.classList.toggle("cc-tab-item-active", isActive);
-          x.setAttribute("aria-selected", String(isActive));
-        });
-        panel.querySelectorAll('[data-subpane]').forEach((p) => {
-          p.hidden = p.dataset.subpane !== target;
-        });
-        if (target === "leaderboard") {
-          try { renderGlobalLeaderboard(); } catch (_) { /* ignore */ }
-        }
+        _activatePanelSubtab(group.dataset.panelSubtabs, btn.dataset.subtab);
       });
     });
   });
+}
+
+// Programmatically switch a panel's subtab (e.g. "play" / "leaderboard").
+// Called from the user popover Challenge button so we can land the
+// caller on the 1v1 *Играть* tab regardless of where they were last.
+function _activatePanelSubtab(panelKey, target) {
+  if (!panelKey || !target) return;
+  const group = document.querySelector(`[data-panel-subtabs="${panelKey}"]`);
+  if (!group) return;
+  const panel = group.closest(".panel");
+  if (!panel) return;
+  group.querySelectorAll('[data-subtab]').forEach((x) => {
+    const isActive = x.dataset.subtab === target;
+    x.classList.toggle("cc-tab-item-active", isActive);
+    x.setAttribute("aria-selected", String(isActive));
+  });
+  panel.querySelectorAll('[data-subpane]').forEach((p) => {
+    p.hidden = p.dataset.subpane !== target;
+  });
+  if (target === "leaderboard") {
+    try { renderGlobalLeaderboard(); } catch (_) { /* ignore */ }
+  }
 }
 _initPanelSubtabs();
 
@@ -4334,6 +4375,14 @@ function tryPuzzleMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
+    // Show the wrong-move position to spectators with the same red ✕
+    // badge the player sees — without this they'd see the piece teleport
+    // back to its origin (we never broadcast wrong moves before the
+    // auto-advance fires).
+    _partyReportPosition(c.fen(), {
+      reviewBadge: { square: move.to, classification: "miss" },
+      lastMove: { from: move.from, to: move.to },
+    });
     const cell = boardEl && boardEl.querySelector(`.square[data-square="${move.to}"]`);
     if (cell) {
       cell.classList.add("puzzle-flash-bad");
@@ -6877,7 +6926,18 @@ function closePartyModal() {
   const m = document.getElementById("party-modal");
   if (m) m.hidden = true;
   const panel = document.getElementById("battle-body");
-  if (panel) panel.classList.remove("party-card-results");
+  if (panel) {
+    panel.classList.remove("party-card-results");
+    // Repaint the Battle landing so the user lands on the active
+    // players list instead of the now-stale lobby HTML. Without this
+    // the lobby form keeps its DOM after Выйти / Закрыть, which made
+    // the second click on "Начать матч" silently no-op (state.party.ws
+    // is null at that point) — see the bug report from the user.
+    if (state.view === "battle"
+        && (!state.party || (!state.party.active && state.party.status !== "playing"))) {
+      try { _renderBattleSidebar(panel); } catch (_) { /* ignore */ }
+    }
+  }
 }
 
 async function partyCreate() {
@@ -7110,6 +7170,20 @@ function _partyReportPosition(fen, opts) {
   // streak to render the watcher's overlay; party stores those
   // separately so the extra fields are ignored there.
   const cur = state.puzzle && state.puzzle.current;
+  // Mirror the player's local review badge (✓ "good" / ✗ "miss") so
+  // spectators see the same icon on the same square — without this
+  // they'd watch the player drop a piece on a wrong square with no
+  // feedback (and on Daily / Rush the FEN snaps back after 800ms,
+  // looking like a teleport from the spectator's POV).
+  const rb = (opts && Object.prototype.hasOwnProperty.call(opts, "reviewBadge"))
+    ? opts.reviewBadge
+    : state.reviewBadge;
+  const rbSquare = (rb && rb.square) ? String(rb.square) : "";
+  const rbKind = (rb && rb.classification) ? String(rb.classification) : "";
+  // Tell spectators which mode the player is currently in so the
+  // sidebar can announce "Watching <nick> · Puzzle / Daily / Rush /
+  // 1v1 / Battle" between the avatar and the leave button.
+  const mode = (opts && opts.mode) || _liveCurrentMode();
   try {
     ws.send(JSON.stringify({
       type: "position",
@@ -7125,8 +7199,26 @@ function _partyReportPosition(fen, opts) {
         || (state.puzzle && state.puzzle.sessionRating)
         || 0
       ),
+      review_badge_square: rbSquare,
+      review_badge_kind: rbKind,
+      mode: String(mode || ""),
     }));
   } catch (_) { /* already closed */ }
+}
+
+// Best-effort mode tag for the spectator overlay. Stays in sync with
+// the active view (state.view); falls back to "" if the player is
+// idling on a non-game tab so spectators don't see a stale label.
+function _liveCurrentMode() {
+  if (state.party && state.party.active) return "battle";
+  switch (state.view) {
+    case "puzzle":   return "puzzle";
+    case "daily":    return "daily";
+    case "rush":     return "rush";
+    case "onevsone": return state.onevsone && state.onevsone.match ? "onevsone" : "";
+    case "battle":   return "battle";
+    default:         return "";
+  }
 }
 
 // Reads `state.selectedSquare` + `state.legalTargets` and rebroadcasts
@@ -8443,6 +8535,10 @@ async function enterDailyView() {
   _puzzleViewSnapshotFlipped("daily");
   if (!state.legalMode) setBoardMode(true);
   _loadDailySession();
+  // Register in the solo presence registry so spectators can attach
+  // to a Daily session the same way they attach to Puzzle. Without
+  // this the Daily player never appears in the watch list.
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   // Always (re)fetch leaderboard.
   _refreshDailyLeaderboard();
   if (!state.daily.current) {
@@ -8617,6 +8713,12 @@ function tryDailyMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
+    // Spectator mirror — without this the watcher only ever sees the
+    // reverted FEN below, which makes the wrong piece teleport back.
+    _partyReportPosition(c.fen(), {
+      reviewBadge: { square: move.to, classification: "miss" },
+      lastMove: { from: move.from, to: move.to },
+    });
     _flashSquare(move.to, "puzzle-flash-bad");
     try { c.undo(); } catch (_) { /* ignore */ }
     renderDailyUi();
@@ -8627,6 +8729,11 @@ function tryDailyMove(from, to) {
       state.reviewBadge = null;
       state.lastMove = null;
       renderBoard();
+      // Mirror the revert to spectators too.
+      _partyReportPosition(prevFen, {
+        reviewBadge: { square: "", classification: "" },
+        lastMove: null,
+      });
     }, 800);
     return;
   }
@@ -8863,6 +8970,10 @@ async function enterRushView() {
   _puzzleViewSnapshotFlipped("rush");
   if (!state.legalMode) setBoardMode(true);
   _loadRushSession();
+  // Same reason as Daily: register with the solo presence registry
+  // so a Rush player shows up in the spectator-mode watch list and
+  // their FEN/badge updates can be relayed in real time.
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   _refreshRushLeaderboard();
   if (!state.rush.active && !state.rush.finished) {
     renderRushUi();
@@ -9067,6 +9178,12 @@ function tryRushMove(from, to) {
     state.lastMove = { from: move.from, to: move.to };
     _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
     renderBoard();
+    // Mirror to spectators so they see the same red ✕ on the
+    // wrong square instead of a piece teleport.
+    _partyReportPosition(c.fen(), {
+      reviewBadge: { square: move.to, classification: "miss" },
+      lastMove: { from: move.from, to: move.to },
+    });
     _flashSquare(move.to, "puzzle-flash-bad");
     if (state.rush.mistakes >= state.rush.maxMistakes) {
       finishRush("mistakes");
@@ -9881,6 +9998,11 @@ function _renderUserPopover(u, anchorEl) {
   card.querySelector('[data-cy="user-popover-challenge"]').addEventListener("click", () => {
     host.hidden = true;
     setView("onevsone");
+    // Force the "Играть" subtab — without this the user lands on
+    // whatever subtab they last selected (often "Лидерборд"), which
+    // hides the challenge form and makes the Challenge button look
+    // like a no-op.
+    _activatePanelSubtab("onevsone", "play");
     setTimeout(() => _onevsoneFocusChallengeFor(u), 60);
   });
   card.querySelector('[data-cy="user-popover-more"]').addEventListener("click", () => {
@@ -11920,6 +12042,23 @@ function _spectatorRender() {
   });
 }
 
+// Mode label sent by the player ("puzzle" / "daily" / "rush" /
+// "onevsone" / "battle") -> human-readable Russian label rendered
+// between the leave button and the player's nickname so the watcher
+// always knows which mode they're attached to.
+const SPECTATOR_MODE_LABELS = {
+  puzzle: "Пазлы",
+  daily: "Дневной пазл",
+  rush: "Puzzle Rush",
+  onevsone: "Шахматы 1 vs 1",
+  battle: "Puzzle Battle",
+};
+
+function _spectatorModeLabel(p) {
+  const mode = (p && typeof p.mode === "string") ? p.mode : "";
+  return SPECTATOR_MODE_LABELS[mode] || "";
+}
+
 function _spectatorRenderSingle(p) {
   if (!p) return `<div class="muted">Игрок не выбран</div>`;
   const fen = p.fen || "";
@@ -11930,15 +12069,21 @@ function _spectatorRenderSingle(p) {
   // Solo-presence view shows real-rating + current puzzle rating;
   // party view keeps the score / solved / failed breakdown.
   const isPresence = state.spectator && state.spectator.kind === "presence";
+  const modeLabel = _spectatorModeLabel(p);
+  const modeRow = modeLabel
+    ? `<div class="row spectator-mode-tag">${escapeHtml(modeLabel)}</div>`
+    : "";
   const metaInner = isPresence
     ? `
         <h3>${escapeHtml(p.nickname || "Гость")} ${avatarHtml(p.avatar, { fallback: "" })}</h3>
+        ${modeRow}
         <div class="row">Рейтинг игрока: <b>${Number(p.rating || 0) || "—"}</b></div>
         <div class="row">Текущий пазл: ${p.puzzle_rating ? `<b>${Number(p.puzzle_rating)}</b>` : "—"}</div>
         <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
       `
     : `
         <h3>${escapeHtml(p.nickname || "Гость")} ${avatarHtml(p.avatar, { fallback: "" })}</h3>
+        ${modeRow}
         <div class="row">Очки: <b>${Number(p.score || 0)}</b></div>
         <div class="row">Решено: ${Number(p.solved || 0)} · ошибок: ${Number(p.failed || 0)} · пропущено: ${Number(p.skipped || 0)}</div>
         <div class="row">Серия: ${streakHtml}${p.best_streak ? ` · макс ${Number(p.best_streak || 0)}` : ""}</div>
@@ -12091,6 +12236,18 @@ function _renderMiniBoardFromFen(fen, player) {
     // A square in both lists is a capture — drop from the moves set.
     captureSet.forEach((sq) => moveSet.delete(sq));
   }
+  // Same chess.com-style review badge the player paints on their
+  // own board (✓ "good" / ✗ "miss"). Carries over from
+  // `presence_state` payloads — when the player drops a piece on a
+  // wrong square we leave the piece at the destination AND paint a
+  // red cross; the spectator should see the same icon.
+  const rbSquare = (player && typeof player.review_badge_square === "string")
+    ? player.review_badge_square
+    : "";
+  const rbKind = (player && typeof player.review_badge_kind === "string")
+    ? player.review_badge_kind
+    : "";
+  const rbRC = rbSquare && rbKind ? sqToRC(rbSquare) : null;
   const cells = [];
   for (let r = 0; r < 8; r++) {
     // Source row in the FEN — flipped boards walk the FEN bottom-up.
@@ -12132,12 +12289,18 @@ function _renderMiniBoardFromFen(fen, player) {
         : isMove
           ? `<span class="mb-hint mb-hint-move"></span>`
           : "";
+      const isReviewSq = rbRC && rbRC.r === r && rbRC.f === f;
+      const reviewHtml = isReviewSq
+        ? `<span class="review-badge cls-${escapeHtml(rbKind)}">${REVIEW_BADGE_SVG[rbKind] || ""}</span>`
+        : "";
+      const reviewLmCls = (isLm && rbKind) ? ` last-move-cls cls-${escapeHtml(rbKind)}` : "";
       const extra =
         `${isSelected ? " mb-selected" : ""}` +
         `${isLm ? " mb-lastmove" : ""}` +
-        `${isFromSel ? " mb-sel-from" : ""}`;
+        `${isFromSel ? " mb-sel-from" : ""}` +
+        reviewLmCls;
       const cls = `mb-square ${isLight ? "mb-light" : "mb-dark"}${extra}`;
-      cells.push(`<div class="${cls}">${pieceHtml}${hintHtml}</div>`);
+      cells.push(`<div class="${cls}">${pieceHtml}${hintHtml}${reviewHtml}</div>`);
     }
   }
   const rankOrder = flipped

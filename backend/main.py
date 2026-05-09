@@ -1331,6 +1331,15 @@ async def _presence_ws_player(
                     rating=int(msg.get("rating") or 0)
                     if "rating" in msg
                     else None,
+                    review_badge_square=str(
+                        msg.get("review_badge_square") or "",
+                    ) if "review_badge_square" in msg else None,
+                    review_badge_kind=str(
+                        msg.get("review_badge_kind") or "",
+                    ) if "review_badge_kind" in msg else None,
+                    mode=str(msg.get("mode") or "")
+                    if "mode" in msg
+                    else None,
                 )
             elif mtype == "select":
                 await presence_room.update_selection(
