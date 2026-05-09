@@ -1145,12 +1145,22 @@ async def _party_ws_player(
             elif mtype == "position":
                 # Mid-puzzle FEN update for spectators. The player also
                 # forwards their current orientation + last applied move
-                # so watchers see the same board the player sees.
+                # so watchers see the same board the player sees. The
+                # review-badge fields mirror the ✓/✗ icon and from→to
+                # colour tint the solver paints locally — without these
+                # Battle spectators saw an FEN update with no badge or
+                # colour, so wrong moves looked the same as right ones.
                 await party.update_position(
                     client_id,
                     str(msg.get("fen") or ""),
                     flipped=bool(msg.get("flipped")) if "flipped" in msg else None,
                     last_move=str(msg.get("last_move") or "") if "last_move" in msg else None,
+                    review_badge_square=str(
+                        msg.get("review_badge_square") or "",
+                    ) if "review_badge_square" in msg else None,
+                    review_badge_kind=str(
+                        msg.get("review_badge_kind") or "",
+                    ) if "review_badge_kind" in msg else None,
                 )
             elif mtype == "cursor":
                 # Pointer / drag relay for spectators.

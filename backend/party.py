@@ -212,6 +212,13 @@ class Member:
     # spectator can paint a yellow last-move highlight that matches the
     # main board.
     last_move: str = ""
+    # Square + classification ("good" / "miss" / ...) of the last
+    # review-badge the player painted. Spectators replay the same ✓/✗
+    # icon and from→to colour tint on their mini-board so a wrong
+    # Battle move shows the same red ✗ + pink last-move bands the
+    # solver sees.
+    review_badge_square: str = ""
+    review_badge_kind: str = ""
     # Hex (#rrggbb) colour the player picked for "legal move" hints.
     # Spectators paint their own hint dots in this same colour so the
     # watching experience matches what the player sees.
@@ -435,6 +442,8 @@ class Party:
             "fen": m.current_fen or str(cur.get("fen") or ""),
             "puzzle_rating": int(cur.get("rating") or 0),
             "side_to_solve": _puzzle_payload(cur).get("side_to_solve") if cur else None,
+            "review_badge_square": m.review_badge_square or "",
+            "review_badge_kind": m.review_badge_kind or "",
         }
 
     async def broadcast_player_state(self, m: Member, *, force: bool = False) -> None:
@@ -654,13 +663,17 @@ class Party:
         *,
         flipped: bool | None = None,
         last_move: str | None = None,
+        review_badge_square: str | None = None,
+        review_badge_kind: str | None = None,
     ) -> None:
         """Player reports a mid-puzzle FEN (after a move attempt).
 
         Lets spectators watch the move-by-move solve. Throttled.
         ``flipped`` and ``last_move`` are passed through so spectators
         can mirror the player's board orientation and paint the same
-        last-move highlight.
+        last-move highlight. ``review_badge_*`` mirror the ✓/✗ badge
+        the solver paints on a played square so the spectator's mini-
+        board paints the same icon + green/red colour tint.
         """
         if self.status != "playing":
             return
@@ -672,6 +685,14 @@ class Party:
             m.flipped = bool(flipped)
         if last_move is not None:
             m.last_move = str(last_move or "")
+        if review_badge_square is not None:
+            m.review_badge_square = str(review_badge_square or "")
+        if review_badge_kind is not None:
+            kind = str(review_badge_kind or "").strip().lower()
+            m.review_badge_kind = kind if kind in {
+                "good", "miss", "best", "great", "inaccuracy", "mistake",
+                "blunder", "book", "brilliant",
+            } else ""
         await self.broadcast_player_state(m)
 
     async def update_selection(
