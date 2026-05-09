@@ -3001,13 +3001,20 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 220, 80, 0.42);
   pointer-events: none;
 }
+/* When the spectator broadcast carries a classification (correct =
+   "good" / wrong = "miss" / etc.), the cls-* gradient below paints the
+   chess.com analysis colour for the from+to squares. Without
+   suppressing the yellow ::before overlay above, the watcher sees
+   yellow + pink mixed = orange (the exact bug the user reported). Hide
+   the overlay so the classification colour is rendered cleanly. */
+.mini-board .mb-square.mb-lastmove.last-move-cls::before {
+  display: none;
+}
 
 /* Classification-tinted square (chess.com analysis style) for the
    spectator mini-board: when the watched player makes a wrong move
    the from + to squares glow red; on a correct move they glow green.
-   Mirror of .square.last-move-cls.cls-* on the main board. The
-   ::before yellow strip stays underneath, but we override it via
-   higher specificity (no ::before pseudo here). */
+   Mirror of .square.last-move-cls.cls-* on the main board. */
 .mini-board .mb-square.last-move-cls.cls-brilliant  { background-image: linear-gradient(rgba( 38, 194, 163, 0.55), rgba( 38, 194, 163, 0.55)); }
 .mini-board .mb-square.last-move-cls.cls-great      { background-image: linear-gradient(rgba(116, 155, 191, 0.55), rgba(116, 155, 191, 0.55)); }
 .mini-board .mb-square.last-move-cls.cls-best       { background-image: linear-gradient(rgba(129, 182,  76, 0.55), rgba(129, 182,  76, 0.55)); }

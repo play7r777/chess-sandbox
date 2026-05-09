@@ -581,6 +581,12 @@ const state = {
     match: null,              // server-shaped match object
     ws: null,                 // WebSocket
     wsRetry: 0,
+    // Outbound message queue: any payloads we tried to send while the
+    // socket was still CONNECTING (or briefly disconnected) so we
+    // don't silently drop a move/resign/draw_offer the user just
+    // performed. Drained from `ws.onopen`. Each entry is the JSON
+    // string we'd otherwise send.
+    pendingSend: [],
     clockTimer: null,
     chess: null,              // chess.js position mirror
     selected: null,           // selected square in live game
@@ -4413,11 +4419,19 @@ function tryPuzzleMove(from, to) {
   }
   // Correct! Apply the user's move visually.
   loadFen(c.fen());
-  _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
   // Same green check ("Хороший ход") that the Analysis page paints
   // in the corner of the played square — chess.com-style.
   state.reviewBadge = { square: move.to, classification: "good" };
+  // Mirror to spectators with the green ✓ badge + green from→to so the
+  // mini-board matches what the player sees (the broadcast must include
+  // reviewBadge explicitly — _partyReportPosition reads from opts before
+  // state, and we want the spectator badge tied to *this* square even
+  // if state.reviewBadge later changes for the next move).
+  _partyReportPosition(c.fen(), {
+    reviewBadge: { square: move.to, classification: "good" },
+    lastMove: { from: move.from, to: move.to },
+  });
   state.bestArrow = null;
   state.bestPv = null;
   state.puzzle.feedback = "correct";
@@ -8761,6 +8775,12 @@ function tryDailyMove(from, to) {
   renderDailyUi();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");
+  // Mirror correct move to spectators so the mini-board shows the
+  // green ✓ + green from→to that the player just got.
+  _partyReportPosition(c.fen(), {
+    reviewBadge: { square: move.to, classification: "good" },
+    lastMove: { from: move.from, to: move.to },
+  });
   if (state.daily.nextIdx >= state.daily.moves.length) {
     finalizeDailyPuzzle("solved");
     return;
@@ -9219,6 +9239,11 @@ function tryRushMove(from, to) {
   renderBoard();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");
+  // Mirror correct move to spectators with green ✓ + green from→to.
+  _partyReportPosition(c.fen(), {
+    reviewBadge: { square: move.to, classification: "good" },
+    lastMove: { from: move.from, to: move.to },
+  });
   if (state.rush.nextIdx >= state.rush.moves.length) {
     state.rush.score += 1;
     state.rush.feedback = "solved";
@@ -10372,7 +10397,18 @@ function _onevsoneEnsureWs() {
   let ws;
   try { ws = new WebSocket(url.toString()); } catch (_) { return; }
   state.onevsone.ws = ws;
-  ws.onopen = () => { state.onevsone.wsRetry = 0; };
+  ws.onopen = () => {
+    state.onevsone.wsRetry = 0;
+    // Drain anything the user did while the socket was still
+    // CONNECTING (e.g. dragged a piece the moment the match view
+    // mounted) — without this the move silently vanishes and the
+    // boards desync.
+    const queue = state.onevsone.pendingSend || [];
+    state.onevsone.pendingSend = [];
+    for (const payload of queue) {
+      try { ws.send(payload); } catch (_) { /* ignore */ }
+    }
+  };
   ws.onmessage = (ev) => {
     let payload;
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
@@ -10386,6 +10422,29 @@ function _onevsoneEnsureWs() {
     }
   };
   ws.onerror = () => { try { ws.close(); } catch (_) {} };
+}
+
+// Send (or queue) a JSON payload over the 1v1 WebSocket. Returns true
+// if the payload was either sent immediately or queued for delivery
+// when the socket opens. Returns false only if there is no live match
+// to send for (in which case dropping the payload is the right call).
+function _onevsoneEnqueueWs(obj) {
+  const m = state.onevsone.match;
+  if (!m || !m.id) return false;
+  const data = JSON.stringify(obj);
+  const ws = state.onevsone.ws;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(data); return true; } catch (_) { /* fall through to queue */ }
+  }
+  state.onevsone.pendingSend = state.onevsone.pendingSend || [];
+  state.onevsone.pendingSend.push(data);
+  // Cap the queue so a stuck socket can't grow it unbounded.
+  if (state.onevsone.pendingSend.length > 32) {
+    state.onevsone.pendingSend.splice(0, state.onevsone.pendingSend.length - 32);
+  }
+  // Kick the connector in case the WS is closed or never opened.
+  try { _onevsoneEnsureWs(); } catch (_) { /* ignore */ }
+  return true;
 }
 
 function _onevsoneHandleWsEvent(msg) {
@@ -10474,37 +10533,47 @@ function _onevsoneHandleWsEvent(msg) {
       m.draw_offer_by = "";
       _renderOnevsoneMatchUi();
       break;
+    case "error":
+      // Server rejected something we sent (most commonly an
+      // out-of-turn or illegal move from a stale local mirror). Pull
+      // the authoritative state back from the active-match endpoint
+      // so the boards re-sync instead of drifting silently.
+      try {
+        if (state.user.client_id) {
+          api(`/api/onevsone/active?client_id=${encodeURIComponent(state.user.client_id)}`)
+            .then((r) => {
+              if (r && r.match && state.onevsone.match
+                  && r.match.id === state.onevsone.match.id) {
+                state.onevsone.match = r.match;
+                state.onevsone.chess = null;
+                _renderOnevsoneMatchUi();
+              }
+            })
+            .catch(() => { /* ignore */ });
+        }
+      } catch (_) { /* ignore */ }
+      break;
   }
 }
 
 function _onevsoneSendMove(uci) {
-  const ws = state.onevsone.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  try { ws.send(JSON.stringify({ type: "move", uci })); return true; } catch (_) { return false; }
+  return _onevsoneEnqueueWs({ type: "move", uci });
 }
 
 function _onevsoneSendResign() {
-  const ws = state.onevsone.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  try { ws.send(JSON.stringify({ type: "resign" })); return true; } catch (_) { return false; }
+  return _onevsoneEnqueueWs({ type: "resign" });
 }
 
 function _onevsoneSendDrawOffer() {
-  const ws = state.onevsone.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  try { ws.send(JSON.stringify({ type: "draw_offer" })); return true; } catch (_) { return false; }
+  return _onevsoneEnqueueWs({ type: "draw_offer" });
 }
 
 function _onevsoneSendDrawAccept() {
-  const ws = state.onevsone.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  try { ws.send(JSON.stringify({ type: "draw_accept" })); return true; } catch (_) { return false; }
+  return _onevsoneEnqueueWs({ type: "draw_accept" });
 }
 
 function _onevsoneSendDrawDecline() {
-  const ws = state.onevsone.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  try { ws.send(JSON.stringify({ type: "draw_decline" })); return true; } catch (_) { return false; }
+  return _onevsoneEnqueueWs({ type: "draw_decline" });
 }
 
 // Public hook used by the board click/drag handlers when state.view
@@ -11015,6 +11084,11 @@ function tryOpeningMove(from, to) {
   renderBoard();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");
+  // Mirror correct opening move to spectators with green ✓ + green from→to.
+  _partyReportPosition(c.fen(), {
+    reviewBadge: { square: move.to, classification: "good" },
+    lastMove: { from: move.from, to: move.to },
+  });
   state.opening.moveIdx += 1;
   state.opening.feedback = "correct";
   state.opening.coachMsg = `Верно: ${move.san}.`;
@@ -11515,14 +11589,25 @@ function handleNotificationEvent(msg) {
     case "onevsone_challenge":
       if (msg.challenge) _onevsoneShowChallengeToast(msg.challenge);
       break;
+    case "onevsone_match":
     case "onevsone_challenge_accepted":
       // Server pushes the freshly-created match to *both* players when
-      // the target accepts. The challenger transitions into the match
-      // view; the target already navigated locally.
+      // the target accepts (backend payload type is `onevsone_match`,
+      // legacy alias kept for compatibility). The challenger
+      // transitions into the match view here; the target already
+      // navigated locally from the toast Accept handler.
       if (msg.match && msg.match.you && msg.match.you.client_id === state.user.client_id) {
         state.onevsone.match = msg.match;
         state.onevsone.outgoing = null;
+        // Drop any stale chess instance so _renderOnevsoneMatchUi
+        // re-creates one from the fresh starting FEN — otherwise a
+        // chess.js cached from a previous match would refuse the
+        // first move.
+        state.onevsone.chess = null;
         setView("onevsone");
+        // Force the "Играть" subtab so the player lands on the live
+        // board, not the leaderboard tab they may have last viewed.
+        try { _activatePanelSubtab("onevsone", "play"); } catch (_) { /* ignore */ }
         _renderOnevsoneMatchUi();
         _onevsoneEnsureWs();
       }

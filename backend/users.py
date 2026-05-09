@@ -278,11 +278,18 @@ def _summarize(u: dict[str, Any]) -> dict[str, Any]:
     wrong = int(s.get("wrong") or 0)
     skipped = int(s.get("skipped") or 0)
     win_pct = (solved / games * 100.0) if games else 0.0
+    # Puzzle-Rush leaderboard metric is the best *solved* count (number
+    # of puzzles cleared in a run), NOT the rating-weighted score —
+    # that's what users intuit "Лучший рекорд Rush" to mean (it's also
+    # what chess.com displays). We fall back to legacy `best` (which
+    # historically stored the rating-weighted score) only if no
+    # `best_solved` has ever been recorded for this user, so existing
+    # records don't silently zero out.
     rush = (u.get("puzzle_rush") or {}).get("best") or {}
     rush_best = 0
     for mode_key in PUZZLE_RUSH_MODES:
         cur = rush.get(mode_key) or {}
-        b = int(cur.get("best") or 0)
+        b = int(cur.get("best_solved") or 0)
         if b > rush_best:
             rush_best = b
     dp = u.get("daily_puzzle") or {}
@@ -470,11 +477,24 @@ def record_puzzle_rush_result(
         best_map = rush.setdefault("best", {})
         cur = best_map.get(mode) or {}
         prev_best = int(cur.get("best") or 0)
+        prev_best_solved = int(cur.get("best_solved") or 0)
         is_new_best = score > prev_best
+        # Track best `solved` count separately from the rating-weighted
+        # `score` so the leaderboard / profile can display "puzzles
+        # cleared" (the metric users intuit) without losing the legacy
+        # score data we use elsewhere.
+        is_new_best_solved = solved > prev_best_solved
         best_map[mode] = {
             "best": max(prev_best, score),
             "best_at": int(cur.get("best_at") or 0) if not is_new_best else now,
+            "best_solved": max(prev_best_solved, solved),
+            "best_solved_at": (
+                int(cur.get("best_solved_at") or 0)
+                if not is_new_best_solved
+                else now
+            ),
             "last": score,
+            "last_solved": solved,
             "last_at": now,
         }
         history = rush.setdefault("history", [])
@@ -502,7 +522,12 @@ def puzzle_rush_leaderboard(
     period: str = "all",
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    """Best Puzzle Rush score per user for `mode`.
+    """Best Puzzle Rush solve-count per user for `mode`.
+
+    The "score" field in the response is the number of puzzles cleared
+    (legacy field name kept so the frontend's leaderboard renderer
+    doesn't have to change). The rating-weighted score is still
+    persisted under the hood for history / debugging purposes.
 
     period == "today": only counts runs from the current UTC day.
     period == "all":   uses each user's stored personal best for the mode.
@@ -523,9 +548,9 @@ def puzzle_rush_leaderboard(
                 ts = int(entry.get("ts") or 0)
                 if time.strftime("%Y-%m-%d", time.gmtime(ts)) != today:
                     continue
-                score = int(entry.get("score") or 0)
-                if score > best_today:
-                    best_today = score
+                solved = int(entry.get("solved") or 0)
+                if solved > best_today:
+                    best_today = solved
                     best_today_at = ts
             if best_today <= 0:
                 continue
@@ -540,16 +565,16 @@ def puzzle_rush_leaderboard(
             )
         else:
             best = (rush.get("best") or {}).get(mode) or {}
-            score = int(best.get("best") or 0)
-            if score <= 0:
+            solved = int(best.get("best_solved") or 0)
+            if solved <= 0:
                 continue
             rows.append(
                 {
                     "client_id": u.get("client_id"),
                     "nickname": u.get("nickname"),
                     "avatar": u.get("avatar"),
-                    "score": score,
-                    "ts": int(best.get("best_at") or 0),
+                    "score": solved,
+                    "ts": int(best.get("best_solved_at") or best.get("best_at") or 0),
                 }
             )
     rows.sort(key=lambda r: (-int(r["score"]), int(r["ts"]) or 1 << 62))
