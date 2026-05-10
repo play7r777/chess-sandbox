@@ -580,6 +580,12 @@ const state = {
     outgoing: null,           // { challenge_id, target_id, target_nickname, time_seconds }
     incoming: {},             // challenge_id -> challenge payload (toast index)
     match: null,              // server-shaped match object
+    // Premove queue mirrors the Play-vs-Stockfish one: [{from, to,
+    // promotion}], unlimited length, drains after every opponent
+    // reply. An illegal premove plays the illegal sound and clears
+    // the whole queue.
+    premoves: [],
+    premoveChess: null,
     ws: null,                 // WebSocket
     wsRetry: 0,
     // Outbound message queue: any payloads we tried to send while the
@@ -1157,6 +1163,33 @@ function loadFen(fen) {
 const boardEl = document.getElementById("board");
 const statusEl = document.getElementById("status-line");
 
+// Right-click anywhere on the board cancels any queued premoves
+// (chess.com behaviour). Native contextmenu is suppressed so the
+// browser menu never pops up while the user is queuing premoves.
+if (boardEl) {
+  boardEl.addEventListener("contextmenu", (ev) => {
+    let cancelled = false;
+    if (state.game && state.game.active
+        && state.game.premoves && state.game.premoves.length) {
+      state.game.premoves = [];
+      state.game.premoveChess = null;
+      cancelled = true;
+    }
+    if (state.view === "onevsone" && state.onevsone && state.onevsone.match
+        && state.onevsone.premoves && state.onevsone.premoves.length) {
+      state.onevsone.premoves = [];
+      state.onevsone.premoveChess = null;
+      cancelled = true;
+    }
+    if (cancelled) {
+      state.selectedSquare = null;
+      state.legalTargets = [];
+      ev.preventDefault();
+      renderBoard();
+    }
+  });
+}
+
 function renderBoard() {
   boardEl.innerHTML = "";
   for (let visualRow = 0; visualRow < 8; visualRow++) {
@@ -1192,8 +1225,20 @@ function renderBoard() {
         cell.classList.add(piece ? "legal-capture" : "legal-move");
       }
       // Highlight queued premoves (any number) on both endpoints.
+      // Premoves are tracked separately for Play-vs-Stockfish
+      // (state.game.premoves) and 1 vs 1 (state.onevsone.premoves) —
+      // both can be live in a given session so we mark both.
       if (state.game && state.game.active && state.game.premoves && state.game.premoves.length) {
         for (const pm of state.game.premoves) {
+          if (pm.from === sqName || pm.to === sqName) {
+            cell.classList.add("premove");
+          }
+        }
+      }
+      if (state.view === "onevsone" && state.onevsone && state.onevsone.match
+          && !state.onevsone.match.finished
+          && state.onevsone.premoves && state.onevsone.premoves.length) {
+        for (const pm of state.onevsone.premoves) {
           if (pm.from === sqName || pm.to === sqName) {
             cell.classList.add("premove");
           }
@@ -1623,11 +1668,16 @@ function handleSquareClick(squareName) {
 }
 
 function handleOneVsOneSquareClick(squareName) {
-  const c = state.onevsone.chess;
-  if (!c) return;
+  const baseC = state.onevsone.chess;
+  if (!baseC) return;
   const m = state.onevsone.match;
   if (!m || m.finished) return;
   const you = m.you;
+  if (!you) return;
+  // Use the speculative position (real FEN + queued premoves, side
+  // forced to ours) so click-to-select keeps working while it's the
+  // opponent's turn and we want to chain more premoves.
+  const c = _onevsonePremoveSpeculativeChess() || baseC;
   const piece = c.get(squareName);
   if (state.selectedSquare) {
     if (state.selectedSquare === squareName) {
@@ -1640,7 +1690,7 @@ function handleOneVsOneSquareClick(squareName) {
       tryOneVsOneMove(state.selectedSquare, squareName);
       return;
     }
-    if (piece && you && piece.color === you.color && c.turn() === you.color) {
+    if (piece && piece.color === you.color) {
       _onevsoneSelectSquare(squareName);
       return;
     }
@@ -1649,13 +1699,13 @@ function handleOneVsOneSquareClick(squareName) {
     renderBoard();
     return;
   }
-  if (piece && you && piece.color === you.color && c.turn() === you.color) {
+  if (piece && piece.color === you.color) {
     _onevsoneSelectSquare(squareName);
   }
 }
 
 function _onevsoneSelectSquare(squareName) {
-  const c = state.onevsone.chess;
+  const c = _onevsonePremoveSpeculativeChess() || state.onevsone.chess;
   if (!c) return;
   let moves = [];
   try { moves = c.moves({ square: squareName, verbose: true }); } catch { moves = []; }
@@ -1712,17 +1762,24 @@ function _legalTargetsForSquare(squareName) {
   // white-to-move from the starting position) was used and Black saw
   // White's legal moves while their own pieces stayed unhighlighted.
   if (state.view === "onevsone" && state.onevsone && state.onevsone.match) {
-    c = state.onevsone.chess;
+    const baseC = state.onevsone.chess;
     const you = state.onevsone.match.you;
-    if (!c || !you) return { ok: false };
-    const piece0 = c.get(squareName);
+    if (!baseC || !you) return { ok: false };
+    // While it's the opponent's turn we evaluate against the
+    // speculative position (real FEN with side forced to ours +
+    // every queued premove applied) so the player still sees legal
+    // targets and can chain premoves chess.com-style.
+    const specC = _onevsonePremoveSpeculativeChess() || baseC;
+    const piece0 = specC.get(squareName);
     if (!piece0 || piece0.color !== you.color) return { ok: false };
-    if (c.turn() !== you.color) return { ok: false };
-    const moves0 = c.moves({ square: squareName, verbose: true });
-    return { ok: true, chess: c, targets: moves0.map((m) => m.to) };
+    if (specC.turn() !== you.color) return { ok: false };
+    const moves0 = specC.moves({ square: squareName, verbose: true });
+    return { ok: true, chess: specC, targets: moves0.map((m) => m.to) };
   }
   if (state.game.active) {
-    c = state.game.chess;
+    // Same idea as the 1v1 branch — use the premove speculative
+    // position so legal targets light up while the engine thinks.
+    c = _premoveSpeculativeChess() || state.game.chess;
     if (c.turn() !== state.game.playerColor) return { ok: false };
   } else if (state.legalMode) {
     c = ensureFreeplayChess();
@@ -2412,19 +2469,50 @@ function stopGame() {
 
 // ---------- Premoves (Play vs Stockfish) ----------
 
+// Force a FEN to have a specific side to move. Used when validating
+// premoves: while it's the engine's turn, we still want chess.js to
+// accept the *player*'s pseudo-legal move on the same position. If we
+// fed chess.js the unmodified FEN it would reject every premove with
+// "wrong colour to move" (and the move handler would play the illegal
+// sound), which is exactly the bug players hit when premoving in Main.
+// EP target is cleared on a flip because the file-4 square in FEN is
+// always the en-passant target for the side to move — keeping the old
+// value after swapping sides would let chess.js "capture" the
+// player's own pawn en-passant, which is nonsensical.
+function _fenWithSide(fen, color) {
+  if (!fen || !color) return fen;
+  const parts = fen.split(" ");
+  if (parts.length < 4) return fen;
+  if (parts[1] === color) return fen;
+  parts[1] = color;
+  parts[3] = "-";
+  return parts.join(" ");
+}
+
 // Returns a chess.js instance reflecting the current real position
-// plus every queued premove. Used both to validate a *new* premove
-// at queue time and to compute legal targets while the engine thinks.
+// plus every queued premove, with side-to-move forced to the player
+// so a brand-new premove can be validated even while the engine is
+// still thinking. After each applied premove we flip the side back to
+// the player's colour so additional premoves can chain off the
+// pseudo-position. Used both to validate a *new* premove at queue
+// time and to compute legal targets while the engine thinks.
 function _premoveSpeculativeChess() {
   if (!state.game.chess) return null;
-  const c = new Chess(state.game.chess.fen());
+  const youColor = state.game.playerColor;
+  let c;
+  try { c = new Chess(_fenWithSide(state.game.chess.fen(), youColor)); }
+  catch (_) { return null; }
+  if (!c) return null;
   for (const pm of state.game.premoves) {
+    let mv;
     try {
-      const m = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
-      if (!m) return null;
+      mv = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
     } catch (_) {
       return null;
     }
+    if (!mv) return null;
+    try { c = new Chess(_fenWithSide(c.fen(), youColor)); }
+    catch (_) { return null; }
   }
   return c;
 }
@@ -10309,6 +10397,10 @@ function leaveOneVsOneView() {
     clearInterval(state.onevsone.clockTimer);
     state.onevsone.clockTimer = null;
   }
+  // Premoves are tied to the live board state — drop the queue
+  // when the player leaves the view so it doesn't quietly replay
+  // on the next match.
+  try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
   if (typeof _puzzleViewRestoreFlipped === "function") {
     try { _puzzleViewRestoreFlipped("onevsone"); } catch (_) { /* ignore */ }
   }
@@ -10560,6 +10652,9 @@ function _onevsoneShowChallengeToast(ch) {
         // chess.js state and the board orientation / legal-move
         // overlay desyncs from the new game.
         state.onevsone.chess = null;
+        // Likewise wipe any leftover premoves from a previous match
+        // so they don't replay on the new board.
+        try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
         setView("onevsone");
         try { _activatePanelSubtab("onevsone", "play"); } catch (_) { /* ignore */ }
         _renderOnevsoneMatchUi();
@@ -10699,6 +10794,9 @@ function _onevsoneHandleWsEvent(msg) {
         break;
       }
       state.onevsone.match = msg.match;
+      // Authoritative snapshot supersedes whatever premoves we had
+      // speculatively layered on the previous local state.
+      try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
       _renderOnevsoneMatchUi();
       break;
     }
@@ -10762,6 +10860,13 @@ function _onevsoneHandleWsEvent(msg) {
           mode: "onevsone",
         });
       } catch (_) { /* ignore */ }
+      // Opponent's move just landed and our local chess.js mirror is
+      // synced — try to apply the head of the premove queue.
+      if (!m.finished
+          && state.onevsone.premoves && state.onevsone.premoves.length
+          && m.you && m.turn === m.you.color) {
+        try { _onevsoneDrainPremoves(); } catch (_) { /* ignore */ }
+      }
       break;
     }
     case "finished":
@@ -10775,6 +10880,10 @@ function _onevsoneHandleWsEvent(msg) {
         || "";
       m.winner = msg.winner || m.winner || "";
       m.draw_offer_by = "";
+      // Wipe pending premoves the moment the match ends so a
+      // queued-but-undrained premove doesn't visually persist on
+      // the finished board.
+      try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
       _renderOnevsoneMatchUi();
       break;
     case "draw_offer":
@@ -10801,6 +10910,10 @@ function _onevsoneHandleWsEvent(msg) {
           setStatus("Матч завершён.", "info");
         }
       } catch (_) { /* ignore */ }
+      // Drop the speculative premove queue when the server
+      // disagrees with us — replaying it on top of a re-synced
+      // position is unsafe and the human player can re-queue easily.
+      try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
       try {
         if (state.user.client_id) {
           api(`/api/onevsone/active?client_id=${encodeURIComponent(state.user.client_id)}`)
@@ -10839,6 +10952,126 @@ function _onevsoneSendDrawDecline() {
   return _onevsoneEnqueueWs({ type: "draw_decline" });
 }
 
+// ---------- Premoves (1 vs 1) ----------
+
+// Returns a chess.js instance reflecting the current real 1v1
+// position plus every queued premove, with side-to-move forced to
+// the player so chess.js will validate a new premove even while it's
+// the opponent's turn. After each applied premove the side is
+// flipped back to the player so premoves can chain.
+function _onevsonePremoveSpeculativeChess() {
+  const m = state.onevsone.match;
+  if (!m || !m.you || !state.onevsone.chess) return null;
+  const youColor = m.you.color;
+  let c;
+  try { c = new Chess(_fenWithSide(state.onevsone.chess.fen(), youColor)); }
+  catch (_) { return null; }
+  if (!c) return null;
+  const queue = state.onevsone.premoves || [];
+  for (const pm of queue) {
+    let mv;
+    try {
+      mv = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
+    } catch (_) {
+      return null;
+    }
+    if (!mv) return null;
+    try { c = new Chess(_fenWithSide(c.fen(), youColor)); }
+    catch (_) { return null; }
+  }
+  return c;
+}
+
+// Queue a player move as a 1v1 premove. Returns true if the move was
+// legal in the speculative position and got queued, false otherwise.
+function _onevsoneQueuePremove(from, to) {
+  const c = _onevsonePremoveSpeculativeChess();
+  if (!c) return false;
+  const m = state.onevsone.match;
+  if (!m || !m.you) return false;
+  if (c.turn() !== m.you.color) return false;
+  let mv;
+  try { mv = c.move({ from, to, promotion: "q" }); }
+  catch (_) { mv = null; }
+  if (!mv) return false;
+  state.onevsone.premoves = state.onevsone.premoves || [];
+  state.onevsone.premoves.push({ from, to, promotion: mv.promotion || "q" });
+  state.onevsone.premoveChess = c;
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  renderBoard();
+  return true;
+}
+
+// Clear the entire 1v1 premove queue and refresh the board.
+function _onevsoneClearPremoves(opts) {
+  if (!state.onevsone) return;
+  const had = state.onevsone.premoves && state.onevsone.premoves.length;
+  state.onevsone.premoves = [];
+  state.onevsone.premoveChess = null;
+  if (had && opts && opts.illegal) {
+    try { _playWav("illegal"); } catch (_) { /* ignore */ }
+    setStatus("Премув нелегален. Очередь сброшена.", "error");
+  }
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  if (had) renderBoard();
+}
+
+// After the opponent replies (WS "move" event) and our local
+// chess.js mirror is synced to the new real position, attempt to
+// apply the next queued premove. Plays the same illegal-move
+// feedback as Play-vs-Stockfish on the first illegal premove.
+function _onevsoneDrainPremoves() {
+  const m = state.onevsone.match;
+  if (!m || m.finished) return;
+  const you = m.you;
+  if (!you) return;
+  const queue = state.onevsone.premoves || [];
+  if (!queue.length) {
+    state.onevsone.premoveChess = null;
+    return;
+  }
+  if (m.turn !== you.color) return;
+  const c = state.onevsone.chess;
+  if (!c) return;
+  if (c.turn() !== you.color) return;
+  const pm = queue.shift();
+  let mv;
+  try { mv = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" }); }
+  catch (_) { mv = null; }
+  if (!mv) {
+    _onevsoneClearPremoves({ illegal: true });
+    return;
+  }
+  // Sync local match snapshot + replay the same optimistic-apply
+  // logic tryOneVsOneMove() uses so the UI stays consistent.
+  m.fen = c.fen();
+  m.turn = m.turn === "w" ? "b" : "w";
+  m.history = m.history || [];
+  m.history.push({
+    uci: mv.from + mv.to + (mv.promotion || ""),
+    san: mv.san,
+    from: mv.from,
+    to: mv.to,
+    by: you.color,
+    capture: mv.flags && mv.flags.includes("c"),
+    fen_after: m.fen,
+  });
+  try { loadFen(m.fen); } catch (_) { /* ignore */ }
+  state.lastMove = { from: mv.from, to: mv.to };
+  renderBoard();
+  try { _playWav(mv.flags && mv.flags.includes("c") ? "capture" : "move-self"); } catch (_) { /* ignore */ }
+  try {
+    _partyReportPosition(m.fen, {
+      lastMove: { from: mv.from, to: mv.to },
+      mode: "onevsone",
+    });
+  } catch (_) { /* ignore */ }
+  _onevsoneSendMove(mv.from + mv.to + (mv.promotion || ""));
+  _renderOnevsoneMatchUi();
+}
+
 // Public hook used by the board click/drag handlers when state.view
 // is "onevsone" and a live match is loaded. Returns true if the move
 // was accepted (queued for relay), false otherwise.
@@ -10847,8 +11080,13 @@ function tryOneVsOneMove(from, to) {
   if (!m || m.finished) return false;
   const you = m.you;
   if (!you) return false;
+  // Opponent's turn → queue as a premove (chess.com-style). The
+  // queue is drained after the opponent's "move" WS event arrives
+  // and our local chess.js mirror has been synced.
   if (m.turn !== you.color) {
-    setStatus("Сейчас ход соперника.", "info");
+    if (!_onevsoneQueuePremove(from, to)) {
+      _onevsoneClearPremoves({ illegal: true });
+    }
     return false;
   }
   const c = state.onevsone.chess;
@@ -11059,6 +11297,7 @@ function _renderOnevsoneMatchUi() {
       state.onevsone.ws = null;
       state.onevsone.match = null;
       state.onevsone.chess = null;
+      try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
       _renderOnevsoneLobby();
       _refreshOnevsoneOnline(true);
     };
@@ -11905,6 +12144,7 @@ function handleNotificationEvent(msg) {
         // chess.js cached from a previous match would refuse the
         // first move.
         state.onevsone.chess = null;
+        try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
         setView("onevsone");
         // Force the "Играть" subtab so the player lands on the live
         // board, not the leaderboard tab they may have last viewed.
