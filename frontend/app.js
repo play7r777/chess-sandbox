@@ -1399,10 +1399,15 @@ document.addEventListener("touchend", (ev) => {
   if (!dropCell || !dropCell.dataset.square) return;
   const targetSquare = dropCell.dataset.square;
   if (targetSquare === fromSquare) return;
-  // Mirror handleDrop's branching: game / legal-mode / sandbox.
+  // Mirror handleDrop's branching: game / 1v1 / legal-mode / sandbox.
   if (state.game.active) {
     if (!fromSquare) return;
     tryMakePlayerMove(fromSquare, targetSquare);
+    return;
+  }
+  if (state.view === "onevsone" && state.onevsone && state.onevsone.match) {
+    if (!fromSquare) return;
+    tryOneVsOneMove(fromSquare, targetSquare);
     return;
   }
   if (state.legalMode) {
@@ -1702,6 +1707,20 @@ function _legalTargetsForSquare(squareName) {
   // landings for the piece on `squareName`, or { ok: false } if there
   // are no legal targets to highlight (wrong colour, sandbox, etc.).
   let c = null;
+  // 1v1 first \u2014 the player is also in `legalMode` while a 1v1 match
+  // is live, so without this branch the freeplay chess (always
+  // white-to-move from the starting position) was used and Black saw
+  // White's legal moves while their own pieces stayed unhighlighted.
+  if (state.view === "onevsone" && state.onevsone && state.onevsone.match) {
+    c = state.onevsone.chess;
+    const you = state.onevsone.match.you;
+    if (!c || !you) return { ok: false };
+    const piece0 = c.get(squareName);
+    if (!piece0 || piece0.color !== you.color) return { ok: false };
+    if (c.turn() !== you.color) return { ok: false };
+    const moves0 = c.moves({ square: squareName, verbose: true });
+    return { ok: true, chess: c, targets: moves0.map((m) => m.to) };
+  }
   if (state.game.active) {
     c = state.game.chess;
     if (c.turn() !== state.game.playerColor) return { ok: false };
@@ -2361,6 +2380,12 @@ document.getElementById("btn-play-start").addEventListener("click", async () => 
     movetimeMs: parseInt(document.getElementById("movetime").value, 10) || 1000,
     history: [],
     stopRequested: false,
+    // Premove queue + speculative chess.js position. Must be initialised
+    // here, otherwise the very first call to engineMove() crashes on
+    // `myGame.premoves.length` with "Cannot read properties of
+    // undefined (reading 'length')" and the game halts after one move.
+    premoves: [],
+    premoveChess: null,
   };
   document.getElementById("btn-play-stop").disabled = false;
   document.getElementById("btn-play-start").disabled = true;
@@ -3063,6 +3088,16 @@ function normalizeReviewSource(raw) {
       const kind = m[1].toLowerCase();
       const id = m[2];
       return `https://www.chess.com/game/${kind}/${id}`;
+    }
+    // Bare /game/<id> (and /analysis/game/<id>, /live/game/<id>) without
+    // a kind segment — chess.com's importer only handles /game/<kind>/<id>,
+    // so we silently default to `live` (the most common kind for the
+    // chess.com share URL) and let the user see an error if it turns out
+    // to be a daily. This matches the spec: paste any chess.com game URL
+    // and it should auto-resolve.
+    const bare = url.pathname.match(/\/(?:analysis\/)?game\/(\d+)/i);
+    if (bare) {
+      return `https://www.chess.com/game/live/${bare[1]}`;
     }
     return src;
   }
@@ -9444,7 +9479,12 @@ async function _refreshRushLeaderboard() {
   } catch (_) {
     state.rush.leaderboard[m] = [];
   }
-  renderRushLeaderboard();
+  // Re-render only the rows host so the mode-tab DOM keeps its
+  // click handlers (renderRushLeaderboard is the entry point that
+  // builds those tabs once per panel mount).
+  if (typeof _renderRushModeLeaderboardBody === "function") {
+    _renderRushModeLeaderboardBody();
+  }
 }
 
 // SVG glyphs for the chess.com-style sidebar headers. Inline so they
@@ -9749,14 +9789,115 @@ function renderRushHistory() {
 function renderRushLeaderboard() {
   const host = document.getElementById("rush-tabpanel-leaderboard-body");
   if (!host) return;
-  // Make sure the global mount point exists inside the rush sidebar
-  // tab so renderGlobalLeaderboard() can fill it. We avoid stomping
-  // it on every call so the click handlers attached by
-  // renderGlobalLeaderboard() survive.
-  if (!host.querySelector("#global-leaderboard-rush")) {
-    host.innerHTML = `<div id="global-leaderboard-rush"></div>`;
+  const m = state.rush.leaderboardMode;
+  // Three category tabs (3 мин / 5 мин / Survival) styled like the
+  // sibling Играть / Лидерборд tabs at the top of the Rush sidebar so
+  // the visual rhythm of the picker matches across the panel. We
+  // re-render the body each time but only update the highlighted
+  // class on the buttons + the rows list, which keeps the per-button
+  // click handler attached and avoids flicker.
+  const modes = [
+    { id: "180",      label: "3 мин" },
+    { id: "300",      label: "5 мин" },
+    { id: "survival", label: "Survival" },
+  ];
+  const tabs = modes.map((mode) => {
+    const isActive = mode.id === m;
+    return `<button type="button"
+      class="cc-tab-item-component${isActive ? " cc-tab-item-active" : ""}"
+      aria-selected="${isActive}"
+      data-rush-lb-mode="${mode.id}">
+      <span class="cc-tab-item-label cc-text-medium-bold">${escapeHtml(mode.label)}</span>
+    </button>`;
+  }).join("");
+  if (!host.querySelector("[data-rush-lb-mode]")) {
+    host.innerHTML = `
+      <div role="tablist" class="cc-tab-group-component cc-tab-group-secondary rush-lb-mode-tabs">
+        ${tabs}
+      </div>
+      <div id="rush-mode-leaderboard"></div>
+    `;
+    host.querySelectorAll("[data-rush-lb-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.rush.leaderboardMode = btn.dataset.rushLbMode;
+        host.querySelectorAll("[data-rush-lb-mode]").forEach((x) => {
+          const isActive = x.dataset.rushLbMode === state.rush.leaderboardMode;
+          x.classList.toggle("cc-tab-item-active", isActive);
+          x.setAttribute("aria-selected", String(isActive));
+        });
+        _refreshRushLeaderboard();
+      });
+    });
+  } else {
+    host.querySelectorAll("[data-rush-lb-mode]").forEach((x) => {
+      const isActive = x.dataset.rushLbMode === m;
+      x.classList.toggle("cc-tab-item-active", isActive);
+      x.setAttribute("aria-selected", String(isActive));
+    });
   }
-  _refreshGlobalLeaderboard(false);
+  _renderRushModeLeaderboardBody();
+  // Kick a refresh so the rows reflect the active mode. Cached state
+  // (state.rush.leaderboard[m]) is rendered immediately above so users
+  // never see an empty placeholder while the request is in flight.
+  _refreshRushLeaderboard();
+}
+
+// Render the cached rows for the currently selected leaderboard mode
+// into #rush-mode-leaderboard. Used by both the initial render and the
+// post-fetch refresh so the rows can come from cache or from a fresh
+// /api/puzzle_rush/leaderboard call without duplicating the markup.
+function _renderRushModeLeaderboardBody() {
+  const host = document.getElementById("rush-mode-leaderboard");
+  if (!host) return;
+  const m = state.rush.leaderboardMode;
+  const rows = state.rush.leaderboard[m] || [];
+  const label = RUSH_MODE_LABEL[m] || m;
+  if (!rows.length) {
+    host.innerHTML = `
+      <div class="global-leaderboard">
+        <div class="gl-title">Leaderboard · Rush · ${escapeHtml(label)}</div>
+        <div class="cc-rush-lb-tab-empty">Пока никого нет.</div>
+      </div>
+    `;
+    return;
+  }
+  const list = rows.slice(0, 30).map((u, i) => {
+    const av = avatarHtml(u.avatar);
+    const nick = escapeHtml(u.nickname || "Гость");
+    const cid = escapeHtml(u.client_id || "");
+    const isSelf = u.client_id === state.user.client_id;
+    const score = Number(u.score || 0);
+    const online = !!u.online;
+    const dotCls = online ? "gl-dot is-online" : "gl-dot is-offline";
+    const statusLabel = online ? "в сети" : "не в сети";
+    return `<div class="gl-row" data-cid="${cid}" data-nick="${nick}">
+      <span class="gl-rank">#${i + 1}</span>
+      <span class="gl-av">${av}</span>
+      <span class="gl-nick">
+        <span class="gl-nick-line">
+          <span class="${dotCls}" title="${statusLabel}"></span>
+          ${nick}${isSelf ? ' <span class="muted">(вы)</span>' : ""}
+        </span>
+        <span class="gl-metric">Лучший рекорд · ${escapeHtml(label)}</span>
+      </span>
+      <span class="gl-score">${score}</span>
+    </div>`;
+  }).join("");
+  host.innerHTML = `
+    <div class="global-leaderboard">
+      <div class="gl-title">Leaderboard · Rush · ${escapeHtml(label)}</div>
+      <div class="gl-list">${list}</div>
+    </div>
+  `;
+  host.querySelectorAll(".gl-row[data-cid]").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      const cid = row.dataset.cid;
+      const nick = row.dataset.nick;
+      if (cid && cid !== state.user.client_id) {
+        openPlayerChallengeProfile({ client_id: cid, nickname: nick }, e.currentTarget);
+      }
+    });
+  });
 }
 
 // ============================================================
@@ -10697,8 +10838,16 @@ function _renderOnevsoneMatchUi() {
   if (!host) return;
   const m = state.onevsone.match;
   if (!m) { _renderOnevsoneLobby(); return; }
-  if (!state.onevsone.chess && typeof window.Chess === "function") {
-    try { state.onevsone.chess = new window.Chess(m.fen); } catch (_) { state.onevsone.chess = null; }
+  // Use the module-scope Chess import — `window.Chess` is undefined
+  // because chess.js is loaded as an ES module, so the previous
+  // `typeof window.Chess === "function"` guard never created the
+  // local instance and click/drag handlers silently bailed out at
+  // `if (!c) return;`. Without a chess.js instance both players see
+  // an unresponsive board (no selection, no legal-move highlights,
+  // no moves accepted) — the symptom the player describes as
+  // "режим 1 vs 1 фул сырой, никто ходить не может".
+  if (!state.onevsone.chess && typeof Chess === "function") {
+    try { state.onevsone.chess = new Chess(m.fen); } catch (_) { state.onevsone.chess = null; }
   } else if (state.onevsone.chess) {
     try { state.onevsone.chess.load(m.fen); } catch (_) { /* ignore */ }
   }
@@ -12709,5 +12858,15 @@ setBoardMode(true);
 refreshEngineStatus();
 _bootUser();
 
-// Expose for debugging.
-window.__chess = { state, buildFen, loadFen };
+// Expose for debugging. Includes the dispatchers so end-to-end test
+// harnesses (and humans poking around in DevTools) can simulate clicks
+// and drops without synthesising mouse events.
+window.__chess = {
+  state,
+  buildFen,
+  loadFen,
+  handleSquareClick,
+  tryOneVsOneMove,
+  ensureOnevsoneWs: _onevsoneEnsureWs,
+  renderOnevsoneMatchUi: _renderOnevsoneMatchUi,
+};

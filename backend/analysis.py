@@ -247,11 +247,20 @@ def _fetch_chesscom(url: str) -> ImportedGame:
     # query suffix. The frontend also normalises before submit, this is the
     # backend belt-and-braces.
     m = re.search(r"chess\.com/(?:analysis/)?game/(live|daily)/(\d+)", url)
-    if not m:
-        raise ValueError(
-            "chess.com URL must look like https://www.chess.com/game/live/<id>"
-        )
-    kind, game_id = m.group(1), m.group(2)
+    if m:
+        kind, game_id = m.group(1), m.group(2)
+    else:
+        # Bare /game/<id> form — auto-default to `live` (the share URL on
+        # chess.com is /game/live/<id>; users who copy the URL without
+        # `/live/` get the same thing). Frontend already normalises but
+        # we mirror it here so direct API callers and pasted bare URLs
+        # also work.
+        bare = re.search(r"chess\.com/(?:analysis/)?game/(\d+)", url)
+        if not bare:
+            raise ValueError(
+                "chess.com URL must look like https://www.chess.com/game/live/<id>"
+            )
+        kind, game_id = "live", bare.group(1)
     cb = requests.get(
         f"https://www.chess.com/callback/{kind}/game/{game_id}",
         headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
