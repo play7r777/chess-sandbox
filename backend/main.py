@@ -12,7 +12,7 @@ from typing import Annotated, Any
 
 import chess
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -1714,23 +1714,44 @@ app.mount("/api/avatars", StaticFiles(directory=_AVATAR_DIR), name="avatars")
 
 frontend_dir = settings.frontend_dir
 
+
+def _index_html_with_cache_busters(frontend_root: Path) -> str:
+    """Return ``index.html`` with ``?v=<mtime>`` appended to ``app.js`` and
+    ``style.css`` references so that newly deployed JS/CSS isn't served from
+    the browser HTTP cache after a code update. Without this, users who
+    leave the tab open across deploys keep running the previous bundle and
+    miss bug fixes (e.g. the 1 vs 1 UCI suffix fix that resulted in
+    "piece teleports back" reports until the user did a hard reload)."""
+    html = (frontend_root / "index.html").read_text(encoding="utf-8")
+    for asset in ("app.js", "style.css"):
+        path = frontend_root / asset
+        if not path.exists():
+            continue
+        try:
+            version = str(int(path.stat().st_mtime))
+        except OSError:
+            continue
+        html = html.replace(f'/static/{asset}"', f'/static/{asset}?v={version}"')
+    return html
+
+
 if frontend_dir.exists():
     # Mount all static assets, but keep `/` returning index.html so navigation works.
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
     @app.get("/")
-    async def root() -> FileResponse:
-        return FileResponse(frontend_dir / "index.html")
+    async def root() -> HTMLResponse:
+        return HTMLResponse(_index_html_with_cache_busters(frontend_dir))
 
     _frontend_root = frontend_dir.resolve()
 
-    @app.get("/{path:path}")
-    async def serve_frontend(path: str) -> FileResponse:
+    @app.get("/{path:path}", response_model=None)
+    async def serve_frontend(path: str) -> FileResponse | HTMLResponse:
         candidate = (frontend_dir / path).resolve()
         if candidate.is_file() and candidate.is_relative_to(_frontend_root):
             return FileResponse(candidate)
         # SPA fallback: serve index.html for any non-asset path.
-        return FileResponse(frontend_dir / "index.html")
+        return HTMLResponse(_index_html_with_cache_busters(frontend_dir))
 
 else:
 

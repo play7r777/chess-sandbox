@@ -396,7 +396,29 @@ async def apply_move(
         except ValueError:
             return {"error": "bad_uci"}
         if move not in m.chess.legal_moves:
-            return {"error": "illegal"}
+            # Tolerate stale clients that unconditionally append a "q"
+            # promotion suffix to every move (a pre-fix bug in
+            # ``tryOneVsOneMove``). For non-promotion pawn pushes
+            # (e.g. ``e2e4q``) ``chess.Move.from_uci`` happily returns
+            # a "promote to queen" move that fails ``is_legal`` on
+            # rank 4 — which used to surface to the user as a piece
+            # that "teleports back" because the WS error handler
+            # refetches the authoritative pre-move snapshot. Strip
+            # the trailing promotion and retry once before giving up,
+            # so users on a cached pre-fix bundle aren't permanently
+            # stuck.
+            if move.promotion is not None and len(uci) >= 5:
+                try:
+                    fallback = chess.Move.from_uci(uci[:4])
+                except ValueError:
+                    fallback = None
+                if fallback is not None and fallback in m.chess.legal_moves:
+                    move = fallback
+                    uci = uci[:4]
+                else:
+                    return {"error": "illegal"}
+            else:
+                return {"error": "illegal"}
         san = m.chess.san(move)
         is_capture = m.chess.is_capture(move)
         m.chess.push(move)

@@ -10667,15 +10667,41 @@ function _onevsoneHandleWsEvent(msg) {
   if (!m) return;
   switch (msg.type) {
     case "hello":
-    case "state":
+    case "state": {
       // "state" is a full match snapshot the server sends on demand /
-      // after a reconnect. Treated identically to "hello" — swap in
-      // the fresh public-view payload and re-render.
-      if (msg.match) {
-        state.onevsone.match = msg.match;
-        _renderOnevsoneMatchUi();
+      // after a reconnect. The server emits one immediately after
+      // ``ws.accept()`` — which races with any optimistic local move
+      // the user already made while the socket was still CONNECTING
+      // (the move is queued and sent on ``onopen``). If we blindly
+      // overwrite ``state.onevsone.match`` here, the optimistic move
+      // gets erased and the piece "teleports back" until the server's
+      // own ``move`` broadcast arrives a moment later (and the clock
+      // briefly snaps back to the pre-move 5:00). Skip the overwrite
+      // when our local history is already ahead of the snapshot — the
+      // pending ``move`` event will arrive next and reconcile both
+      // peers.
+      if (!msg.match) break;
+      const localLen = (m.history && m.history.length) || 0;
+      const serverLen = (msg.match.history && msg.match.history.length) || 0;
+      const sameMatch = m.id && msg.match.id && m.id === msg.match.id;
+      if (sameMatch && serverLen < localLen) {
+        // Still pull in the authoritative clocks/turn so the side bar
+        // doesn't show a stale 5:00 — but keep the local FEN/history
+        // we computed from the optimistic move.
+        if (msg.match.white) m.white = msg.match.white;
+        if (msg.match.black) m.black = msg.match.black;
+        if (msg.match.you && m.you && m.you.color === msg.match.you.color) {
+          m.you = { ...m.you, ...msg.match.you, clock_remaining: m.you.clock_remaining };
+        }
+        if (msg.match.opponent && m.opponent && m.opponent.color === msg.match.opponent.color) {
+          m.opponent = { ...m.opponent, ...msg.match.opponent, clock_remaining: m.opponent.clock_remaining };
+        }
+        break;
       }
+      state.onevsone.match = msg.match;
+      _renderOnevsoneMatchUi();
       break;
+    }
     case "move": {
       m.fen = msg.fen;
       m.turn = msg.turn;
@@ -10764,6 +10790,17 @@ function _onevsoneHandleWsEvent(msg) {
       // out-of-turn or illegal move from a stale local mirror). Pull
       // the authoritative state back from the active-match endpoint
       // so the boards re-sync instead of drifting silently.
+      try {
+        const code = String(msg.code || "");
+        if (code === "illegal" || code === "bad_uci") {
+          setStatus("Сервер отклонил ход. Состояние синхронизировано.", "error");
+          try { _playWav("illegal"); } catch (_) { /* ignore */ }
+        } else if (code === "not_your_turn") {
+          setStatus("Сейчас ход соперника.", "info");
+        } else if (code === "match_gone") {
+          setStatus("Матч завершён.", "info");
+        }
+      } catch (_) { /* ignore */ }
       try {
         if (state.user.client_id) {
           api(`/api/onevsone/active?client_id=${encodeURIComponent(state.user.client_id)}`)
