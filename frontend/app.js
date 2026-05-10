@@ -10594,7 +10594,16 @@ function _onevsoneDismissChallengeToast(challengeId) {
 function _onevsoneEnsureWs() {
   const m = state.onevsone.match;
   if (!m || !m.id || !state.user.client_id) return;
-  if (state.onevsone.ws && state.onevsone.ws.readyState === WebSocket.OPEN) return;
+  // Skip both OPEN and CONNECTING — the previous check only
+  // matched OPEN, so a second caller (e.g. the SSE
+  // "onevsone_match" handler firing right after the REST accept)
+  // would create a second concurrent WebSocket while the first
+  // was still negotiating. attach_socket replaces the entry
+  // server-side, but both client sockets receive their own
+  // "state" snapshot and double-render the match panel.
+  if (state.onevsone.ws
+      && (state.onevsone.ws.readyState === WebSocket.OPEN
+        || state.onevsone.ws.readyState === WebSocket.CONNECTING)) return;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL(`${proto}//${location.host}/api/onevsone/ws`);
   url.searchParams.set("match_id", m.id);
@@ -10671,9 +10680,21 @@ function _onevsoneHandleWsEvent(msg) {
       m.fen = msg.fen;
       m.turn = msg.turn;
       m.history = m.history || [];
-      m.history.push({
-        uci: msg.uci, san: msg.san, from: msg.from, to: msg.to, by: msg.by, capture: !!msg.capture, fen_after: msg.fen,
-      });
+      // Avoid duplicating the entry that tryOneVsOneMove() already
+      // pushed locally for the side that just moved (the server
+      // broadcasts the move back to both peers, including the one
+      // who sent it).
+      const last = m.history[m.history.length - 1];
+      const dup = last
+        && last.from === msg.from
+        && last.to === msg.to
+        && last.by === msg.by
+        && last.fen_after === msg.fen;
+      if (!dup) {
+        m.history.push({
+          uci: msg.uci, san: msg.san, from: msg.from, to: msg.to, by: msg.by, capture: !!msg.capture, fen_after: msg.fen,
+        });
+      }
       if (typeof msg.white_clock === "number") {
         m.white = m.white || {};
         m.white.clock_remaining = msg.white_clock;
@@ -10828,7 +10849,15 @@ function tryOneVsOneMove(from, to) {
       mode: "onevsone",
     });
   } catch (_) { /* ignore */ }
-  _onevsoneSendMove(move.from + move.to + (move.promotion || "q"));
+  // UCI suffix is ONLY for actual promotions — always appending
+  // "q" turns plain pawn-pushes like e2e4 into the literal UCI
+  // "e2e4q" which python-chess parses as "push to e4, promote to
+  // queen" — obviously illegal on rank 4 and the server replies
+  // {type:"error",code:"illegal"}, after which the error handler
+  // re-fetches the authoritative match (still pre-move) and the
+  // local optimistic move "teleports back". Send promotion suffix
+  // only when chess.js actually flagged the move as a promotion.
+  _onevsoneSendMove(move.from + move.to + (move.promotion || ""));
   _renderOnevsoneMatchUi();
   return true;
 }
