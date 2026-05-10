@@ -1190,8 +1190,45 @@ if (boardEl) {
   });
 }
 
+// When a premove queue is active (Main or 1 vs 1), build a 64-cell
+// display board from the speculative position so the premoved
+// pieces visually appear on their destination squares (chess.com
+// "ghost" rendering). Returns null when no premove queue is active
+// or the speculative chess can't be built — in either case the
+// caller renders state.board as usual. If the queue contains a
+// move that can no longer be made pseudo-legally (own piece on
+// destination after the opponent moved, etc.), the queue is dropped
+// here so stale orange highlights don't linger past the failure.
+function _getDisplayBoardForRender() {
+  if (state.game && state.game.active
+      && state.game.premoves && state.game.premoves.length) {
+    const spec = _premoveSpeculativeChess();
+    if (spec) {
+      const arr = _boardFromFen(spec.fen());
+      if (arr) return arr;
+    }
+    state.game.premoves = [];
+    state.game.premoveChess = null;
+    return null;
+  }
+  if (state.view === "onevsone" && state.onevsone && state.onevsone.match
+      && !state.onevsone.match.finished
+      && state.onevsone.premoves && state.onevsone.premoves.length) {
+    const spec = _onevsonePremoveSpeculativeChess();
+    if (spec) {
+      const arr = _boardFromFen(spec.fen());
+      if (arr) return arr;
+    }
+    state.onevsone.premoves = [];
+    state.onevsone.premoveChess = null;
+    return null;
+  }
+  return null;
+}
+
 function renderBoard() {
   boardEl.innerHTML = "";
+  const displayBoard = _getDisplayBoardForRender() || state.board;
   for (let visualRow = 0; visualRow < 8; visualRow++) {
     for (let visualCol = 0; visualCol < 8; visualCol++) {
       const r = state.flipped ? 7 - visualRow : visualRow;
@@ -1206,7 +1243,7 @@ function renderBoard() {
       // Coordinates are rendered outside the board in dedicated strips
       // (.board-ranks left, .board-files bottom) — see renderBoardCoords().
 
-      const piece = state.board[idx];
+      const piece = displayBoard[idx];
       if (piece) {
         const pieceEl = document.createElement("span");
         pieceEl.className = "piece " + (piece === piece.toUpperCase() ? "white" : "black");
@@ -1705,12 +1742,18 @@ function handleOneVsOneSquareClick(squareName) {
 }
 
 function _onevsoneSelectSquare(squareName) {
-  const c = _onevsonePremoveSpeculativeChess() || state.onevsone.chess;
+  const baseC = state.onevsone.chess;
+  const c = _onevsonePremoveSpeculativeChess() || baseC;
   if (!c) return;
   let moves = [];
   try { moves = c.moves({ square: squareName, verbose: true }); } catch { moves = []; }
+  const targets = moves.map((mv) => mv.to);
+  if (c !== baseC) {
+    const piece = c.get(squareName);
+    _addPawnPremoveCaptureSquares(c, squareName, piece, targets);
+  }
   state.selectedSquare = squareName;
-  state.legalTargets = moves.map((mv) => mv.to);
+  state.legalTargets = targets;
   renderBoard();
 }
 
@@ -1774,7 +1817,9 @@ function _legalTargetsForSquare(squareName) {
     if (!piece0 || piece0.color !== you.color) return { ok: false };
     if (specC.turn() !== you.color) return { ok: false };
     const moves0 = specC.moves({ square: squareName, verbose: true });
-    return { ok: true, chess: specC, targets: moves0.map((m) => m.to) };
+    const targets0 = moves0.map((m) => m.to);
+    _addPawnPremoveCaptureSquares(specC, squareName, piece0, targets0);
+    return { ok: true, chess: specC, targets: targets0 };
   }
   if (state.game.active) {
     // Same idea as the 1v1 branch — use the premove speculative
@@ -1802,7 +1847,40 @@ function _legalTargetsForSquare(squareName) {
       if (!targets.includes(rookSq)) targets.push(rookSq);
     }
   }
+  // Premove pseudo-legal extras: pawns can target their two diagonal
+  // squares even when empty (chess.com lets you premove exd5 hoping
+  // the opponent advances a pawn to d5). Only adds extras when we
+  // are actually queuing a premove (i.e., a premove queue is live).
+  if (state.game.active && state.game.premoves && state.game.premoves.length) {
+    _addPawnPremoveCaptureSquares(c, squareName, piece, targets);
+  } else if (state.game.active && c.turn() === state.game.playerColor
+      && c !== state.game.chess) {
+    // Even the first premove of a turn should show diagonal pawn
+    // captures while the engine thinks.
+    _addPawnPremoveCaptureSquares(c, squareName, piece, targets);
+  }
   return { ok: true, chess: c, targets };
+}
+
+// Append pawn diagonal-capture squares (both sides, even if empty)
+// to `targets` so premove highlighting matches chess.com behaviour.
+// Mutates the passed-in array in place. Safe to call on any piece —
+// non-pawns are a no-op.
+function _addPawnPremoveCaptureSquares(c, fromSquare, piece, targets) {
+  if (!piece || piece.type !== "p") return;
+  const fromFile = fromSquare.charCodeAt(0) - 97;
+  const fromRank = parseInt(fromSquare[1], 10) - 1;
+  if (fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7) return;
+  const dir = piece.color === "w" ? 1 : -1;
+  for (const df of [-1, 1]) {
+    const tf = fromFile + df;
+    const tr = fromRank + dir;
+    if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
+    const sq = String.fromCharCode(97 + tf) + String(tr + 1);
+    const tgt = c.get(sq);
+    if (tgt && tgt.color === piece.color) continue;
+    if (!targets.includes(sq)) targets.push(sq);
+  }
 }
 
 function paintDragLegalTargets(squareName) {
@@ -2489,6 +2567,129 @@ function _fenWithSide(fen, color) {
   return parts.join(" ");
 }
 
+// Convert an arbitrary FEN's placement field into our 64-cell array
+// (same layout state.board uses) without mutating any global state.
+// Returns null on malformed input. Used to render the speculative
+// position while premoves are queued.
+function _boardFromFen(fen) {
+  const placement = (fen || "").split(/\s+/)[0] || "";
+  const ranks = placement.split("/");
+  if (ranks.length !== 8) return null;
+  const out = new Array(64).fill(null);
+  for (let r = 0; r < 8; r++) {
+    let f = 0;
+    for (const ch of ranks[r]) {
+      if (/[1-8]/.test(ch)) {
+        f += parseInt(ch, 10);
+      } else if ("KQRBNPkqrbnp".includes(ch)) {
+        out[r * 8 + f] = ch;
+        f++;
+      } else {
+        return null;
+      }
+      if (f > 8) return null;
+    }
+    if (f !== 8) return null;
+  }
+  return out;
+}
+
+// Pseudo-legal premove geometry — chess.com lets you premove moves
+// that aren't *currently* legal but could become legal after the
+// opponent's reply (e.g. pawn captures into empty diagonals,
+// sliders that look blocked right now). Returns true if the
+// (from, to) pair matches the piece's move shape, regardless of
+// blocking pieces along the path or occupancy at the destination
+// (own-piece-on-destination is still rejected). chess.js stays
+// the source of truth for *legal* moves at drain time.
+function _isPseudoLegalPremovePattern(c, piece, from, to) {
+  if (!piece || from === to) return false;
+  const fromFile = from.charCodeAt(0) - 97;
+  const fromRank = parseInt(from[1], 10) - 1;
+  const toFile = to.charCodeAt(0) - 97;
+  const toRank = parseInt(to[1], 10) - 1;
+  if (toFile < 0 || toFile > 7 || toRank < 0 || toRank > 7) return false;
+  if (fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7) return false;
+  const target = c.get(to);
+  if (target && target.color === piece.color) return false;
+  const df = toFile - fromFile;
+  const dr = toRank - fromRank;
+  switch (piece.type) {
+    case "p": {
+      const dir = piece.color === "w" ? 1 : -1;
+      const startRank = piece.color === "w" ? 1 : 6;
+      if (df === 0 && dr === dir && !target) return true;
+      if (df === 0 && dr === 2 * dir && fromRank === startRank && !target) {
+        const midSq = String.fromCharCode(97 + fromFile) + String(fromRank + dir + 1);
+        return !c.get(midSq);
+      }
+      // Diagonal capture is pseudo-legal even on an empty square so
+      // the player can premove e.g. exd5 expecting the opponent's
+      // pawn to advance.
+      if (Math.abs(df) === 1 && dr === dir) return true;
+      return false;
+    }
+    case "n":
+      return (Math.abs(df) === 1 && Math.abs(dr) === 2)
+        || (Math.abs(df) === 2 && Math.abs(dr) === 1);
+    case "k":
+      // 1-square king. Castling-via-king-to-g/c is handled separately
+      // via castlingTargetIfKingOnRook so we keep this strict.
+      return Math.abs(df) <= 1 && Math.abs(dr) <= 1;
+    case "b":
+      return Math.abs(df) === Math.abs(dr);
+    case "r":
+      return df === 0 || dr === 0;
+    case "q":
+      return df === 0 || dr === 0 || Math.abs(df) === Math.abs(dr);
+    default:
+      return false;
+  }
+}
+
+// Mutate a chess.js instance to apply a single premove, falling
+// back to manual put/remove for pseudo-legal moves chess.js refuses
+// (pawn captures into empty squares, sliders "through" pieces).
+// After applying, side-to-move is forced back to the player's
+// colour so the next premove can chain off the same instance.
+// Returns true on success.
+function _applyPremoveToSpecChess(c, pm, color) {
+  if (!c || !pm) return false;
+  let applied = false;
+  try {
+    const m = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
+    if (m) applied = true;
+  } catch (_) { /* fall through to manual apply */ }
+  if (!applied) {
+    const piece = c.get(pm.from);
+    if (!piece || piece.color !== color) return false;
+    if (!_isPseudoLegalPremovePattern(c, piece, pm.from, pm.to)) return false;
+    let putType = piece.type;
+    if (piece.type === "p") {
+      const toRank = pm.to[1];
+      if ((piece.color === "w" && toRank === "8")
+          || (piece.color === "b" && toRank === "1")) {
+        putType = pm.promotion || "q";
+      }
+    }
+    try {
+      c.remove(pm.from);
+      c.remove(pm.to);
+      c.put({ type: putType, color: piece.color }, pm.to);
+    } catch (_) { return false; }
+  }
+  // Force side back to player so the next premove sees their turn.
+  try {
+    const parts = c.fen().split(" ");
+    if (parts[1] !== color) {
+      parts[1] = color;
+      parts[3] = "-";
+      c.load(parts.join(" "));
+    }
+  } catch (_) { return false; }
+  return true;
+}
+
 // Returns a chess.js instance reflecting the current real position
 // plus every queued premove, with side-to-move forced to the player
 // so a brand-new premove can be validated even while the engine is
@@ -2504,34 +2705,21 @@ function _premoveSpeculativeChess() {
   catch (_) { return null; }
   if (!c) return null;
   for (const pm of state.game.premoves) {
-    let mv;
-    try {
-      mv = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
-    } catch (_) {
-      return null;
-    }
-    if (!mv) return null;
-    try { c = new Chess(_fenWithSide(c.fen(), youColor)); }
-    catch (_) { return null; }
+    if (!_applyPremoveToSpecChess(c, pm, youColor)) return null;
   }
   return c;
 }
 
 // Queue a player move as a premove. Returns true if the move was
-// legal in the speculative position and got queued, false otherwise.
+// pseudo-legal in the speculative position and got queued.
 function _queuePremove(from, to) {
   const c = _premoveSpeculativeChess();
   if (!c) return false;
   if (c.turn() !== state.game.playerColor) return false;
   // Resolve king-on-rook castle drag: the king moves to g/c, not the rook.
   const moveTo = castlingTargetIfKingOnRook(from, to) || to;
-  let move;
-  try {
-    move = c.move({ from, to: moveTo, promotion: "q" });
-  } catch {
-    move = null;
-  }
-  if (!move) return false;
+  if (!_applyPremoveToSpecChess(c, { from, to: moveTo, promotion: "q" },
+      state.game.playerColor)) return false;
   state.game.premoves.push({ from, to: moveTo, promotion: "q" });
   state.game.premoveChess = c;
   state.selectedSquare = null;
@@ -2726,6 +2914,13 @@ function selectSquare(squareName) {
       const rookSq = m.flags.includes("k") ? "h" + rank : "a" + rank;
       if (!targets.includes(rookSq)) targets.push(rookSq);
     }
+  }
+  // Add pawn pseudo-legal diagonal squares for click-to-select too,
+  // so a click on a pawn during the engine's turn shows both diagonal
+  // capture options like chess.com's premove highlights.
+  if (c !== state.game.chess) {
+    const piece = c.get(squareName);
+    _addPawnPremoveCaptureSquares(c, squareName, piece, targets);
   }
   state.legalTargets = targets;
   renderBoard();
@@ -10969,33 +11164,24 @@ function _onevsonePremoveSpeculativeChess() {
   if (!c) return null;
   const queue = state.onevsone.premoves || [];
   for (const pm of queue) {
-    let mv;
-    try {
-      mv = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
-    } catch (_) {
-      return null;
-    }
-    if (!mv) return null;
-    try { c = new Chess(_fenWithSide(c.fen(), youColor)); }
-    catch (_) { return null; }
+    if (!_applyPremoveToSpecChess(c, pm, youColor)) return null;
   }
   return c;
 }
 
 // Queue a player move as a 1v1 premove. Returns true if the move was
-// legal in the speculative position and got queued, false otherwise.
+// pseudo-legal in the speculative position and got queued.
 function _onevsoneQueuePremove(from, to) {
   const c = _onevsonePremoveSpeculativeChess();
   if (!c) return false;
   const m = state.onevsone.match;
   if (!m || !m.you) return false;
   if (c.turn() !== m.you.color) return false;
-  let mv;
-  try { mv = c.move({ from, to, promotion: "q" }); }
-  catch (_) { mv = null; }
-  if (!mv) return false;
+  if (!_applyPremoveToSpecChess(c, { from, to, promotion: "q" }, m.you.color)) {
+    return false;
+  }
   state.onevsone.premoves = state.onevsone.premoves || [];
-  state.onevsone.premoves.push({ from, to, promotion: mv.promotion || "q" });
+  state.onevsone.premoves.push({ from, to, promotion: "q" });
   state.onevsone.premoveChess = c;
   state.selectedSquare = null;
   state.legalTargets = [];
