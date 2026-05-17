@@ -43,6 +43,15 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 chess-sandbox/0.1"
 )
 
+# Strict allow-lists for the two import providers. Using exact host
+# equality (after a single optional ``www.`` prefix) prevents the
+# ``str.endswith("lichess.org")`` bypass where an attacker-controlled
+# host like ``evillichess.org`` or ``attacker.com/lichess.org`` would
+# match. Any host outside the set is rejected before we issue an HTTP
+# request, so the backend can't be tricked into fetching arbitrary URLs.
+_ALLOWED_LICHESS_HOSTS = frozenset({"lichess.org", "www.lichess.org"})
+_ALLOWED_CHESSCOM_HOSTS = frozenset({"chess.com", "www.chess.com"})
+
 _AVATAR_CACHE: dict[str, str | None] = {}
 
 
@@ -206,9 +215,15 @@ def import_game(source: str) -> ImportedGame:
     if _looks_like_pgn(source):
         return _parse_pgn(source)
     url = urlparse(source)
-    if url.netloc.endswith("lichess.org"):
+    if url.scheme not in ("http", "https"):
+        raise ValueError(
+            "Only http/https URLs are supported — paste a PGN, or use a "
+            "chess.com / lichess.org game URL."
+        )
+    host = (url.hostname or "").lower()
+    if host in _ALLOWED_LICHESS_HOSTS:
         return _fetch_lichess(source)
-    if url.netloc.endswith("chess.com"):
+    if host in _ALLOWED_CHESSCOM_HOSTS:
         return _fetch_chesscom(source)
     raise ValueError(
         "Unknown source — paste a PGN, or use a chess.com / lichess.org game URL."

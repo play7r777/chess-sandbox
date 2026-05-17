@@ -23,17 +23,31 @@ Everything lives in-memory — same volatility model as ``party.py`` and
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
 import secrets
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import chess
 
 from . import notifications as notifications_db
+from .settings import settings
+
+logger = logging.getLogger(__name__)
 
 CHALLENGE_TTL_SEC = 120         # 2 minutes for the target to accept
 MATCH_IDLE_TTL_SEC = 60 * 60    # drop idle matches after 1h
+
+# Disk path the in-memory match table is mirrored to after every
+# state-changing operation. We rehydrate from this file on startup so
+# a backend restart doesn't silently lose live games. Writes go through
+# a tempfile + ``os.replace`` so a crash mid-write can't yield a
+# truncated JSON.
+_PERSIST_PATH: Path = settings.data_dir / "onevsone_matches.json"
 
 
 @dataclass
@@ -152,6 +166,154 @@ def _player_public(p: Player | None) -> dict[str, Any] | None:
 _CHALLENGES: dict[str, Challenge] = {}
 _MATCHES: dict[str, Match] = {}
 _LOCK = asyncio.Lock()
+# Lock guarding the on-disk JSON. We never want two flushes interleaving
+# their tempfile -> rename dance, which would race on Windows.
+_PERSIST_LOCK = asyncio.Lock()
+
+
+def _player_to_dict(p: Player) -> dict[str, Any]:
+    return {
+        "client_id": p.client_id,
+        "nickname": p.nickname,
+        "avatar": p.avatar,
+        "color": p.color,
+        "clock_remaining": p.clock_remaining,
+    }
+
+
+def _player_from_dict(d: dict[str, Any]) -> Player:
+    return Player(
+        client_id=str(d.get("client_id", "")),
+        nickname=str(d.get("nickname", "")),
+        avatar=str(d.get("avatar", "")),
+        color=str(d.get("color", "w")),
+        clock_remaining=float(d.get("clock_remaining", 0.0)),
+    )
+
+
+def _match_to_dict(m: Match) -> dict[str, Any]:
+    """Snapshot a Match into something JSON can hold.
+
+    The chess.Board is stored as FEN — restoring from FEN drops the
+    full move stack, but :attr:`Match.move_history` already carries
+    every move played so the board can be reconstructed if we ever
+    need to (currently we don't; the live UI replays from
+    ``move_history`` and trusts ``board.fen()`` for the current
+    position). We deliberately skip ``sockets`` — the live WS handles
+    are reattached by clients after they reconnect.
+    """
+    return {
+        "match_id": m.match_id,
+        "white": _player_to_dict(m.white),
+        "black": _player_to_dict(m.black),
+        "time_seconds": m.time_seconds,
+        "increment_seconds": m.increment_seconds,
+        "created_at": m.created_at,
+        "last_move_at": m.last_move_at,
+        "fen": m.chess.fen(),
+        "move_history": list(m.move_history),
+        "finished": m.finished,
+        "finish_reason": m.finish_reason,
+        "winner": m.winner,
+        "draw_offer_by": m.draw_offer_by,
+    }
+
+
+def _match_from_dict(d: dict[str, Any]) -> Match | None:
+    """Rebuild a Match from its on-disk snapshot, or None if the row is
+    corrupt / from a future schema we don't understand."""
+    try:
+        board = chess.Board(str(d["fen"]))
+    except Exception:
+        logger.warning("onevsone: dropping persisted match with bad FEN: %r", d.get("match_id"))
+        return None
+    try:
+        return Match(
+            match_id=str(d["match_id"]),
+            white=_player_from_dict(d["white"]),
+            black=_player_from_dict(d["black"]),
+            time_seconds=int(d.get("time_seconds", 600)),
+            increment_seconds=int(d.get("increment_seconds", 0)),
+            created_at=float(d.get("created_at", time.time())),
+            last_move_at=float(d.get("last_move_at", time.time())),
+            chess=board,
+            move_history=list(d.get("move_history", []) or []),
+            finished=bool(d.get("finished", False)),
+            finish_reason=str(d.get("finish_reason", "")),
+            winner=str(d.get("winner", "")),
+            draw_offer_by=str(d.get("draw_offer_by", "")),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("onevsone: dropping persisted match with bad shape: %s", exc)
+        return None
+
+
+async def _persist() -> None:
+    """Atomically mirror ``_MATCHES`` to disk.
+
+    Must be called from inside ``_LOCK``-protected sections (so the
+    snapshot is consistent) or right after one releases. Drops finished
+    matches that are past ``MATCH_IDLE_TTL_SEC`` from the snapshot — we
+    don't want the JSON to grow unbounded.
+    """
+    snapshot = {
+        mid: _match_to_dict(m)
+        for mid, m in _MATCHES.items()
+        # Don't bother persisting finished games — they live in memory
+        # for the idle TTL window so users can replay/download PGN
+        # immediately after the game, but a restart can drop them.
+        if not m.finished
+    }
+    payload = {"version": 1, "matches": snapshot}
+    async with _PERSIST_LOCK:
+        try:
+            _PERSIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _PERSIST_PATH.with_suffix(_PERSIST_PATH.suffix + ".tmp")
+            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            await asyncio.to_thread(tmp.write_text, data, "utf-8")
+            await asyncio.to_thread(os.replace, str(tmp), str(_PERSIST_PATH))
+        except Exception:
+            # Persistence failures must not break the game flow — log
+            # and keep going. Worst case a crash loses the last few
+            # moves, which is strictly better than crashing on disk-full.
+            logger.exception("onevsone: failed to persist matches")
+
+
+async def load_persisted() -> int:
+    """Hydrate ``_MATCHES`` from the on-disk JSON. Returns the number
+    of matches restored. Idempotent — safe to call multiple times.
+
+    Called from the FastAPI lifespan startup so a server restart
+    doesn't silently lose in-flight games. Clients still need to refresh
+    + reattach their WS, which the frontend already does because the
+    socket drops when the server goes away.
+    """
+    try:
+        raw = await asyncio.to_thread(_PERSIST_PATH.read_text, "utf-8")
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        logger.exception("onevsone: failed to read persisted matches")
+        return 0
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        logger.warning("onevsone: persisted file is not JSON, ignoring")
+        return 0
+    matches = (payload or {}).get("matches") or {}
+    restored = 0
+    async with _LOCK:
+        for _mid, row in matches.items():
+            if not isinstance(row, dict):
+                continue
+            m = _match_from_dict(row)
+            if m is None:
+                continue
+            _MATCHES[m.match_id] = m
+            restored += 1
+    if restored:
+        logger.info("onevsone: restored %d in-flight matches from disk", restored)
+    return restored
 
 
 def _new_id(prefix: str, registry: dict[str, Any]) -> str:
@@ -319,6 +481,8 @@ async def accept_challenge(
             last_move_at=time.time(),
         )
         _MATCHES[match.match_id] = match
+    # Mirror to disk so a restart preserves the just-created game.
+    await _persist()
     # Push match info to BOTH peers so each side can navigate to the live
     # game. The notifications SSE pipe is the only "always on" channel
     # we have for users that haven't opened the 1v1 WS yet.
@@ -380,6 +544,8 @@ async def apply_move(
     client_id: str,
     uci: str,
 ) -> dict[str, Any] | None:
+    result: dict[str, Any] | None
+    persist_needed = False
     async with _LOCK:
         m = _MATCHES.get(match_id)
         if m is None or m.finished:
@@ -419,6 +585,7 @@ async def apply_move(
                     return {"error": "illegal"}
             else:
                 return {"error": "illegal"}
+        persist_needed = True
         san = m.chess.san(move)
         is_capture = m.chess.is_capture(move)
         m.chess.push(move)
@@ -461,7 +628,7 @@ async def apply_move(
             m.finished = True
             m.finish_reason = "fifty_moves"
             m.winner = "draw"
-        return {
+        result = {
             "ok": True,
             "san": san,
             "uci": uci,
@@ -477,6 +644,9 @@ async def apply_move(
             "white_clock": round(m.white.clock_remaining, 2),
             "black_clock": round(m.black.clock_remaining, 2),
         }
+    if persist_needed:
+        await _persist()
+    return result
 
 
 def find_active_match(client_id: str) -> Match | None:
@@ -503,7 +673,8 @@ async def offer_draw(match_id: str, client_id: str) -> dict[str, Any] | None:
         if m.draw_offer_by == client_id:
             return {"ok": True, "already": True}
         m.draw_offer_by = client_id
-        return {"ok": True, "by": client_id}
+    await _persist()
+    return {"ok": True, "by": client_id}
 
 
 async def accept_draw(match_id: str, client_id: str) -> dict[str, Any] | None:
@@ -521,12 +692,13 @@ async def accept_draw(match_id: str, client_id: str) -> dict[str, Any] | None:
         m.winner = "draw"
         m.draw_offer_by = ""
         m.last_move_at = time.time()
-        return {
-            "ok": True,
-            "finished": True,
-            "finish_reason": "agreed_draw",
-            "winner": "draw",
-        }
+    await _persist()
+    return {
+        "ok": True,
+        "finished": True,
+        "finish_reason": "agreed_draw",
+        "winner": "draw",
+    }
 
 
 async def decline_draw(match_id: str, client_id: str) -> dict[str, Any] | None:
@@ -540,7 +712,8 @@ async def decline_draw(match_id: str, client_id: str) -> dict[str, Any] | None:
         if not m.draw_offer_by or m.draw_offer_by == client_id:
             return None
         m.draw_offer_by = ""
-        return {"ok": True, "declined_by": client_id}
+    await _persist()
+    return {"ok": True, "declined_by": client_id}
 
 
 async def resign(match_id: str, client_id: str) -> dict[str, Any] | None:
@@ -555,12 +728,14 @@ async def resign(match_id: str, client_id: str) -> dict[str, Any] | None:
         m.finish_reason = "resign"
         m.winner = "b" if me.color == "w" else "w"
         m.last_move_at = time.time()
-        return {
-            "ok": True,
-            "finished": True,
-            "finish_reason": "resign",
-            "winner": m.winner,
-        }
+        winner = m.winner
+    await _persist()
+    return {
+        "ok": True,
+        "finished": True,
+        "finish_reason": "resign",
+        "winner": winner,
+    }
 
 
 def reset_for_tests() -> None:

@@ -1,6 +1,7 @@
 """Runtime configuration for the chess sandbox backend."""
 from __future__ import annotations
 
+import ipaddress
 import shutil
 from pathlib import Path
 
@@ -17,9 +18,26 @@ class Settings(BaseSettings):
     stockfish_hash_mb: int = 256
     stockfish_default_movetime_ms: int = 1000
     stockfish_default_skill_level: int = 20
+    # Number of Stockfish worker processes kept alive in the pool.
+    # The pool serialises requests *per worker* but parallelises across
+    # workers, so two clients running `/api/engine/analyse` no longer
+    # queue on the same engine. Each worker costs ~256MB of RAM with
+    # the default hash table.
+    stockfish_pool_size: int = 2
 
     host: str = "127.0.0.1"
     port: int = 8000
+
+    # When the server is exposed publicly (CHESS_HOST=0.0.0.0 for
+    # ngrok/playit/etc), anyone with the URL can spoof another user's
+    # client_id and overwrite their profile/match state. Setting
+    # CHESS_AUTH_TOKEN to a non-empty shared secret gates every API +
+    # WS endpoint behind that token. Clients receive it once via the
+    # `?token=...` query parameter and persist it as an HttpOnly cookie
+    # for subsequent requests. Empty (default) means "trust everyone
+    # who can reach the socket" — fine for 127.0.0.1, dangerous
+    # otherwise (the backend prints a loud warning at startup).
+    auth_token: str = ""
 
     frontend_dir: Path = Path(__file__).resolve().parent.parent / "frontend"
     backend_root: Path = Path(__file__).resolve().parent
@@ -28,6 +46,15 @@ class Settings(BaseSettings):
     # puzzle SQLite). Sits next to the bundled puzzle pack so the app
     # is fully self-contained for a local install.
     data_dir: Path = Path(__file__).resolve().parent / "data"
+
+    def host_is_loopback(self) -> bool:
+        """True iff ``host`` resolves to a loopback IP (127.x or ::1)."""
+        try:
+            return ipaddress.ip_address(self.host).is_loopback
+        except ValueError:
+            # Hostnames (e.g. "localhost") — accept only well-known
+            # loopback names; everything else counts as public-facing.
+            return self.host.strip().lower() in {"localhost", "ip6-localhost"}
 
     def resolve_stockfish_path(self) -> str | None:
         """Return the Stockfish binary path, falling back to PATH lookup."""

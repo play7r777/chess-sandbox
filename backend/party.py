@@ -67,6 +67,34 @@ PARTY_MAX_ATTEMPT_LOG = 500
 # Position broadcasts only fire on actual board moves (one ws.send per
 # legal move), so a 1ms floor is safe even with 16 simultaneous players.
 PLAYER_STATE_THROTTLE_SEC = 0.001
+# Maximum chat / reaction messages kept in the live ring buffer. New
+# spectators / reconnecting players replay this buffer on attach so a
+# late-joiner doesn't lose all earlier banter. 200 covers the busiest
+# 3-minute Battle while keeping memory bounded.
+PARTY_CHAT_LOG_MAX = 200
+# Minimum interval between two chat messages from the same player. Stops
+# trivial keyboard-spam from drowning the panel; live-game banter is
+# bursty but rarely fires more than once per second per player.
+PARTY_CHAT_MIN_INTERVAL_SEC = 0.5
+# Minimum interval between two reactions from the same player. Lower
+# than chat because reactions are emoji bursts ("👏 👏 👏 nice mate")
+# and rate-limiting them too aggressively kills the vibe.
+PARTY_REACT_MIN_INTERVAL_SEC = 0.15
+# Hard cap on chat message length. Anything longer is truncated rather
+# than rejected — easier UX than yelling at the user for typing too
+# much. 280 mirrors Twitter; plenty of room for trash talk.
+PARTY_CHAT_MAX_LEN = 280
+# Allow-list of reaction codes. Locked down to a small set so the
+# frontend can map each one to a fixed emoji without rendering arbitrary
+# user-supplied unicode (which would let a clever user pick zalgo or
+# RTL-override marks to mess up the chat panel layout).
+PARTY_REACT_ALLOWED: frozenset[str] = frozenset({
+    "thumbs_up", "thumbs_down",
+    "fire", "rocket", "skull", "clown", "brain", "trophy", "heart",
+    "laugh", "cry", "wave",
+    # chess-specific
+    "blunder", "brilliant", "great", "good_move", "inaccuracy",
+})
 
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _PARTIES: dict[str, Party] = {}
@@ -255,6 +283,12 @@ class Member:
     # Wallclock of the last spectator broadcast for this member; used
     # to throttle spammy player_state events.
     last_state_broadcast: float = 0.0
+    # Wallclocks of the last chat / reaction sent by this player. Used
+    # for the per-player rate-limit gates in ``Party.chat`` and
+    # ``Party.react``. Stored on the Member rather than a side dict so
+    # the value disappears with the player on ``leave``.
+    last_chat_at: float = 0.0
+    last_react_at: float = 0.0
 
 
 @dataclass
@@ -302,6 +336,15 @@ class Party:
     mode: str = "standard"
     rating_min: int = 0
     rating_max: int = 0
+    # Append-only ring buffer of chat / reaction events. New attachees
+    # replay this on join (see ``Party.public_state``) so a late-joining
+    # spectator catches the recent banter context. Capped at
+    # ``PARTY_CHAT_LOG_MAX`` items.
+    chat_log: list[dict[str, Any]] = field(default_factory=list)
+    # Monotonically-increasing per-room counter used as the chat event
+    # id. Lets clients dedupe in case a payload arrives both via the
+    # live ws.send_json broadcast and the replay-on-attach buffer.
+    chat_seq: int = 0
 
     def average_member_rating(self) -> int:
         """Live average of every member's profile rating.
@@ -364,6 +407,12 @@ class Party:
             "rating_max": int(self.rating_max),
             "rating_envelope_min": PARTY_BAND_MIN,
             "rating_envelope_max": PARTY_BAND_MAX,
+            # Replay buffer of chat / reaction events so a fresh
+            # attachee catches up on what was said before they joined.
+            # Bounded at ``PARTY_CHAT_LOG_MAX`` so the payload stays
+            # tractable.
+            "chat_log": list(self.chat_log),
+            "chat_seq": int(self.chat_seq),
         }
 
     def scoreboard(self) -> list[dict[str, Any]]:
@@ -399,6 +448,93 @@ class Party:
             if sp:
                 sp.ws = None
                 sp.disconnected_at = time.time()
+
+    def _append_chat_log(self, entry: dict[str, Any]) -> None:
+        """Push an entry into the bounded ring buffer, dropping the
+        oldest if we'd exceed ``PARTY_CHAT_LOG_MAX``. Mutates in-place
+        so existing readers (e.g. ``public_state``) see the new tail
+        without a copy."""
+        self.chat_log.append(entry)
+        # Keep at most PARTY_CHAT_LOG_MAX entries — slice in place so
+        # readers iterating ``chat_log`` don't get a fresh list object.
+        overflow = len(self.chat_log) - PARTY_CHAT_LOG_MAX
+        if overflow > 0:
+            del self.chat_log[:overflow]
+
+    async def chat(self, client_id: str, text: str) -> dict[str, Any] | None:
+        """Player-authored chat line. Only ``client_id``s that are
+        members can chat — spectators are silent (they can still see
+        the channel). Rate-limited per player to one message every
+        ``PARTY_CHAT_MIN_INTERVAL_SEC``.
+
+        Returns ``None`` if the message was rejected (rate-limit, empty
+        body, non-member); otherwise the appended log entry. Caller is
+        expected to ``broadcast`` the returned payload.
+        """
+        m = self.members.get(client_id)
+        if m is None:
+            return None
+        # Throttle. Silently drop rather than ack-and-discard so a buggy
+        # client mashing the send button doesn't see a feedback storm.
+        now = time.time()
+        if now - m.last_chat_at < PARTY_CHAT_MIN_INTERVAL_SEC:
+            return None
+        # Sanitize: collapse internal whitespace, strip control chars,
+        # truncate. Empty after sanitation -> drop.
+        if not isinstance(text, str):
+            return None
+        cleaned = "".join(
+            ch for ch in text
+            if ch == "\n" or ch == "\t" or (ord(ch) >= 0x20 and ord(ch) != 0x7F)
+        ).strip()
+        if not cleaned:
+            return None
+        cleaned = cleaned[:PARTY_CHAT_MAX_LEN]
+        m.last_chat_at = now
+        self.chat_seq += 1
+        entry = {
+            "type": "chat",
+            "seq": self.chat_seq,
+            "client_id": client_id,
+            "nickname": m.nickname,
+            "avatar": m.avatar,
+            "text": cleaned,
+            "ts": int(now),
+        }
+        self._append_chat_log(entry)
+        return entry
+
+    async def react(self, client_id: str, code: str) -> dict[str, Any] | None:
+        """Player-authored emoji reaction. Reactions are ephemeral —
+        they go into the chat ring buffer too so spectators that join
+        right after a "👏" still see it for a moment, but the frontend
+        renders them as floating bubbles rather than persistent rows.
+
+        ``code`` must be one of :data:`PARTY_REACT_ALLOWED`. Anything
+        else returns ``None``.
+        """
+        m = self.members.get(client_id)
+        if m is None:
+            return None
+        code = str(code or "").strip().lower()
+        if code not in PARTY_REACT_ALLOWED:
+            return None
+        now = time.time()
+        if now - m.last_react_at < PARTY_REACT_MIN_INTERVAL_SEC:
+            return None
+        m.last_react_at = now
+        self.chat_seq += 1
+        entry = {
+            "type": "reaction",
+            "seq": self.chat_seq,
+            "client_id": client_id,
+            "nickname": m.nickname,
+            "avatar": m.avatar,
+            "code": code,
+            "ts": int(now),
+        }
+        self._append_chat_log(entry)
+        return entry
 
     async def _send(self, cid: str, payload: dict[str, Any]) -> None:
         m = self.members.get(cid)

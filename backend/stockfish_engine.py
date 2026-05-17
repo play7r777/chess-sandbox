@@ -1,7 +1,36 @@
-"""Thin wrapper around python-chess UCI engine for Stockfish.
+"""Thin async wrapper around python-chess UCI engine for Stockfish.
 
-The engine process is started lazily and kept alive between requests. If the
-binary path or options change at runtime we restart the process transparently.
+Public surface
+--------------
+The module exposes a single ``engine`` object whose API matches what
+the rest of the backend used to call on a single-worker
+``StockfishEngine`` — ``configure()``, ``best_move()``, ``analyse()``,
+``analyse_raw()``, ``stop()`` plus the ``is_running`` / ``path``
+properties. Callers don't need to change.
+
+Internals
+---------
+Under the hood ``engine`` is now an :class:`EnginePool` that fans
+requests out across N long-lived ``_Worker`` processes (one Stockfish
+binary each). A bounded :class:`asyncio.Queue` holds idle workers;
+:meth:`EnginePool._acquire` pulls the next free one, the request runs
+on it, and :meth:`EnginePool._release` puts it back. Two concurrent
+``/api/engine/analyse`` calls now run in parallel on different
+processes instead of serialising on a shared lock.
+
+Pool size defaults to ``settings.stockfish_pool_size`` (2) but is
+clamped to ``[1, 16]`` in :meth:`EnginePool.configure` so a stray env
+var can't blow up RAM with 64 hash tables.
+
+Stateless guarantees
+--------------------
+Each call sends the FEN through ``board = chess.Board(fen)`` and uses
+``engine.play(board, …)`` / ``engine.analyse(board, …)``, so a worker
+that just finished a different request can't bleed positional state
+into the next one (python-chess sends ``ucinewgame`` + ``position fen``
+on every call). MultiPV is set per-request via the ``multipv`` kwarg to
+``analyse()``; we never call ``configure({"MultiPV": …})`` because
+python-chess refuses (auto-managed).
 """
 from __future__ import annotations
 
@@ -34,19 +63,68 @@ class AnalysisResult:
     pv: list[str]
 
 
-class StockfishEngine:
-    """Async-friendly singleton-style wrapper around `chess.engine.SimpleEngine`.
+class _Worker:
+    """Single Stockfish process + a per-process asyncio lock.
 
-    `python-chess` exposes both a sync `SimpleEngine` and an async transport.
-    We use the sync API but call it from a worker thread so FastAPI handlers
-    never block the event loop.
+    ``SimpleEngine`` muxes through one stdin/stdout pipe and can't service
+    two parallel ``analyse()`` calls. The pool only hands out a worker
+    that isn't currently being held by anyone else, so the lock is
+    mostly a belt-and-suspenders guard against a buggy caller forgetting
+    to release a worker.
+    """
+
+    def __init__(self, worker_id: int) -> None:
+        self.worker_id = worker_id
+        self.engine: chess.engine.SimpleEngine | None = None
+        self.lock = asyncio.Lock()
+
+    def is_running(self) -> bool:
+        return self.engine is not None
+
+    def start(self, path: str, options: EngineOptions) -> None:
+        eng = chess.engine.SimpleEngine.popen_uci(path)
+        try:
+            opts: dict[str, int | str] = {}
+            if "Threads" in eng.options:
+                opts["Threads"] = options.threads
+            if "Hash" in eng.options:
+                opts["Hash"] = options.hash_mb
+            if "Skill Level" in eng.options:
+                opts["Skill Level"] = max(0, min(20, options.skill_level))
+            if opts:
+                eng.configure(opts)
+        except Exception:
+            eng.close()
+            raise
+        self.engine = eng
+
+    def stop(self) -> None:
+        eng = self.engine
+        self.engine = None
+        if eng is not None:
+            try:
+                eng.close()
+            except Exception:
+                logger.exception("worker %d: close() failed", self.worker_id)
+
+
+class EnginePool:
+    """Pool of Stockfish workers fronting a single public API.
+
+    Each method (configure / best_move / analyse / analyse_raw / stop)
+    is async and acquires a free worker from the internal queue. The
+    pool size is fixed at ``configure()`` time. Re-configuring (e.g.
+    user points at a different binary or bumps Hash) tears all workers
+    down and starts a fresh set with the new options.
     """
 
     def __init__(self) -> None:
-        self._engine: chess.engine.SimpleEngine | None = None
+        self._workers: list[_Worker] = []
+        self._idle: asyncio.Queue[_Worker] = asyncio.Queue()
+        self._configure_lock = asyncio.Lock()
         self._path: str | None = None
         self._options: EngineOptions = EngineOptions()
-        self._lock = asyncio.Lock()
+        self._pool_size: int = 1
 
     @property
     def path(self) -> str | None:
@@ -54,24 +132,42 @@ class StockfishEngine:
 
     @property
     def is_running(self) -> bool:
-        return self._engine is not None
+        return any(w.is_running() for w in self._workers)
+
+    @property
+    def pool_size(self) -> int:
+        return self._pool_size
 
     async def configure(
         self,
         path: str,
         options: EngineOptions | None = None,
+        pool_size: int | None = None,
     ) -> dict[str, Any]:
-        """Start (or restart) the engine with the given binary and options."""
-        async with self._lock:
-            await self._stop_locked()
+        """(Re)build the pool with the given binary and options."""
+        from .settings import settings
+        if pool_size is None:
+            pool_size = settings.stockfish_pool_size
+        pool_size = max(1, min(int(pool_size or 1), 16))
+        async with self._configure_lock:
+            await self._stop_all_locked()
             self._path = path
             if options is not None:
                 self._options = options
-            await asyncio.to_thread(self._start_locked)
-            assert self._engine is not None
-            info: dict[str, Any] = {
+            self._pool_size = pool_size
+            self._idle = asyncio.Queue()
+            self._workers = []
+            for i in range(pool_size):
+                w = _Worker(worker_id=i)
+                await asyncio.to_thread(w.start, path, self._options)
+                self._workers.append(w)
+                self._idle.put_nowait(w)
+            probe = self._workers[0].engine
+            engine_id = dict(probe.id) if probe is not None else {}
+            return {
                 "path": path,
-                "id": dict(self._engine.id),
+                "id": engine_id,
+                "pool_size": pool_size,
                 "options": {
                     "threads": self._options.threads,
                     "hash_mb": self._options.hash_mb,
@@ -79,38 +175,28 @@ class StockfishEngine:
                     "multi_pv": self._options.multi_pv,
                 },
             }
-            return info
 
-    def _start_locked(self) -> None:
-        assert self._path is not None
-        engine = chess.engine.SimpleEngine.popen_uci(self._path)
-        try:
-            opts: dict[str, int | str] = {}
-            if "Threads" in engine.options:
-                opts["Threads"] = self._options.threads
-            if "Hash" in engine.options:
-                opts["Hash"] = self._options.hash_mb
-            if "Skill Level" in engine.options:
-                opts["Skill Level"] = max(0, min(20, self._options.skill_level))
-            # NB: MultiPV is managed automatically by python-chess during
-            # `analyse()`; trying to set it here raises "cannot set MultiPV
-            # which is automatically managed".
-            if opts:
-                engine.configure(opts)
-        except Exception:
-            engine.close()
-            raise
-        self._engine = engine
-
-    async def _stop_locked(self) -> None:
-        engine = self._engine
-        self._engine = None
-        if engine is not None:
-            await asyncio.to_thread(engine.close)
+    async def _stop_all_locked(self) -> None:
+        workers, self._workers = self._workers, []
+        self._idle = asyncio.Queue()
+        for w in workers:
+            await asyncio.to_thread(w.stop)
 
     async def stop(self) -> None:
-        async with self._lock:
-            await self._stop_locked()
+        async with self._configure_lock:
+            await self._stop_all_locked()
+            self._path = None
+
+    async def _acquire(self) -> _Worker:
+        if not self._workers:
+            raise RuntimeError("Engine is not configured. Call configure() first.")
+        return await self._idle.get()
+
+    def _release(self, w: _Worker) -> None:
+        # Only release workers that are still in the active set — a
+        # reconfigure between acquire and release will have orphaned w.
+        if w in self._workers:
+            self._idle.put_nowait(w)
 
     async def best_move(
         self,
@@ -118,23 +204,20 @@ class StockfishEngine:
         movetime_ms: int | None = None,
         depth: int | None = None,
     ) -> AnalysisResult:
-        """Ask the engine for a move from the given FEN position."""
-        async with self._lock:
-            if self._engine is None:
-                raise RuntimeError("Engine is not configured. Call configure() first.")
+        w = await self._acquire()
+        try:
+            sf = w.engine
+            if sf is None:
+                raise RuntimeError("Engine worker is not running.")
             board = chess.Board(fen)
             limit = chess.engine.Limit(
                 time=(movetime_ms / 1000) if movetime_ms else None,
                 depth=depth,
             )
-            engine = self._engine
-
-            def _play() -> tuple[chess.engine.PlayResult, dict[str, Any]]:
-                result = engine.play(board, limit, info=chess.engine.INFO_ALL)
-                # play() returns a PlayResult; info is on result.info
-                return result, dict(result.info or {})
-
-            result, info = await asyncio.to_thread(_play)
+            async with w.lock:
+                result, info = await asyncio.to_thread(_do_play, sf, board, limit)
+        finally:
+            self._release(w)
 
         score = info.get("score")
         score_cp: int | None = None
@@ -162,30 +245,21 @@ class StockfishEngine:
         depth: int | None = None,
         multipv: int = 1,
     ) -> list[dict[str, Any]]:
-        """Run analyse and return the raw `info` dicts from python-chess.
-
-        The dicts contain `score` (a `chess.engine.PovScore`) and `pv`
-        (list of `chess.Move`), which is what callers like the game-review
-        analyser need. Unlike `analyse()` this does not pre-convert
-        scores into our `AnalysisResult` dataclass.
-        """
-        async with self._lock:
-            if self._engine is None:
-                raise RuntimeError("Engine is not configured. Call configure() first.")
+        w = await self._acquire()
+        try:
+            sf = w.engine
+            if sf is None:
+                raise RuntimeError("Engine worker is not running.")
             board = chess.Board(fen)
             limit = chess.engine.Limit(
                 time=(movetime_ms / 1000) if movetime_ms else None,
                 depth=depth,
             )
-            engine = self._engine
-
-            def _analyse() -> list[dict[str, Any]]:
-                infos = engine.analyse(board, limit, multipv=multipv)
-                if isinstance(infos, dict):
-                    infos = [infos]
-                return [dict(i) for i in infos]
-
-            return await asyncio.to_thread(_analyse)
+            async with w.lock:
+                infos = await asyncio.to_thread(_do_analyse, sf, board, limit, multipv)
+        finally:
+            self._release(w)
+        return infos
 
     async def analyse(
         self,
@@ -194,24 +268,20 @@ class StockfishEngine:
         depth: int | None = None,
         multipv: int = 1,
     ) -> list[AnalysisResult]:
-        """Run a static evaluation and return the top `multipv` lines."""
-        async with self._lock:
-            if self._engine is None:
-                raise RuntimeError("Engine is not configured. Call configure() first.")
+        w = await self._acquire()
+        try:
+            sf = w.engine
+            if sf is None:
+                raise RuntimeError("Engine worker is not running.")
             board = chess.Board(fen)
             limit = chess.engine.Limit(
                 time=(movetime_ms / 1000) if movetime_ms else None,
                 depth=depth,
             )
-            engine = self._engine
-
-            def _analyse() -> list[dict[str, Any]]:
-                infos = engine.analyse(board, limit, multipv=multipv)
-                if isinstance(infos, dict):
-                    infos = [infos]
-                return [dict(i) for i in infos]
-
-            infos = await asyncio.to_thread(_analyse)
+            async with w.lock:
+                infos = await asyncio.to_thread(_do_analyse, sf, board, limit, multipv)
+        finally:
+            self._release(w)
 
         results: list[AnalysisResult] = []
         for info in infos:
@@ -239,4 +309,33 @@ class StockfishEngine:
         return results
 
 
-engine = StockfishEngine()
+def _do_play(
+    sf: chess.engine.SimpleEngine,
+    board: chess.Board,
+    limit: chess.engine.Limit,
+) -> tuple[chess.engine.PlayResult, dict[str, Any]]:
+    result = sf.play(board, limit, info=chess.engine.INFO_ALL)
+    return result, dict(result.info or {})
+
+
+def _do_analyse(
+    sf: chess.engine.SimpleEngine,
+    board: chess.Board,
+    limit: chess.engine.Limit,
+    multipv: int,
+) -> list[dict[str, Any]]:
+    infos = sf.analyse(board, limit, multipv=multipv)
+    if isinstance(infos, dict):
+        infos = [infos]
+    return [dict(i) for i in infos]
+
+
+# Public singleton used throughout the backend. Despite the name it's
+# really a pool — see EnginePool docstring.
+engine = EnginePool()
+
+
+# Backwards-compat: a couple of modules (and tests) imported the old
+# ``StockfishEngine`` class symbol. Re-export ``EnginePool`` under that
+# name so external callers don't break.
+StockfishEngine = EnginePool

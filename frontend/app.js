@@ -532,6 +532,18 @@ const state = {
     // dim our row, lock our board, and stop us from hammering the
     // hint/skip buttons. Cleared on the next match start / leave.
     selfEliminated: false,
+    // Live chat / reaction log mirroring the server's bounded ring
+    // buffer (see ``party.PARTY_CHAT_LOG_MAX``). Each entry is one
+    // ``{type:"chat"|"reaction", seq, client_id, nickname, avatar,
+    // text|code, ts}`` payload as delivered by the WS broadcast.
+    chatLog: [],
+    chatSeq: 0,
+    // Last-sent timestamps for client-side throttling so a stuck
+    // send button can't outpace the server-side per-player rate
+    // limit (which silently drops, leaving the user wondering why
+    // their reaction didn't show up).
+    lastChatAt: 0,
+    lastReactAt: 0,
   },
   // Spectator session (view-only, separate from `party`).
   spectator: {
@@ -568,6 +580,10 @@ const state = {
     es: null,           // EventSource
     invitations: {},    // invite_id -> invitation payload
     reconnectTimer: null,
+    // Exponential-backoff state for manual reconnects. Reset to 0
+    // on every successful "hello" message; doubles on every retry
+    // up to a 30s ceiling so a stuck server doesn't get hammered.
+    reconnectAttempts: 0,
   },
   // 1 vs 1 mode — challenge lobby + live match (legal moves over WS).
   // `outgoing` tracks the in-flight challenge we sent (so we can cancel
@@ -588,6 +604,12 @@ const state = {
     premoveChess: null,
     ws: null,                 // WebSocket
     wsRetry: 0,
+    // Tracks the match.id we last opened (or attempted to open) a
+    // WebSocket for. When the active match changes we reset
+    // `wsRetry` so a new game doesn't inherit the previous match's
+    // backoff (otherwise a flaky 5+0 match leaves us with an 8s
+    // reconnect delay on the very first attempt of the next game).
+    wsMatchId: null,
     // Outbound message queue: any payloads we tried to send while the
     // socket was still CONNECTING (or briefly disconnected) so we
     // don't silently drop a move/resign/draw_offer the user just
@@ -7350,12 +7372,25 @@ function partyConnect(code) {
 function handlePartyMessage(msg) {
   if (!msg || typeof msg !== "object") return;
   switch (msg.type) {
+    case "chat":
+    case "reaction":
+      _partyAbsorbChatEvent(msg);
+      _renderPartyChatLog();
+      break;
     case "lobby":
       state.party.party_id = msg.party_id;
       state.party.host_id = msg.host_id;
       state.party.status = msg.status;
       state.party.endsAt = msg.ends_at || 0;
       state.party.startedAt = msg.started_at || 0;
+      // Replay-buffer snapshot the server tacks onto every state
+      // payload. Replace ours instead of merging — the server is
+      // authoritative on order and we'd otherwise duplicate every
+      // entry between an attach and the live broadcast.
+      if (Array.isArray(msg.chat_log)) {
+        state.party.chatLog = msg.chat_log.slice();
+        state.party.chatSeq = Number(msg.chat_seq) || 0;
+      }
       // Mirror server-supplied lobby duration so non-host clients see
       // the same selection the host picked, and so the host's UI
       // matches the server-side authoritative value after a reconnect.
@@ -7850,6 +7885,125 @@ function _partyDurationLabel(sec) {
   return `${n} мин`;
 }
 
+// Set of reaction codes the frontend exposes as emoji buttons. Keep
+// this short — the goal is one-tap "good game", "lol", "blunder",
+// not a full emoji picker. Keys must match the backend
+// ``PARTY_REACT_ALLOWED`` allow-list (server rejects everything else).
+const PARTY_REACT_BUTTONS = [
+  { code: "fire",         emoji: "🔥" },
+  { code: "rocket",       emoji: "🚀" },
+  { code: "laugh",        emoji: "😂" },
+  { code: "skull",        emoji: "💀" },
+  { code: "clown",        emoji: "🤡" },
+  { code: "brain",        emoji: "🧠" },
+  { code: "trophy",       emoji: "🏆" },
+  { code: "heart",        emoji: "❤️" },
+  { code: "thumbs_up",    emoji: "👍" },
+  { code: "brilliant",    emoji: "‼" },
+  { code: "blunder",      emoji: "??" },
+];
+const PARTY_REACT_EMOJI = Object.fromEntries(PARTY_REACT_BUTTONS.map((b) => [b.code, b.emoji]));
+
+function _partyAbsorbChatEvent(ev) {
+  if (!ev || typeof ev !== "object") return;
+  if (ev.type !== "chat" && ev.type !== "reaction") return;
+  // Dedupe by seq — the server stamps a monotonically increasing
+  // ``seq`` on every event so we drop anything we've already seen
+  // (replay-on-attach payload overlaps the live broadcast).
+  const seq = Number(ev.seq) || 0;
+  if (seq && seq <= state.party.chatSeq) return;
+  state.party.chatLog.push(ev);
+  if (state.party.chatLog.length > 200) {
+    state.party.chatLog.splice(0, state.party.chatLog.length - 200);
+  }
+  if (seq) state.party.chatSeq = seq;
+}
+
+function _partyChatPanelHtml() {
+  // The chat log is reverse-rendered (newest at the bottom) inside
+  // a fixed-height scrolling container; the input row sits below.
+  // Reactions render as a single horizontal row of buttons so the
+  // panel doesn't blow up vertically.
+  const reactionButtons = PARTY_REACT_BUTTONS.map((b) =>
+    `<button type="button" class="party-react-btn" data-react="${escapeHtml(b.code)}" title="${escapeHtml(b.code)}">${b.emoji}</button>`
+  ).join("");
+  return `
+    <section class="party-chat">
+      <div class="party-section-title">Чат</div>
+      <div id="party-chat-log" class="party-chat-log" role="log" aria-live="polite"></div>
+      <div class="party-chat-react">${reactionButtons}</div>
+      <form id="party-chat-form" class="party-chat-form" autocomplete="off">
+        <input id="party-chat-input" type="text" maxlength="280" placeholder="Написать в чат…" />
+        <button type="submit" class="puzzle-ghost">Отправить</button>
+      </form>
+    </section>
+  `;
+}
+
+function _renderPartyChatLog() {
+  const host = document.getElementById("party-chat-log");
+  if (!host) return;
+  const entries = state.party.chatLog.slice(-80);
+  const html = entries.map((e) => {
+    const who = `<span class="party-chat-av">${avatarHtml(e.avatar)}</span>` +
+      `<span class="party-chat-nick">${escapeHtml(e.nickname || "Гость")}</span>`;
+    if (e.type === "reaction") {
+      const emoji = PARTY_REACT_EMOJI[e.code] || "·";
+      return `<div class="party-chat-row is-reaction">${who}<span class="party-chat-emoji">${emoji}</span></div>`;
+    }
+    return `<div class="party-chat-row is-msg">${who}<span class="party-chat-text">${escapeHtml(e.text || "")}</span></div>`;
+  }).join("");
+  host.innerHTML = html;
+  // Auto-scroll to the bottom so the latest line is visible —
+  // skip if the user has scrolled up to read history (within 64px
+  // of the bottom we treat as "still pinned").
+  if (host.scrollHeight - host.scrollTop - host.clientHeight < 64) {
+    host.scrollTop = host.scrollHeight;
+  }
+}
+
+function _partySendChat(text) {
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  // Mirror the server's per-player rate limit so the user gets
+  // immediate feedback (otherwise drops are silent).
+  const now = Date.now();
+  if (now - state.party.lastChatAt < 500) return false;
+  const t = (text || "").trim();
+  if (!t) return false;
+  state.party.lastChatAt = now;
+  try { ws.send(JSON.stringify({ type: "chat", text: t.slice(0, 280) })); } catch (_) { return false; }
+  return true;
+}
+
+function _partySendReaction(code) {
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  const now = Date.now();
+  if (now - state.party.lastReactAt < 200) return false;
+  state.party.lastReactAt = now;
+  try { ws.send(JSON.stringify({ type: "reaction", code: String(code || "") })); } catch (_) { return false; }
+  return true;
+}
+
+function _wirePartyChatInput(root) {
+  if (!root) return;
+  const form = root.querySelector("#party-chat-form");
+  const input = root.querySelector("#party-chat-input");
+  if (form && input) {
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      if (_partySendChat(input.value)) input.value = "";
+    });
+  }
+  root.querySelectorAll(".party-react-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const code = btn.getAttribute("data-react");
+      if (code) _partySendReaction(code);
+    });
+  });
+}
+
 function renderPartyLobby() {
   const body = _partyEnsureModal();
   if (!body) return;
@@ -7937,8 +8091,11 @@ function renderPartyLobby() {
         : `<div class="muted">Ждём, пока хост запустит матч…</div>`}
       <button id="btn-party-leave" type="button" class="puzzle-ghost">Выйти</button>
     </div>
+    ${_partyChatPanelHtml()}
     <div id="party-error" class="party-error" hidden></div>
   `;
+  _renderPartyChatLog();
+  _wirePartyChatInput(body);
   body.querySelector("#btn-party-leave")?.addEventListener("click", () => {
     leaveParty();
   });
@@ -10883,6 +11040,14 @@ function _onevsoneDismissChallengeToast(challengeId) {
 // ============================================================
 function _onevsoneEnsureWs() {
   const m = state.onevsone.match;
+  // Reset the exponential-backoff retry counter when the active
+  // match has changed. Without this, a previous flaky match that
+  // accumulated retries leaves the very first connect of the next
+  // match waiting up to 8s before it even tries.
+  if (m && m.id && state.onevsone.wsMatchId !== m.id) {
+    state.onevsone.wsMatchId = m.id;
+    state.onevsone.wsRetry = 0;
+  }
   if (!m || !m.id || !state.user.client_id) return;
   // Skip both OPEN and CONNECTING — the previous check only
   // matched OPEN, so a second caller (e.g. the SSE
@@ -11404,7 +11569,16 @@ function _renderOnevsoneMatchUi() {
   //   • normal           → Resign + "Offer draw"
   let actionsHtml;
   if (finished) {
-    actionsHtml = `<button type="button" class="primary" id="btn-onevsone-leave">Выйти</button>`;
+    // Post-mortem actions: "Скачать PGN" pulls the standards-
+    // compliant transcript from the backend so the user can paste
+    // it into Analysis/lichess/chess.com; "Разобрать партию"
+    // primes the in-app Analysis view with the same PGN and runs
+    // engine review in the background.
+    actionsHtml = `
+      <button type="button" class="primary" id="btn-onevsone-leave">Выйти</button>
+      <button type="button" id="btn-onevsone-pgn">Скачать PGN</button>
+      <button type="button" id="btn-onevsone-analyze">Разобрать партию</button>
+    `;
   } else if (drawOfferIncoming) {
     actionsHtml = `<button type="button" id="btn-onevsone-resign">Сдаться</button>`;
   } else if (drawOfferOutgoing) {
@@ -11486,6 +11660,52 @@ function _renderOnevsoneMatchUi() {
       try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
       _renderOnevsoneLobby();
       _refreshOnevsoneOnline(true);
+    };
+  }
+  const btnPgn = document.getElementById("btn-onevsone-pgn");
+  if (btnPgn) {
+    btnPgn.onclick = () => {
+      // Anchor-click trick instead of fetch+blob: lets the browser
+      // honour the Content-Disposition header the backend sets and
+      // shows the usual "Save as…" dialog with a sensible filename.
+      const cid = encodeURIComponent(state.user.client_id || "");
+      const mid = encodeURIComponent(m.id || "");
+      const a = document.createElement("a");
+      a.href = `/api/onevsone/match/${mid}/pgn?client_id=${cid}&download=1`;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    };
+  }
+  const btnAnalyze = document.getElementById("btn-onevsone-analyze");
+  if (btnAnalyze) {
+    btnAnalyze.onclick = async () => {
+      btnAnalyze.disabled = true;
+      const oldText = btnAnalyze.textContent;
+      btnAnalyze.textContent = "Загружаю…";
+      try {
+        const cid = encodeURIComponent(state.user.client_id || "");
+        const mid = encodeURIComponent(m.id || "");
+        const r = await fetch(`/api/onevsone/match/${mid}/pgn?client_id=${cid}&download=0`, { credentials: "same-origin" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const pgnText = await r.text();
+        // Hand the PGN off to Analysis. The wrapper exposed on
+        // window.app (see bottom of this file) does the heavy
+        // lifting: import -> switch view -> kick off engine review.
+        if (typeof window.app === "object" && typeof window.app.openPgnInAnalysis === "function") {
+          await window.app.openPgnInAnalysis(pgnText);
+        } else {
+          // Fallback: dump it into a textarea so the user can copy.
+          await navigator.clipboard.writeText(pgnText);
+          setStatus("PGN скопирован в буфер обмена", "ok");
+        }
+      } catch (e) {
+        setStatus("Не удалось загрузить PGN: " + (e && e.message || e), "error");
+      } finally {
+        btnAnalyze.disabled = false;
+        btnAnalyze.textContent = oldText;
+      }
     };
   }
   renderGlobalLeaderboard();
@@ -12284,9 +12504,15 @@ function _notificationsConnect() {
   };
   es.onerror = () => {
     // Browser auto-reconnects on most failures; if it really dies,
-    // schedule a manual reopen.
+    // schedule a manual reopen with exponential backoff (1s → 2s →
+    // 4s … capped at 30s + ±20% jitter so a thundering herd of
+    // concurrent tabs doesn't sync up after a server restart).
     if (es.readyState === EventSource.CLOSED) {
-      state.notifications.reconnectTimer = setTimeout(_notificationsConnect, 4000);
+      const attempt = state.notifications.reconnectAttempts || 0;
+      const base = Math.min(30000, 1000 * Math.pow(2, attempt));
+      const jitter = base * (0.8 + Math.random() * 0.4);
+      state.notifications.reconnectAttempts = attempt + 1;
+      state.notifications.reconnectTimer = setTimeout(_notificationsConnect, jitter);
     }
   };
 }
@@ -12295,7 +12521,10 @@ function handleNotificationEvent(msg) {
   if (!msg || typeof msg !== "object") return;
   switch (msg.type) {
     case "hello":
-      // Snapshot of pending invitations on (re)connect.
+      // Snapshot of pending invitations on (re)connect. The server
+      // is back online → clear the backoff counter so the next blip
+      // restarts at 1s, not at whatever we'd grown to.
+      state.notifications.reconnectAttempts = 0;
       (msg.invitations || []).forEach((inv) => _showInvitationToast(inv));
       (msg.onevsone_challenges || []).forEach((ch) => _onevsoneShowChallengeToast(ch));
       break;
@@ -13361,4 +13590,44 @@ window.__chess = {
   tryOneVsOneMove,
   ensureOnevsoneWs: _onevsoneEnsureWs,
   renderOnevsoneMatchUi: _renderOnevsoneMatchUi,
+};
+
+// Small public surface for cross-view helpers. Currently only used
+// by the 1v1 finish modal to hand the freshly-built PGN over to the
+// Analysis view + auto-trigger engine review — but having a single
+// namespace lets future glue (e.g. opening trainer -> analysis) live
+// in one place instead of poking DOM ids directly.
+window.app = window.app || {};
+window.app.openPgnInAnalysis = async function (pgnText) {
+  if (typeof pgnText !== "string" || !pgnText.trim()) return;
+  // Switch to Analysis view first so the input + buttons exist in
+  // the DOM; setView is fire-and-forget so we just call it and
+  // expect the elements to be there on the next event-loop tick.
+  try { setView("review"); } catch (_) { /* ignore */ }
+  const src = document.getElementById("review-source");
+  const btnImport = document.getElementById("btn-review-import");
+  if (!src || !btnImport) {
+    // The Analysis view markup was renamed at some point — fall
+    // back to clipboard so the user can paste it manually.
+    try { await navigator.clipboard.writeText(pgnText); } catch (_) {}
+    setStatus("PGN скопирован в буфер обмена", "ok");
+    return;
+  }
+  src.value = pgnText;
+  btnImport.click();
+  // Kick analyse after import; the import handler is async and
+  // disables btn-review-analyse until the side-picker resolves, so
+  // poll briefly. 250ms × 40 = 10s ceiling — comfortably more than
+  // the local import path which is purely a PGN parse.
+  const start = Date.now();
+  const tick = async () => {
+    if (Date.now() - start > 10000) return;
+    const btnAn = document.getElementById("btn-review-analyse");
+    if (btnAn && !btnAn.disabled) {
+      btnAn.click();
+      return;
+    }
+    setTimeout(tick, 250);
+  };
+  setTimeout(tick, 400);
 };
