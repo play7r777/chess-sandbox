@@ -347,10 +347,32 @@ class AuthTokenMiddleware(BaseHTTPMiddleware):
         if not expected:
             return await call_next(request)
         path = request.url.path
-        if path in _AUTH_EXEMPT_PATHS or _is_static_asset_path(path):
-            return await call_next(request)
+        is_exempt = path in _AUTH_EXEMPT_PATHS or _is_static_asset_path(path)
         token = _auth_token_from_request(request)
-        if token is None or not hmac.compare_digest(token, expected):
+        token_valid = (
+            token is not None and hmac.compare_digest(token, expected)
+        )
+        if is_exempt:
+            # Static-asset & SPA-shell paths bypass the gate so the
+            # auth-required HTML can render. We still want to harvest a
+            # valid ``?token=`` from the *first* hit on ``/`` (or any
+            # exempt URL) and bake it into the ``chess_auth`` cookie so
+            # subsequent same-origin requests (heartbeat, /api/users,
+            # /api/notifications/stream, …) are authed automatically.
+            # Without this the SPA reloads itself trying to chase an
+            # auth cookie that the middleware kept silently dropping
+            # whenever the user landed on the SPA shell first.
+            response = await call_next(request)
+            if token_valid and request.cookies.get(_AUTH_COOKIE_NAME) != expected:
+                response.set_cookie(
+                    _AUTH_COOKIE_NAME,
+                    expected,
+                    max_age=60 * 60 * 24,
+                    httponly=True,
+                    samesite="lax",
+                )
+            return response
+        if not token_valid:
             # The SPA polls /api/auth/check to detect this state and
             # show the "enter token" view, so we return JSON rather than
             # a redirect.

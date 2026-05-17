@@ -5425,3 +5425,139 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border-radius: 999px;
   margin-left: auto;
 }
+
+/* ===========================================================
+   Puzzle Rush right-menu styling extended to the other puzzle
+   modes (Puzzles / Daily / Battle / Opening Trainer).
+   ---------------------------------------------------------------
+   Wraps each panel in the same chess.com dark gradient gray card
+   as `.cc-section.sidebar-component`, gives the `<h2>` heading
+   the same big bold title look, and tightens the inner card
+   surfaces so they sit on the gray container instead of painting
+   their own backgrounds.
+   =========================================================== */
+#panel-puzzle,
+#panel-daily,
+#panel-battle,
+#panel-opening {
+  --cc-green-200: #b2e068;
+  --cc-green-300: #81b64c;
+  --cc-green-400: #5d9948;
+  --cc-green-500: #45753c;
+  --cc-gray-700: #4b4847;
+  --cc-gray-800: #312e2b;
+  --cc-gray-900: #262421;
+  background: linear-gradient(180deg, #312e2b 0%, #262421 100%);
+  border: 1px solid #1d1b1a;
+  border-radius: 12px;
+  color: #d6d2cb;
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+  margin-bottom: 14px;
+}
+#panel-puzzle > h2,
+#panel-daily > h2,
+#panel-battle > h2,
+#panel-opening > h2 {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.005em;
+  color: #f5f2ec;
+  margin: 0 0 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  line-height: 1.1;
+}
+#panel-puzzle > h2 .puzzle-h-sub,
+#panel-daily > h2 .puzzle-h-sub,
+#panel-battle > h2 .puzzle-h-sub,
+#panel-opening > h2 .puzzle-h-sub {
+  font-size: 12px;
+  font-weight: 600;
+  color: #a09b91;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-left: 6px;
+}
+#panel-puzzle .panel-subtabs,
+#panel-daily .panel-subtabs {
+  margin: 0 0 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+/* Inner cards/buttons in the styled panels drop their own
+   solid surfaces so they sit on top of the gray container
+   without a "card-on-card" look. */
+#panel-puzzle .puzzle-card,
+#panel-daily .puzzle-card,
+#panel-opening .puzzle-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: none;
+  margin-bottom: 0;
+  color: #f5f2ec;
+}
+#panel-puzzle .puzzle-stats-bar,
+#panel-daily .puzzle-stats-bar,
+#panel-opening .puzzle-stats-bar {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 0;
+}
+#panel-puzzle .puzzle-actions,
+#panel-daily .puzzle-actions,
+#panel-opening .puzzle-actions {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 4px 0 0;
+  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+}
+#panel-puzzle .puzzle-history,
+#panel-daily .puzzle-history,
+#panel-opening .puzzle-history {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin-top: 4px;
+}
+/* Battle's body host (`#battle-body`) holds the entire match UI
+   (lobby tabs, scoreboard, in-game tiles). It already paints its
+   own surfaces, but the wrapping panel now provides the dark
+   gradient frame so things line up with rush visually. */
+#panel-battle #battle-body {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+/* Inline Play CTA: when the rush Play button sits inside the
+   sidebar's mode-cards container (instead of the separate
+   `#rush-actions` slot below) we don't need the outer block
+   margins — the surrounding `.sidebar-start-content` already
+   spaces it from the modes. */
+.cc-section.sidebar-component .cc-rush-cta-inline {
+  margin: 6px 0 0;
+}
+
+/* Clickable battle-results attempt rows — affordance for the
+   "click to replay this puzzle (no save)" gesture. */
+.party-results-attempt-row { cursor: pointer; }
+.party-results-attempt-row:hover {
+  background: rgba(129, 182, 76, 0.10);
+  outline: 1px solid rgba(129, 182, 76, 0.35);
+}
+.party-results-attempt-row:focus-visible {
+  outline: 2px solid #81b64c;
+  outline-offset: -2px;
+}

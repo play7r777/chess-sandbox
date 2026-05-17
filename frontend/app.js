@@ -726,6 +726,12 @@ const state = {
     needsNextOnReturn: false, // user left mid-pendingNext; advance when they come back
     timerHandle: null,        // setInterval handle for live timer display
     idle: true,               // gate auto-load behind a "Начать игру" click
+    // Replay-only mode: the user clicked a puzzle from a *Battle*
+    // results modal to re-attempt it. Stats, rating, history and the
+    // /api/users/puzzle_attempt POST are all suppressed so the
+    // attempt doesn't pollute the profile or leaderboards.
+    replayOnly: false,
+    replayMeta: null,         // optional { source: "battle", ... } for the sidebar banner
   },
   // Daily Puzzle — one shared puzzle per UTC day with leaderboard + streak.
   daily: {
@@ -4483,6 +4489,20 @@ function leavePuzzleView() {
   // `state.puzzle.startedAt`) so users can't dodge a hard puzzle by
   // bouncing tabs and hitting "Следующая" without penalty. Board input
   // is gated on `state.view === "puzzle"` instead of the active flag.
+  // Replay-only mode is single-shot — leaving the puzzle view ends
+  // the "no-save" session so the next regular puzzle resumes normal
+  // bookkeeping. The current puzzle object is also cleared so we
+  // don't accidentally "restore" the replay on re-entry.
+  if (state.puzzle.replayOnly) {
+    state.puzzle.replayOnly = false;
+    state.puzzle.replayMeta = null;
+    state.puzzle.current = null;
+    state.puzzle.moves = [];
+    state.puzzle.fenStart = null;
+    state.puzzle.side = null;
+    state.puzzle.feedback = null;
+    state.puzzle.idle = true;
+  }
   _stopPuzzleTimer();
   // Drop the solo-broadcast connection — outside puzzle view there's
   // nothing meaningful to broadcast and we don't want to clutter the
@@ -4890,6 +4910,18 @@ function finalizePuzzle(result) {
   }
   state.puzzle.feedback =
     (outcome === "solved" || outcome === "solved-hint") ? "solved" : "shown";
+  // Replay-only path: the user re-attempted a puzzle they clicked
+  // from a Battle results modal. Surface visual feedback but skip the
+  // rating math, session-stats updates, server attempt POST and the
+  // recent-id history so the replay never touches the profile or
+  // leaderboards.
+  if (state.puzzle.replayOnly) {
+    spawnPuzzleCelebration(outcome === "failed" || outcome === "skipped" ? "bad" : "ok");
+    renderPuzzleUi();
+    renderPuzzleStatsBar();
+    renderPuzzleHistory();
+    return;
+  }
   // Update session counters.
   const ss = state.puzzle.sessionStats;
   if (outcome === "solved" || outcome === "solved-hint") {
@@ -8551,10 +8583,18 @@ function _renderPartyResultsHTML(results, meta, opts) {
       const sym = outcome === "solved" ? "✔" : (outcome === "failed" ? "✘" : "↷");
       const themes = Array.isArray(a.themes) ? a.themes.slice(0, 3).join(" · ") : "";
       const score = Number(a.score || 0);
+      // Rows are made clickable when we have a puzzle_id so the user
+      // can re-attempt the exact puzzle (handler attached after the
+      // table mounts — see `openPartyResultDetail` / `_partyShowResults`).
+      // Replays never touch the rating / streak / server attempt log.
+      const pid = String(a.puzzle_id || "");
+      const rowAttrs = pid
+        ? `class="party-results-attempt-row" data-replay-puzzle-id="${escapeHtml(pid)}" tabindex="0" role="button" title="Решить ещё раз (не сохраняется)"`
+        : "";
       return `
-        <tr>
+        <tr ${rowAttrs}>
           <td class="party-results-num muted">${attempts.length - idx}</td>
-          <td><span class="party-results-attempt-id">#${escapeHtml(String(a.puzzle_id || ""))}</span></td>
+          <td><span class="party-results-attempt-id">#${escapeHtml(pid)}</span></td>
           <td class="party-results-num">${Number(a.rating || 0)}</td>
           <td class="party-results-num ${cls}">${sym}</td>
           <td class="party-results-num">${_formatSolveMs(a.solve_ms)}</td>
@@ -8564,7 +8604,7 @@ function _renderPartyResultsHTML(results, meta, opts) {
     }).join("");
     attemptsHtml = `
       <details class="party-results-attempts" open>
-        <summary>Ваши попытки (${attempts.length})</summary>
+        <summary>Ваши попытки (${attempts.length}) · <span class="muted">клик по строке — попробовать ещё раз</span></summary>
         <div class="party-results-tablewrap">
           <table class="party-results-table party-results-attempts-table">
             <thead>
@@ -8937,10 +8977,71 @@ function openPartyResultDetail(entry, opts) {
   body.querySelector("#btn-party-detail-close")?.addEventListener("click", () => {
     closePartyModal();
   });
+  // Make per-attempt rows clickable: re-attempt the exact puzzle in
+  // replay-only mode (no rating change, no streak update, no server
+  // attempt POST). The modal closes so the puzzle board is visible.
+  _bindPartyAttemptReplayRows(body);
 }
 
 // Expose so profile rows can call it through inline onclick fallbacks.
 window.openPartyResultDetail = openPartyResultDetail;
+
+// Wires click + keyboard activation on any `.party-results-attempt-row`
+// inside `root`. Each row carries `data-replay-puzzle-id`; activating it
+// closes the party modal and hands the puzzle id to `replayPuzzleById`
+// which loads the puzzle in replay-only mode (skips persistence).
+function _bindPartyAttemptReplayRows(root) {
+  if (!root) return;
+  const rows = root.querySelectorAll(".party-results-attempt-row[data-replay-puzzle-id]");
+  rows.forEach((row) => {
+    const pid = row.getAttribute("data-replay-puzzle-id") || "";
+    if (!pid) return;
+    const trigger = (ev) => {
+      ev.preventDefault();
+      try { closePartyModal(); } catch (_) { /* ignore */ }
+      replayPuzzleById(pid, { source: "battle" });
+    };
+    row.addEventListener("click", trigger);
+    row.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") trigger(ev);
+    });
+  });
+}
+
+// Re-attempt a specific puzzle by ID without touching rating, streak,
+// server attempts log or recent-id history. Used by the Battle Puzzle
+// results modal so users can drill down into a specific position they
+// (or someone in the lobby) ran into.
+async function replayPuzzleById(puzzleId, meta) {
+  const pid = String(puzzleId || "").trim();
+  if (!pid) return;
+  // Flip to the puzzle tab first so the spinner/loading message has
+  // somewhere to render (the puzzle-card is only present inside
+  // `#panel-puzzle`).
+  try { setView("puzzle"); } catch (_) { /* ignore */ }
+  state.puzzle.idle = false;
+  state.puzzle.replayOnly = true;
+  state.puzzle.replayMeta = meta && typeof meta === "object" ? { ...meta } : null;
+  const card = document.getElementById("puzzle-card");
+  const actions = document.getElementById("puzzle-actions");
+  if (card)    card.innerHTML = `<div class="puzzle-empty">Загружаем пазл #${escapeHtml(pid)}…</div>`;
+  if (actions) actions.innerHTML = "";
+  let p;
+  try {
+    p = await api(`/api/puzzles/${encodeURIComponent(pid)}`);
+  } catch (err) {
+    state.puzzle.replayOnly = false;
+    state.puzzle.replayMeta = null;
+    if (card) card.innerHTML =
+      `<div class="puzzle-empty">Не удалось загрузить пазл #${escapeHtml(pid)}: ${escapeHtml(String(err && err.message || err))}</div>`;
+    return;
+  }
+  startPuzzle(p);
+}
+
+// Expose so any future inline handler / external trigger can call it
+// without needing module scope.
+window.replayPuzzleById = replayPuzzleById;
 
 // ---------- Daily Puzzle / Puzzle Rush / Opening Trainer ----------
 //
@@ -10055,6 +10156,11 @@ function _renderRushSidebar(card, actions) {
           <div class="sidebar-start-cardContainer">
             ${modeButtons}
           </div>
+          <div class="cc-rush-cta cc-rush-cta-inline">
+            <button class="cc-button-component cc-button-primary cc-button-xx-large cc-bg-primary cc-button-full" type="button" data-cy="startSession" id="btn-cc-rush-play">
+              <span>Играть</span>
+            </button>
+          </div>
         </div>
       </div>
       <div role="tabpanel" aria-labelledby="rush-tab-leaderboard" id="rush-tabpanel-leaderboard" class="sidebar-start-tabpanel-rush-start" data-cc-tab-pane="leaderboard"${tab === "leaderboard" ? "" : " hidden"}>
@@ -10062,13 +10168,11 @@ function _renderRushSidebar(card, actions) {
       </div>
     </section>
   `;
-  actions.innerHTML = `
-    <div class="cc-rush-cta">
-      <button class="cc-button-component cc-button-primary cc-button-xx-large cc-bg-primary cc-button-full" type="button" data-cy="startSession" id="btn-cc-rush-play">
-        <span>Играть</span>
-      </button>
-    </div>
-  `;
+  // The big Play CTA used to live in a separate `#rush-actions` slot
+  // below the gray sidebar — we moved it inside the sidebar-content
+  // container (just under the 3/5/survival mode rows) so it sits in
+  // the same gray card as the mode pickers, per the requested layout.
+  actions.innerHTML = "";
   // Mode-button click — update the selection (no auto-start; the big
   // primary Play button below starts the chosen mode, matching the
   // chess.com flow).
@@ -10102,7 +10206,9 @@ function _renderRushSidebar(card, actions) {
       try { setView("main"); } catch (_) { /* ignore */ }
     });
   }
-  const playBtn = actions.querySelector("#btn-cc-rush-play");
+  // The Play button now lives inside `card` (under the modes) — query
+  // it there. The legacy `#rush-actions` host is intentionally empty.
+  const playBtn = card.querySelector("#btn-cc-rush-play");
   if (playBtn) {
     playBtn.addEventListener("click", () => {
       const mode = _rushSidebarState.selectedMode || "180";
