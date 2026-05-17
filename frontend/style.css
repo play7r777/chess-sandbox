@@ -5561,3 +5561,154 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   outline: 2px solid #81b64c;
   outline-offset: -2px;
 }
+
+/* ===========================================================
+   C8: Puzzle loading skeleton. Replaces the "Загружаем пазл #…"
+   text-only placeholder with a chess.com-style shimmer block so
+   users get an immediate "something is loading" cue (the puzzle
+   fetch can take >300ms on slow networks).
+   =========================================================== */
+.puzzle-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  min-height: 160px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.puzzle-skeleton-row {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.05) 0%,
+    rgba(255, 255, 255, 0.12) 50%,
+    rgba(255, 255, 255, 0.05) 100%
+  );
+  background-size: 200% 100%;
+  animation: puzzle-skel-shimmer 1.4s ease-in-out infinite;
+}
+.puzzle-skeleton-row.puzzle-skeleton-title { height: 22px; width: 60%; }
+.puzzle-skeleton-row.puzzle-skeleton-meta  { height: 12px; width: 80%; }
+.puzzle-skeleton-row.puzzle-skeleton-meta.short { width: 45%; }
+.puzzle-skeleton-hint {
+  margin-top: 4px;
+  font-size: 13px;
+}
+@keyframes puzzle-skel-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ===========================================================
+   Battle Puzzle Party Mode UI — team A / team B columns,
+   shared puzzle pool split per teammate, summed scores.
+   The host picks "solo" or "party" in the lobby modal; party
+   mode swaps the single scoreboard for a side-by-side team
+   layout. Each team's row shows summed score with a per-member
+   breakdown underneath.
+   =========================================================== */
+.party-mode-picker {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+.party-mode-pill {
+  flex: 1 1 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d6d2cb;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  text-align: center;
+}
+.party-mode-pill.is-selected {
+  background: rgba(129, 182, 76, 0.16);
+  border-color: #81b64c;
+  color: #f5f2ec;
+}
+.party-mode-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.party-team-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.party-team-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.party-team-card.team-A { border-left: 3px solid #4f9dde; }
+.party-team-card.team-B { border-left: 3px solid #e07b56; }
+.party-team-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-weight: 700;
+  font-size: 15px;
+}
+.party-team-card-score {
+  font-size: 18px;
+  color: #f5f2ec;
+}
+.party-team-card-members {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: #b8b3a9;
+}
+.party-team-member-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  align-items: center;
+}
+.party-team-member-row.is-self { color: #f5f2ec; font-weight: 600; }
+.party-team-member-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.party-team-member-score {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.party-team-pool-hint {
+  font-size: 11px;
+  color: #8c8779;
+  margin-top: 2px;
+}
+.party-team-picker {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 0;
+  flex-wrap: wrap;
+}
+.party-team-picker-btn {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d6d2cb;
+  font-size: 12px;
+  cursor: pointer;
+}
+.party-team-picker-btn.is-current {
+  background: rgba(129, 182, 76, 0.16);
+  border-color: #81b64c;
+  color: #f5f2ec;
+}

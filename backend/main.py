@@ -1866,17 +1866,43 @@ async def onevsone_match_pgn(
         raise HTTPException(status_code=404, detail="match_not_found")
     if m.player_for(client_id) is None:
         raise HTTPException(status_code=403, detail="not_a_player")
-    pgn_text = _onevsone_build_pgn(m)
+    try:
+        pgn_text = _onevsone_build_pgn(m)
+    except Exception:
+        logger.exception("onevsone: PGN build failed for match %s", match_id)
+        raise HTTPException(status_code=500, detail="pgn_build_failed") from None
     headers: dict[str, str] = {}
     if download:
-        # Sanitise nicknames for the filename — ASCII-only and stripped
-        # of path separators so a malicious nickname can't smuggle
-        # directory traversal into the Content-Disposition header.
-        def _slug(s: str) -> str:
+        # Build the filename in two layers so Cyrillic / emoji nicknames
+        # don't blow up Starlette's latin-1 header encoder (the previous
+        # version raised UnicodeEncodeError → 500 the moment somebody
+        # with a non-ASCII nick clicked "Скачать PGN").
+        #
+        # - ``filename=`` is the legacy fallback. It MUST be latin-1
+        #   safe, so we keep ASCII letters/digits/-/_ only and replace
+        #   everything else with a placeholder.
+        # - ``filename*=UTF-8''…`` is the RFC 5987 form. Browsers
+        #   that understand it (every modern one) show the original
+        #   Cyrillic name; older clients fall back to the ASCII one.
+        from urllib.parse import quote
+        def _ascii_slug(s: str) -> str:
+            keep = [c for c in s if c.isascii() and (c.isalnum() or c in ("-", "_"))]
+            return ("".join(keep) or "anon")[:24]
+        def _unicode_slug(s: str) -> str:
             keep = [c for c in s if c.isalnum() or c in ("-", "_")]
             return ("".join(keep) or "anon")[:24]
-        fname = f"sandbox_{_slug(m.white.nickname)}_vs_{_slug(m.black.nickname)}_{match_id}.pgn"
-        headers["Content-Disposition"] = f'attachment; filename="{fname}"'
+        ascii_name = (
+            f"sandbox_{_ascii_slug(m.white.nickname)}"
+            f"_vs_{_ascii_slug(m.black.nickname)}_{match_id}.pgn"
+        )
+        utf8_name = (
+            f"sandbox_{_unicode_slug(m.white.nickname)}"
+            f"_vs_{_unicode_slug(m.black.nickname)}_{match_id}.pgn"
+        )
+        headers["Content-Disposition"] = (
+            f'attachment; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{quote(utf8_name)}"
+        )
     return Response(
         content=pgn_text,
         media_type="application/x-chess-pgn; charset=utf-8",

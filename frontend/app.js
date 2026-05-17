@@ -7403,6 +7403,21 @@ function partyConnect(code) {
 
 function handlePartyMessage(msg) {
   if (!msg || typeof msg !== "object") return;
+  // B1: when the user is replaying a single puzzle from the Battle
+  // results modal (or any "replay only" context), the party WS may
+  // still be open and broadcasting fresh puzzles. Ignore anything
+  // that would mutate the board so the replay isn't yanked out from
+  // under the user. Chat/reaction/finish are still allowed through
+  // so the result screen stays in sync.
+  if (state.puzzle && state.puzzle.replayOnly) {
+    if (msg.type === "start"
+      || msg.type === "match_state"
+      || msg.type === "next_puzzle"
+      || msg.type === "scoreboard"
+      || msg.type === "eliminated") {
+      return;
+    }
+  }
   switch (msg.type) {
     case "chat":
     case "reaction":
@@ -9024,7 +9039,16 @@ async function replayPuzzleById(puzzleId, meta) {
   state.puzzle.replayMeta = meta && typeof meta === "object" ? { ...meta } : null;
   const card = document.getElementById("puzzle-card");
   const actions = document.getElementById("puzzle-actions");
-  if (card)    card.innerHTML = `<div class="puzzle-empty">Загружаем пазл #${escapeHtml(pid)}…</div>`;
+  // C8: render a skeleton block instead of a plain text line so users
+  // get an immediate "something is happening" cue even on a slow
+  // backend. The skeleton CSS lives in style.css (.puzzle-skeleton-*).
+  if (card) card.innerHTML = `
+    <div class="puzzle-skeleton" aria-live="polite" aria-busy="true">
+      <div class="puzzle-skeleton-row puzzle-skeleton-title"></div>
+      <div class="puzzle-skeleton-row puzzle-skeleton-meta"></div>
+      <div class="puzzle-skeleton-row puzzle-skeleton-meta short"></div>
+      <div class="puzzle-skeleton-hint muted">Загружаем пазл #${escapeHtml(pid)}…</div>
+    </div>`;
   if (actions) actions.innerHTML = "";
   let p;
   try {
@@ -10052,11 +10076,25 @@ const CC_STAT_RATING = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/s
 
 // Holds the in-memory selection for the rush picker so the sidebar
 // remembers which mode the user clicked between re-renders. Defaults
-// to "180" (3 min) — same as the legacy mode picker order.
+// to "180" (3 min) — same as the legacy mode picker order. The
+// selection is mirrored to localStorage (B2) so a page reload
+// restores whichever mode the user was working through, instead of
+// snapping back to 180 every time.
 const _rushSidebarState = {
-  selectedMode: "180",
+  selectedMode: (() => {
+    try {
+      const raw = localStorage.getItem("cs.rushMode");
+      return (raw === "180" || raw === "300" || raw === "survival") ? raw : "180";
+    } catch (_) {
+      return "180";
+    }
+  })(),
   tab: "play", // "play" | "leaderboard"
 };
+
+function _persistRushMode(mode) {
+  try { localStorage.setItem("cs.rushMode", String(mode || "180")); } catch (_) { /* ignore */ }
+}
 
 // Holds the in-memory tab + filter state for the battle sidebar so
 // switching online/offline / Play / Watch persists across re-renders
@@ -10179,6 +10217,7 @@ function _renderRushSidebar(card, actions) {
   card.querySelectorAll("[data-mode]").forEach((b) => {
     b.addEventListener("click", () => {
       _rushSidebarState.selectedMode = b.dataset.mode;
+      _persistRushMode(b.dataset.mode);
       card.querySelectorAll("[data-mode]").forEach((x) => {
         x.classList.toggle("cc-selected-border", x.dataset.mode === b.dataset.mode);
       });
@@ -13709,7 +13748,11 @@ window.app.openPgnInAnalysis = async function (pgnText) {
   // Switch to Analysis view first so the input + buttons exist in
   // the DOM; setView is fire-and-forget so we just call it and
   // expect the elements to be there on the next event-loop tick.
-  try { setView("review"); } catch (_) { /* ignore */ }
+  // The view key is "analysis" — "review" used to silently fall
+  // back to "main" because it isn't in the allow-list, which is
+  // exactly what made the post-1v1 game review look broken
+  // ("выбираешь сторону и просто перекидывает в вкладку Main").
+  try { setView("analysis"); } catch (_) { /* ignore */ }
   const src = document.getElementById("review-source");
   const btnImport = document.getElementById("btn-review-import");
   if (!src || !btnImport) {
