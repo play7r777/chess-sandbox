@@ -49,6 +49,21 @@ fi
 export CHESS_HOST=0.0.0.0
 export CHESS_PORT="$PORT"
 
+# Auto-generate CHESS_AUTH_TOKEN unless the user already exported one
+# or explicitly opted into the insecure path. The backend now refuses
+# to bind to a non-loopback host without a token because anyone with
+# the public URL could otherwise forge client_id and clobber another
+# player's profile.
+if [[ "${CHESS_ALLOW_INSECURE_PUBLIC:-0}" != "1" && -z "${CHESS_AUTH_TOKEN:-}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        CHESS_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+    else
+        CHESS_AUTH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    export CHESS_AUTH_TOKEN
+    echo "→ Сгенерирован CHESS_AUTH_TOKEN=$CHESS_AUTH_TOKEN"
+fi
+
 echo "→ Старт сервера на 0.0.0.0:$PORT ..."
 "$PY" -m uvicorn backend.main:app --host 0.0.0.0 --port "$PORT" &
 SERVER_PID=$!

@@ -60,6 +60,20 @@ if (-not (Test-Path $pythonExe)) {
 $env:CHESS_HOST = "0.0.0.0"
 $env:CHESS_PORT = "$Port"
 
+# Auto-generate CHESS_AUTH_TOKEN on first launch unless the user has
+# already exported one or explicitly opted into the insecure path.
+# Without this the backend now refuses to bind to a non-loopback host
+# because anyone with the public URL would be able to forge client_id
+# and overwrite somebody else's profile.
+$insecureOptIn = ($env:CHESS_ALLOW_INSECURE_PUBLIC -eq "1")
+if (-not $insecureOptIn -and [string]::IsNullOrEmpty($env:CHESS_AUTH_TOKEN)) {
+    $bytes = New-Object byte[] 16
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $token = [System.BitConverter]::ToString($bytes).Replace("-", "").ToLower()
+    $env:CHESS_AUTH_TOKEN = $token
+    Write-Host "-> Generated CHESS_AUTH_TOKEN=$token (visit URL with ?token=... once to set the cookie)" -ForegroundColor DarkGray
+}
+
 Write-Host "-> Starting server on 0.0.0.0:$Port ..." -ForegroundColor Cyan
 $server = Start-Process -PassThru -FilePath $pythonExe `
     -ArgumentList "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "$Port" `
@@ -102,11 +116,23 @@ try {
             }
         }
         if ($publicUrl) {
+            # Append the auth token so the first hit drops the
+            # ``chess_auth`` cookie and subsequent navigation / WS
+            # opens succeed without the URL parameter. Friends get
+            # ONE link to share — no copy-paste of the secret.
+            $shareUrl = $publicUrl
+            if (-not [string]::IsNullOrEmpty($env:CHESS_AUTH_TOKEN)) {
+                $shareUrl = "$publicUrl/?token=$($env:CHESS_AUTH_TOKEN)"
+            }
             Write-Host ""
-            Write-Host "OK  Public URL: $publicUrl" -ForegroundColor Green
+            Write-Host "OK  Public URL: $shareUrl" -ForegroundColor Green
             Write-Host "    Send it to your friends - they open it in a browser and play."
             Write-Host "    On the ngrok free plan first-time visitors see a 'Visit Site'"
             Write-Host "    warning page; one click and they're in."
+            if (-not [string]::IsNullOrEmpty($env:CHESS_AUTH_TOKEN)) {
+                Write-Host "    The ?token=... part is consumed once and stored in an HttpOnly" -ForegroundColor DarkGray
+                Write-Host "    cookie; reload/share without the suffix after the first visit." -ForegroundColor DarkGray
+            }
             Write-Host ""
         } else {
             Write-Host "Could not reach the ngrok API (http://127.0.0.1:4040)." -ForegroundColor Yellow
