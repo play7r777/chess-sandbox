@@ -44,6 +44,17 @@ PARTY_GRID_COL_HEIGHT = 10
 LOBBY_GRACE_SEC = 1800
 RECONNECT_GRACE_SEC = 30
 MAX_MEMBERS = 30
+# Party Mode (team-based Battle Puzzle). Two teams ("A" / "B"), each
+# capped at PARTY_TEAM_MAX members. The shared queue gets *partitioned*
+# across each team — every team-mate gets a different slice of puzzles
+# so the team can solve them in parallel; team score = sum of member
+# scores. Solo mode (the legacy behaviour) is preserved untouched.
+PARTY_KIND_SOLO = "solo"
+PARTY_KIND_PARTY = "party"
+PARTY_TEAM_MAX = 10
+PARTY_TEAM_A = "A"
+PARTY_TEAM_B = "B"
+PARTY_TEAMS: tuple[str, ...] = (PARTY_TEAM_A, PARTY_TEAM_B)
 # How many puzzles each match samples up-front. With a 10-minute
 # duration even the fastest solver rarely cracks more than a few hundred,
 # so 1000 leaves plenty of headroom while keeping the queue cheap to
@@ -289,6 +300,17 @@ class Member:
     # the value disappears with the player on ``leave``.
     last_chat_at: float = 0.0
     last_react_at: float = 0.0
+    # Party Mode team assignment — "A" / "B" when the lobby is in
+    # ``kind == "party"`` mode, ``None`` for solo / unassigned. The
+    # frontend lets each member pick their team in the lobby before
+    # the host presses Start; the host can also re-balance.
+    team: str | None = None
+    # Slice of the shared puzzle queue this member walks through. In
+    # solo mode every member walks the *same* queue (slice = [0..N));
+    # in Party Mode the queue is partitioned across the team so every
+    # team-mate sees a different chunk and the team can solve in
+    # parallel. Filled in by ``Party.start()``; empty until then.
+    queue_slice: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -336,6 +358,16 @@ class Party:
     mode: str = "standard"
     rating_min: int = 0
     rating_max: int = 0
+    # Match kind:
+    #   "solo": every member competes individually. Final scoreboard
+    #     ranks members by personal score. Legacy behaviour — default.
+    #   "party": two teams (``PARTY_TEAM_A`` / ``PARTY_TEAM_B``), each
+    #     capped at ``PARTY_TEAM_MAX`` members. The shared puzzle queue
+    #     is partitioned per team-mate so a 1-vs-2 team gets its 1 slice
+    #     split into 2 equal subranges for parallel solving; team score
+    #     = sum of members' scores. The host picks the kind in the
+    #     lobby before pressing Start.
+    kind: str = PARTY_KIND_SOLO
     # Append-only ring buffer of chat / reaction events. New attachees
     # replay this on join (see ``Party.public_state``) so a late-joining
     # spectator catches the recent banter context. Capped at
@@ -385,7 +417,60 @@ class Party:
             "attempts_grid": list(m.attempts_grid),
             "eliminated": m.eliminated_at is not None,
             "eliminated_at": int(m.eliminated_at) if m.eliminated_at else 0,
+            # Party Mode: team assignment ("A" / "B"), or None in solo.
+            # The frontend uses this to group rows into team columns and
+            # render summed team scores.
+            "team": m.team,
         }
+
+    def team_summary(self) -> list[dict[str, Any]]:
+        """Per-team aggregate: score sum, members, solved/failed totals.
+
+        Used by the frontend to render the side-by-side team scoreboard
+        in Party Mode. Returns ``[]`` for solo lobbies so callers can
+        cheaply detect "team display not needed".
+        """
+        if self.kind != PARTY_KIND_PARTY:
+            return []
+        teams: dict[str, dict[str, Any]] = {
+            t: {
+                "team": t,
+                "score": 0,
+                "solved": 0,
+                "failed": 0,
+                "skipped": 0,
+                "members": [],
+                "alive": 0,
+            }
+            for t in PARTY_TEAMS
+        }
+        for m in self.members.values():
+            t = m.team
+            if t not in teams:
+                continue
+            teams[t]["score"] += int(m.score)
+            teams[t]["solved"] += int(m.solved)
+            teams[t]["failed"] += int(m.failed)
+            teams[t]["skipped"] += int(m.skipped)
+            teams[t]["members"].append({
+                "client_id": m.client_id,
+                "nickname": m.nickname,
+                "avatar": m.avatar,
+                "score": int(m.score),
+                "solved": int(m.solved),
+                "failed": int(m.failed),
+                "lives": int(m.lives),
+                "eliminated": m.eliminated_at is not None,
+            })
+            if m.eliminated_at is None and m.lives > 0:
+                teams[t]["alive"] += 1
+        # Stable order: A first, then B; member rows sorted by score
+        # descending so the team card naturally highlights the top
+        # scorer at the top.
+        out = [teams[t] for t in PARTY_TEAMS]
+        for row in out:
+            row["members"].sort(key=lambda r: (-r["score"], r["nickname"] or ""))
+        return out
 
     def public_state(self) -> dict[str, Any]:
         return {
@@ -407,6 +492,11 @@ class Party:
             "rating_max": int(self.rating_max),
             "rating_envelope_min": PARTY_BAND_MIN,
             "rating_envelope_max": PARTY_BAND_MAX,
+            # Party Mode metadata. ``kind`` is always present so the
+            # frontend can branch UI on it; ``teams`` is empty in solo.
+            "kind": self.kind,
+            "teams": self.team_summary(),
+            "team_max": PARTY_TEAM_MAX,
             # Replay buffer of chat / reaction events so a fresh
             # attachee catches up on what was said before they joined.
             # Bounded at ``PARTY_CHAT_LOG_MAX`` so the payload stays
@@ -419,6 +509,114 @@ class Party:
         rows = [self.public_member(m) for m in self.members.values()]
         rows.sort(key=lambda r: (-r["score"], -r["solved"], r["nickname"] or ""))
         return rows
+
+    def set_kind(self, by_client_id: str, kind: str) -> None:
+        """Host-only — switch the lobby between solo and party kinds.
+
+        Switching to ``party`` keeps existing team assignments (so a
+        host re-toggling the picker doesn't shuffle everyone), then
+        auto-assigns any unassigned member to the smaller team.
+        Switching to ``solo`` clears all team assignments so the
+        frontend reverts to a single scoreboard.
+        """
+        if by_client_id != self.host_id:
+            raise PartyError("not_host", "Only the host can change kind")
+        if self.status != "lobby":
+            raise PartyError("in_progress", "Cannot change kind mid-match")
+        k = str(kind or "").strip().lower()
+        if k not in (PARTY_KIND_SOLO, PARTY_KIND_PARTY):
+            raise PartyError("bad_kind", "Unknown kind")
+        if k == self.kind:
+            return
+        self.kind = k
+        if k == PARTY_KIND_SOLO:
+            for m in self.members.values():
+                m.team = None
+            return
+        # Party: auto-assign any member without a team to the smaller
+        # team. Stable order = members dict insertion order so the host
+        # gets to A first (legacy chess.com vibe).
+        self._auto_balance_unassigned()
+
+    def _auto_balance_unassigned(self) -> None:
+        """Place members with ``team is None`` onto whichever team is
+        smaller (ties → A) so a Party-kind lobby never has stranded
+        un-teamed members. Caller must hold the room write-lock."""
+        counts = {t: 0 for t in PARTY_TEAMS}
+        for m in self.members.values():
+            if m.team in counts:
+                counts[m.team] += 1
+        for m in self.members.values():
+            if m.team in PARTY_TEAMS:
+                continue
+            # Pick the team with the fewest members; A wins on tie.
+            target = min(PARTY_TEAMS, key=lambda t: (counts[t], PARTY_TEAMS.index(t)))
+            if counts[target] >= PARTY_TEAM_MAX:
+                # All teams full — give up; member stays None and the
+                # frontend shows them as "spectator-ish" until the host
+                # frees a slot.
+                continue
+            m.team = target
+            counts[target] += 1
+
+    def set_team(self, by_client_id: str, target_client_id: str, team: str | None) -> None:
+        """Move a member onto a specific team (or clear them).
+
+        Members can move themselves; only the host can move others.
+        Raises if the destination team is full.
+        """
+        if self.status != "lobby":
+            raise PartyError("in_progress", "Cannot change teams mid-match")
+        if self.kind != PARTY_KIND_PARTY:
+            raise PartyError("bad_kind", "Team picker is only available in party mode")
+        m = self.members.get(target_client_id)
+        if m is None:
+            raise PartyError("not_a_member", "Unknown member")
+        if by_client_id != self.host_id and by_client_id != target_client_id:
+            raise PartyError("not_host", "Only the host can move other members")
+        if team is None:
+            m.team = None
+            return
+        t = str(team or "").strip().upper()
+        if t not in PARTY_TEAMS:
+            raise PartyError("bad_team", "Unknown team")
+        if m.team == t:
+            return
+        current = sum(1 for mm in self.members.values() if mm.team == t and mm.client_id != target_client_id)
+        if current >= PARTY_TEAM_MAX:
+            raise PartyError("team_full", "Team is full")
+        m.team = t
+
+    def balance_teams(self, by_client_id: str) -> None:
+        """Host-only — even out the two teams round-robin.
+
+        Useful when a lobby fills up unevenly (e.g. friends all joined
+        A first); the host clicks "Auto-balance" and the lobby reshuffles
+        members across A/B alternating in nickname order. Members can
+        still re-pick their own team afterwards.
+        """
+        if by_client_id != self.host_id:
+            raise PartyError("not_host", "Only the host can re-balance")
+        if self.status != "lobby":
+            raise PartyError("in_progress", "Cannot rebalance mid-match")
+        if self.kind != PARTY_KIND_PARTY:
+            raise PartyError("bad_kind", "Re-balance is only available in party mode")
+        ordered = sorted(self.members.values(), key=lambda m: (m.nickname.lower(), m.client_id))
+        # Alternate A/B but never exceed PARTY_TEAM_MAX per team.
+        counts = {t: 0 for t in PARTY_TEAMS}
+        for i, m in enumerate(ordered):
+            # Default round-robin pick (even → A, odd → B); fall back to
+            # the other team if the natural pick is full.
+            primary = PARTY_TEAMS[i % 2]
+            other = PARTY_TEAMS[(i + 1) % 2]
+            if counts[primary] < PARTY_TEAM_MAX:
+                m.team = primary
+                counts[primary] += 1
+            elif counts[other] < PARTY_TEAM_MAX:
+                m.team = other
+                counts[other] += 1
+            else:
+                m.team = None
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
         """Send to every connected member AND spectator."""
@@ -611,13 +809,16 @@ class Party:
         if m.eliminated_at is not None or m.lives <= 0:
             m.current_puzzle = None
             return None
-        # Cycle the shared queue so a fast solver who exhausts it before
-        # the timer ends keeps getting puzzles (in the same order — the
-        # comparison stays fair because every member sees the same
-        # rotation).
-        if not self.puzzle_queue:
+        # In Party Mode every team-mate has their own slice of the
+        # shared queue (built in ``start()``); in Solo mode every
+        # member walks the full shared queue. Either way we cycle so
+        # a fast solver who runs out before the timer keeps getting
+        # puzzles — fair because the comparison key is still
+        # (puzzle_id × solve_ms × score) the comparator sees first.
+        source = m.queue_slice if self.kind == PARTY_KIND_PARTY and m.queue_slice else self.puzzle_queue
+        if not source:
             return None
-        p = self.puzzle_queue[m.puzzle_index % len(self.puzzle_queue)]
+        p = source[m.puzzle_index % len(source)]
         m.puzzle_index += 1
         m.current_puzzle = p
         m.current_started_at = time.time()
@@ -941,6 +1142,21 @@ class Party:
             return
         if not self.members:
             raise PartyError("empty", "No members")
+        # Party Mode validation: both teams need to be non-empty so the
+        # final scoreboard isn't a one-team walkover. Auto-balance any
+        # un-teamed members first so the host doesn't have to drag every
+        # single late-joiner manually.
+        if self.kind == PARTY_KIND_PARTY:
+            self._auto_balance_unassigned()
+            team_counts = {t: 0 for t in PARTY_TEAMS}
+            for mm in self.members.values():
+                if mm.team in team_counts:
+                    team_counts[mm.team] += 1
+            if any(c == 0 for c in team_counts.values()):
+                raise PartyError(
+                    "team_empty",
+                    "Each team needs at least one member to start party mode",
+                )
         # Host can switch mode / rating range right at start time
         # without recreating the lobby — useful when they realize
         # right before the match begins they want a different bracket.
@@ -1005,6 +1221,39 @@ class Party:
             self.rating_max = min(PARTY_BAND_MAX, avg_rating + PARTY_BAND_HALF_WIDTH)
             self.puzzle_queue = _sample_band_queue(avg_rating, PARTY_QUEUE_SIZE)
         random.shuffle(self.puzzle_queue)
+        # Party Mode: partition the shared queue into per-team-mate
+        # slices so every member walks a *different* chunk in parallel
+        # (1-vs-2 → the duo each gets half the team's chunk; 5-vs-5
+        # → every member gets 1/5 of the queue). Both teams see the
+        # *same* underlying puzzles in the same global order — only
+        # the per-mate slice differs — so the team comparison stays
+        # fair: bigger teams gain parallelism, not access to easier
+        # puzzles.
+        if self.kind == PARTY_KIND_PARTY:
+            for team_id in PARTY_TEAMS:
+                team_members = [
+                    mm for mm in self.members.values() if mm.team == team_id
+                ]
+                # Stable order = nickname + client_id so a member who
+                # reconnects mid-lobby still gets the same slice as
+                # before.
+                team_members.sort(key=lambda mm: (mm.nickname.lower(), mm.client_id))
+                n = len(team_members)
+                if n <= 0:
+                    continue
+                qlen = len(self.puzzle_queue)
+                # Even split with a 1-puzzle remainder going to early
+                # members; works fine for n in [1..PARTY_TEAM_MAX].
+                base = qlen // n
+                extra = qlen % n
+                cursor = 0
+                for idx, mm in enumerate(team_members):
+                    take = base + (1 if idx < extra else 0)
+                    mm.queue_slice = self.puzzle_queue[cursor:cursor + take]
+                    cursor += take
+        else:
+            for mm in self.members.values():
+                mm.queue_slice = []
         for m in self.members.values():
             m.puzzle_index = 0
             p = self._next_puzzle_for(m)
@@ -1252,7 +1501,23 @@ class Party:
             except Exception:
                 # Profile write failures shouldn't take the room down.
                 pass
+        # Decorate every entry with the player's team so the result
+        # modal can group the rows under the team cards without
+        # rewriting a separate per-team payload.
+        for entry in results:
+            mm = self.members.get(entry["client_id"])
+            entry["team"] = mm.team if mm else None
         self.finished_results = results
+        # Party Mode: precompute the team leaderboard so the frontend
+        # doesn't have to re-derive it from the result rows. Empty list
+        # in solo so the same payload shape works for both kinds.
+        teams_final = self.team_summary()
+        if self.kind == PARTY_KIND_PARTY:
+            for tr in teams_final:
+                # Sort team members by score descending so the result
+                # modal naturally lists the top scorer at the top of
+                # each team card.
+                tr["members"].sort(key=lambda r: (-r["score"], r["nickname"] or ""))
         await self.broadcast(
             {
                 "type": "finish",
@@ -1266,6 +1531,11 @@ class Party:
                 "rating_max": int(self.rating_max),
                 "avg_rating": int(self.avg_rating),
                 "lives_per_player": PARTY_LIVES_PER_PLAYER,
+                # Party Mode payload — the frontend uses ``kind`` to
+                # decide between the solo leaderboard and the team
+                # card layout. ``teams`` is empty in solo.
+                "kind": self.kind,
+                "teams": teams_final,
             }
         )
 
@@ -1353,7 +1623,13 @@ class PartyError(Exception):
         self.message = message
 
 
-async def create_party(host_id: str, host_nickname: str, host_avatar: str) -> Party:
+async def create_party(
+    host_id: str,
+    host_nickname: str,
+    host_avatar: str,
+    *,
+    kind: str = PARTY_KIND_SOLO,
+) -> Party:
     async with _LOCK:
         # Drop any stale/empty lobbies the host owned previously.
         for old in list(_PARTIES.values()):
@@ -1361,19 +1637,28 @@ async def create_party(host_id: str, host_nickname: str, host_avatar: str) -> Pa
                 if time.time() - old.created_at > LOBBY_GRACE_SEC:
                     _PARTIES.pop(old.code, None)
         code = _new_code()
+        k = str(kind or "").strip().lower()
+        if k not in (PARTY_KIND_SOLO, PARTY_KIND_PARTY):
+            k = PARTY_KIND_SOLO
         party = Party(
             party_id=secrets.token_hex(8),
             code=code,
             host_id=host_id,
             created_at=time.time(),
+            kind=k,
         )
-        party.members[host_id] = Member(
+        host_member = Member(
             client_id=host_id,
             nickname=host_nickname[:32] or "Гость",
             avatar=_norm_avatar(host_avatar),
             ws=None,
             is_host=True,
+            # Drop the host straight onto team A in party kind so the
+            # first thing the lobby UI shows is a host card under the
+            # "A" column rather than a stranded "unassigned" row.
+            team=PARTY_TEAM_A if k == PARTY_KIND_PARTY else None,
         )
+        party.members[host_id] = host_member
         _PARTIES[code] = party
         return party
 

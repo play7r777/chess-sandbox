@@ -1111,12 +1111,21 @@ class PartyCreateRequest(BaseModel):
     mode: str = Field(default="standard", max_length=16)
     rating_min: int = Field(default=0, ge=0, le=4000)
     rating_max: int = Field(default=0, ge=0, le=4000)
+    # Match kind picked by the host: "solo" (legacy free-for-all) or
+    # "party" (team A vs team B, score-sum). Defaults to "solo" so
+    # existing clients keep working without any payload changes.
+    kind: str = Field(default="solo", max_length=16)
 
 
 @app.post("/api/party/create")
 async def party_create(req: PartyCreateRequest) -> dict[str, Any]:
     party_room.reap_idle()
-    p = await party_room.create_party(req.client_id, req.nickname, req.avatar)
+    p = await party_room.create_party(
+        req.client_id,
+        req.nickname,
+        req.avatar,
+        kind=req.kind,
+    )
     # Persist the host-picked mode + rating window onto the freshly
     # created Party. We do it *outside* `create_party()` so the helper
     # signature stays generic for tests; the mode round-trips through
@@ -1389,6 +1398,43 @@ async def _party_ws_player(
                 entry = await party.react(client_id, str(msg.get("code") or ""))
                 if entry is not None:
                     await party.broadcast(entry)
+            elif mtype == "set_kind":
+                # Party Mode: host toggles between solo (free-for-all)
+                # and party (team A vs team B). The new kind is
+                # broadcast as a fresh ``lobby`` event so every
+                # connected client repaints the picker + team grid.
+                try:
+                    party.set_kind(client_id, str(msg.get("kind") or ""))
+                    await party.broadcast({"type": "lobby", **party.public_state()})
+                except party_room.PartyError as e:
+                    await ws.send_json({"type": "error", "code": e.code, "message": e.message})
+            elif mtype == "set_team":
+                # Party Mode: members move themselves to A/B/None; the
+                # host can move anybody. Side-effect: re-broadcast the
+                # full lobby state so the team-grid totals + the per-
+                # team capacity warnings stay in sync everywhere.
+                target = str(msg.get("client_id") or client_id)
+                team_raw = msg.get("team")
+                team_val: str | None
+                if team_raw is None or team_raw == "":
+                    team_val = None
+                else:
+                    team_val = str(team_raw)
+                try:
+                    party.set_team(client_id, target, team_val)
+                    await party.broadcast({"type": "lobby", **party.public_state()})
+                except party_room.PartyError as e:
+                    await ws.send_json({"type": "error", "code": e.code, "message": e.message})
+            elif mtype == "balance_teams":
+                # Host-only: re-shuffle members round-robin across A/B
+                # so a lobby that organically ended up 6-vs-2 becomes
+                # 4-vs-4 instantly. The host clicks "Auto-balance" and
+                # then everyone repaints from the broadcast.
+                try:
+                    party.balance_teams(client_id)
+                    await party.broadcast({"type": "lobby", **party.public_state()})
+                except party_room.PartyError as e:
+                    await ws.send_json({"type": "error", "code": e.code, "message": e.message})
             elif mtype == "ping":
                 await ws.send_json({"type": "pong"})
             elif mtype == "leave":
