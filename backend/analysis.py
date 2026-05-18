@@ -382,24 +382,31 @@ def _parse_pgn(pgn_text: str) -> ImportedGame:
     for move in game.mainline_moves():
         moves_uci.append(move.uci())
         board.push(move)
-    # Tolerate single-line PGN payloads (see ``_normalise_pgn_text``).
-    # If parsing produced zero moves AND we recognise inline header
-    # tags, re-flow the text onto multiple lines and try once more
-    # before giving up.
-    if not moves_uci and "][" in pgn_text:
+    # Tolerate single-line / no-blank-line PGN payloads (see
+    # ``_normalise_pgn_text``). If parsing produced zero moves we
+    # re-flow the text on a best-effort basis and try once more
+    # before giving up. The previous guard only triggered when the
+    # text contained the literal substring ``"]["`` with no
+    # whitespace — but the 1v1 finish modal can hand us
+    # ``"] ["`` (space between tags) and the user can paste
+    # arbitrary single-line PGN where each tag is separated by a
+    # space. Detect any of those by re-running ``read_game`` on the
+    # normalised text whenever the first pass yielded zero moves.
+    if not moves_uci:
         fixed = _normalise_pgn_text(pgn_text)
-        retry = chess.pgn.read_game(io.StringIO(fixed))
-        if retry is not None:
-            retry_moves: list[str] = []
-            retry_board = retry.board()
-            for move in retry.mainline_moves():
-                retry_moves.append(move.uci())
-                retry_board.push(move)
-            if retry_moves:
-                headers = {k: v for k, v in retry.headers.items()}
-                starting_fen = headers.get("FEN", chess.STARTING_FEN)
-                moves_uci = retry_moves
-                pgn_text = fixed
+        if fixed != pgn_text:
+            retry = chess.pgn.read_game(io.StringIO(fixed))
+            if retry is not None:
+                retry_moves: list[str] = []
+                retry_board = retry.board()
+                for move in retry.mainline_moves():
+                    retry_moves.append(move.uci())
+                    retry_board.push(move)
+                if retry_moves:
+                    headers = {k: v for k, v in retry.headers.items()}
+                    starting_fen = headers.get("FEN", chess.STARTING_FEN)
+                    moves_uci = retry_moves
+                    pgn_text = fixed
     return ImportedGame(
         pgn=pgn_text.strip(),
         headers=headers,
