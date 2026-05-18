@@ -333,6 +333,44 @@ def _fetch_chesscom(url: str) -> ImportedGame:
     )
 
 
+def _normalise_pgn_text(pgn_text: str) -> str:
+    """Make a single-line PGN (or one with missing blank line between
+    headers and moves) parseable by python-chess.
+
+    PGN is whitespace-sensitive: each header must live on its own line
+    and there must be at least one blank line between the headers and
+    the first move number. ``<input type="text">`` strips newlines on
+    ``value =`` assignment, so when the 1v1 finish modal hands the
+    backend-built PGN to the Analysis view via the DOM round-trip the
+    request body that hits ``/api/game/import`` looks like
+    ``[Event "..."][Site "..."]...1. e4 e5 ...``. python-chess parses
+    that as an empty game (zero moves, all-default headers) and the
+    analyse endpoint then 422s on ``moves_uci``'s ``min_length=1``.
+
+    This shim inserts the missing newlines without altering the
+    content: every ``][`` between header tags becomes ``]\n[``, and
+    a blank line is inserted between the last header and the first
+    move token (or result token).
+    """
+    text = (pgn_text or "").strip()
+    if not text:
+        return text
+    # Re-flow header tags onto their own lines: ``][`` -> ``]\n[``.
+    rewritten = re.sub(r"\]\s*\[", "]\n[", text)
+    # If the headers section is followed directly by move text on the
+    # same line (``][White "..."]1. e4 ...``), insert a blank line
+    # between the closing bracket of the last tag and the first move
+    # number. The PGN move-section can also start with a result tag
+    # (``*``, ``1-0``, ``0-1``, ``1/2-1/2``); cover all four.
+    rewritten = re.sub(
+        r"\](\s*)(?=\d+\s*\.|\*|1-0|0-1|1/2-1/2)",
+        "]\n\n",
+        rewritten,
+        count=1,
+    )
+    return rewritten
+
+
 def _parse_pgn(pgn_text: str) -> ImportedGame:
     game = chess.pgn.read_game(io.StringIO(pgn_text))
     if game is None:
@@ -344,6 +382,24 @@ def _parse_pgn(pgn_text: str) -> ImportedGame:
     for move in game.mainline_moves():
         moves_uci.append(move.uci())
         board.push(move)
+    # Tolerate single-line PGN payloads (see ``_normalise_pgn_text``).
+    # If parsing produced zero moves AND we recognise inline header
+    # tags, re-flow the text onto multiple lines and try once more
+    # before giving up.
+    if not moves_uci and "][" in pgn_text:
+        fixed = _normalise_pgn_text(pgn_text)
+        retry = chess.pgn.read_game(io.StringIO(fixed))
+        if retry is not None:
+            retry_moves: list[str] = []
+            retry_board = retry.board()
+            for move in retry.mainline_moves():
+                retry_moves.append(move.uci())
+                retry_board.push(move)
+            if retry_moves:
+                headers = {k: v for k, v in retry.headers.items()}
+                starting_fen = headers.get("FEN", chess.STARTING_FEN)
+                moves_uci = retry_moves
+                pgn_text = fixed
     return ImportedGame(
         pgn=pgn_text.strip(),
         headers=headers,

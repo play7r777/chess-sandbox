@@ -138,6 +138,27 @@ class EnginePool:
     def pool_size(self) -> int:
         return self._pool_size
 
+    def current_state(self) -> dict[str, Any]:
+        """Snapshot of the currently-configured engine.
+
+        Safe to call before the pool is started — returns
+        ``{"running": False, ...}`` in that case. Used by the
+        ``/api/engine/state`` endpoint so non-host clients can mirror
+        the host's threads/hash/skill values in their read-only
+        engine panel without having to guess them.
+        """
+        return {
+            "running": self.is_running,
+            "path": self._path,
+            "pool_size": self._pool_size,
+            "options": {
+                "threads": self._options.threads,
+                "hash_mb": self._options.hash_mb,
+                "skill_level": self._options.skill_level,
+                "multi_pv": self._options.multi_pv,
+            },
+        }
+
     async def configure(
         self,
         path: str,

@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     # otherwise (the backend prints a loud warning at startup).
     auth_token: str = ""
 
+    # Separate "host" secret. Only requests that present this token
+    # (cookie / header / ``?host_token=`` query string) are allowed to
+    # change the shared Stockfish engine configuration — threads, hash
+    # MB, skill level, etc — because those settings are pooled across
+    # every connected player. Empty (default) means "the operator runs
+    # everything on 127.0.0.1 and trusts every reachable client" and
+    # the engine controls fall back to the legacy behaviour where any
+    # client may reconfigure the pool.
+    host_token: str = ""
+
     frontend_dir: Path = Path(__file__).resolve().parent.parent / "frontend"
     backend_root: Path = Path(__file__).resolve().parent
 

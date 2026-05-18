@@ -74,6 +74,18 @@ if (-not $insecureOptIn -and [string]::IsNullOrEmpty($env:CHESS_AUTH_TOKEN)) {
     Write-Host "-> Generated CHESS_AUTH_TOKEN=$token (visit URL with ?token=... once to set the cookie)" -ForegroundColor DarkGray
 }
 
+# Auto-generate CHESS_HOST_TOKEN. Only the operator's host URL gets
+# this baked in; the URL shared with friends keeps the auth token
+# only, so they can play but can't touch the shared Stockfish
+# settings (threads / hash / skill).
+if ([string]::IsNullOrEmpty($env:CHESS_HOST_TOKEN)) {
+    $bytes = New-Object byte[] 16
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $hostToken = [System.BitConverter]::ToString($bytes).Replace("-", "").ToLower()
+    $env:CHESS_HOST_TOKEN = $hostToken
+    Write-Host "-> Generated CHESS_HOST_TOKEN=$hostToken (host-only; engine settings)" -ForegroundColor DarkGray
+}
+
 Write-Host "-> Starting server on 0.0.0.0:$Port ..." -ForegroundColor Cyan
 $server = Start-Process -PassThru -FilePath $pythonExe `
     -ArgumentList "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "$Port" `
@@ -124,9 +136,19 @@ try {
             if (-not [string]::IsNullOrEmpty($env:CHESS_AUTH_TOKEN)) {
                 $shareUrl = "$publicUrl/?token=$($env:CHESS_AUTH_TOKEN)"
             }
+            $hostUrl = $shareUrl
+            if (-not [string]::IsNullOrEmpty($env:CHESS_HOST_TOKEN)) {
+                if ($shareUrl.Contains("?")) {
+                    $hostUrl = "$shareUrl&host_token=$($env:CHESS_HOST_TOKEN)"
+                } else {
+                    $hostUrl = "$shareUrl/?host_token=$($env:CHESS_HOST_TOKEN)"
+                }
+            }
             Write-Host ""
-            Write-Host "OK  Public URL: $shareUrl" -ForegroundColor Green
-            Write-Host "    Send it to your friends - they open it in a browser and play."
+            Write-Host "OK  Public URL (share with friends): $shareUrl" -ForegroundColor Green
+            if ($hostUrl -ne $shareUrl) {
+                Write-Host "    Your host URL (DO NOT share): $hostUrl" -ForegroundColor Cyan
+            }
             Write-Host "    On the ngrok free plan first-time visitors see a 'Visit Site'"
             Write-Host "    warning page; one click and they're in."
             if (-not [string]::IsNullOrEmpty($env:CHESS_AUTH_TOKEN)) {

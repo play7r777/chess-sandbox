@@ -64,6 +64,20 @@ if [[ "${CHESS_ALLOW_INSECURE_PUBLIC:-0}" != "1" && -z "${CHESS_AUTH_TOKEN:-}" ]
     echo "→ Сгенерирован CHESS_AUTH_TOKEN=$CHESS_AUTH_TOKEN"
 fi
 
+# Auto-generate CHESS_HOST_TOKEN. Only the operator's URL gets this
+# baked in (printed below as the "host URL"); the URL shared with
+# friends keeps CHESS_AUTH_TOKEN only, so they can play but can't
+# touch the shared Stockfish settings.
+if [[ -z "${CHESS_HOST_TOKEN:-}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        CHESS_HOST_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+    else
+        CHESS_HOST_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    export CHESS_HOST_TOKEN
+    echo "→ Сгенерирован CHESS_HOST_TOKEN=$CHESS_HOST_TOKEN (только для тебя)"
+fi
+
 echo "→ Старт сервера на 0.0.0.0:$PORT ..."
 "$PY" -m uvicorn backend.main:app --host 0.0.0.0 --port "$PORT" &
 SERVER_PID=$!
@@ -98,7 +112,18 @@ case "$TUNNEL" in
         if [[ -n "$URL" ]]; then
             echo
             echo "✓ Публичный URL: $URL"
-            echo "  Скинь кентам — они открывают в браузере и играют."
+            if [[ -n "${CHESS_AUTH_TOKEN:-}" ]]; then
+                echo "  Скинь кентам: $URL/?token=$CHESS_AUTH_TOKEN"
+            else
+                echo "  Скинь кентам — они открывают в браузере и играют."
+            fi
+            if [[ -n "${CHESS_HOST_TOKEN:-}" ]]; then
+                if [[ -n "${CHESS_AUTH_TOKEN:-}" ]]; then
+                    echo "  Твой host URL: $URL/?token=$CHESS_AUTH_TOKEN&host_token=$CHESS_HOST_TOKEN"
+                else
+                    echo "  Твой host URL: $URL/?host_token=$CHESS_HOST_TOKEN"
+                fi
+            fi
             echo
         else
             echo "Не смог достучаться до ngrok API (http://127.0.0.1:4040)."

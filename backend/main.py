@@ -212,6 +212,12 @@ def _print_bind_banner() -> None:
     setting ``CHESS_ALLOW_INSECURE_PUBLIC=1``.
     """
     if settings.host_is_loopback():
+        if settings.host_token:
+            print(
+                "[chess-sandbox] CHESS_HOST_TOKEN включён — настройки "
+                "Stockfish (Threads / Hash / Skill) доступны только при "
+                "открытии URL с ?host_token=<секрет>."
+            )
         return
     if settings.auth_token:
         print(
@@ -219,6 +225,12 @@ def _print_bind_banner() -> None:
             f"CHESS_AUTH_TOKEN включён — клиенты должны открывать URL с "
             f"?token=<секрет>."
         )
+        if settings.host_token:
+            print(
+                "[chess-sandbox] CHESS_HOST_TOKEN включён — параметры "
+                "движка может менять только владелец сервера, "
+                "открывший URL с ?host_token=<секрет>."
+            )
         return
     import os
     if os.environ.get("CHESS_ALLOW_INSECURE_PUBLIC") == "1":
@@ -302,6 +314,7 @@ _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset({
 })
 
 _AUTH_COOKIE_NAME = "chess_auth"
+_HOST_COOKIE_NAME = "chess_host"
 
 
 def _auth_token_from_request(request: Request) -> str | None:
@@ -316,6 +329,56 @@ def _auth_token_from_request(request: Request) -> str | None:
     if cookie:
         return cookie
     return None
+
+
+def _host_token_from_request(request: Request) -> str | None:
+    """Pull the host bearer token from header / query / cookie."""
+    header = request.headers.get("x-chess-host-token")
+    if header:
+        return header
+    qs = request.query_params.get("host_token")
+    if qs:
+        return qs
+    cookie = request.cookies.get(_HOST_COOKIE_NAME)
+    if cookie:
+        return cookie
+    return None
+
+
+def _is_host_request(request: Request) -> bool:
+    """Decide whether the caller is the operator who launched the server.
+
+    Two paths grant host privileges:
+
+    1. ``settings.host_token`` is set and the request presents that
+       same value via header / query / cookie. This is the canonical
+       mechanism used by the public-tunnel launcher scripts, which
+       auto-generate a fresh token and bake it into the host's URL.
+    2. ``settings.host_token`` is empty AND the request comes from a
+       loopback peer (``127.0.0.1`` / ``::1`` / the configured loopback
+       hostname). When no token is configured we fall back to "anyone
+       on localhost owns the box" so a default local install can still
+       tune the engine without any extra setup.
+    """
+    expected = settings.host_token
+    if expected:
+        token = _host_token_from_request(request)
+        return token is not None and hmac.compare_digest(token, expected)
+    client = request.client
+    if client is None or not client.host:
+        return False
+    try:
+        return ipaddress_is_loopback(client.host)
+    except Exception:
+        return False
+
+
+def ipaddress_is_loopback(host: str) -> bool:
+    import ipaddress
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.strip().lower() in {"localhost", "ip6-localhost"}
 
 
 def _is_static_asset_path(path: str) -> bool:
@@ -343,9 +406,36 @@ class AuthTokenMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        # Host-token cookie pinning runs regardless of whether the
+        # auth-token gate is active: a tunnel launcher can bake a
+        # ``?host_token=...`` into its own copy of the URL while still
+        # leaving CHESS_AUTH_TOKEN empty (or set to a separate value
+        # shared with friends). Picking the cookie up here means the
+        # host's first visit upgrades them in one round-trip and every
+        # subsequent request, including WebSocket handshakes, carries
+        # the cookie without keeping the secret in the URL bar.
+        host_expected = settings.host_token
+        host_token = _host_token_from_request(request) if host_expected else None
+        host_token_valid = (
+            host_token is not None
+            and host_expected != ""
+            and hmac.compare_digest(host_token, host_expected)
+        )
+
+        def _stamp_host_cookie(resp):
+            if host_token_valid and request.cookies.get(_HOST_COOKIE_NAME) != host_expected:
+                resp.set_cookie(
+                    _HOST_COOKIE_NAME,
+                    host_expected,
+                    max_age=60 * 60 * 24 * 30,  # 30 days — host rarely rotates
+                    httponly=True,
+                    samesite="lax",
+                )
+            return resp
+
         expected = settings.auth_token
         if not expected:
-            return await call_next(request)
+            return _stamp_host_cookie(await call_next(request))
         path = request.url.path
         is_exempt = path in _AUTH_EXEMPT_PATHS or _is_static_asset_path(path)
         token = _auth_token_from_request(request)
@@ -371,7 +461,7 @@ class AuthTokenMiddleware(BaseHTTPMiddleware):
                     httponly=True,
                     samesite="lax",
                 )
-            return response
+            return _stamp_host_cookie(response)
         if not token_valid:
             # The SPA polls /api/auth/check to detect this state and
             # show the "enter token" view, so we return JSON rather than
@@ -392,7 +482,7 @@ class AuthTokenMiddleware(BaseHTTPMiddleware):
                 httponly=True,
                 samesite="lax",
             )
-        return response
+        return _stamp_host_cookie(response)
 
 
 app.add_middleware(AuthTokenMiddleware)
@@ -405,11 +495,22 @@ async def auth_check(request: Request) -> dict[str, Any]:
     holds a valid one. Always responds 200 — the body says whether
     the SPA needs to prompt for a token."""
     expected = settings.auth_token
+    is_host = _is_host_request(request)
     if not expected:
-        return {"auth_required": False, "authenticated": True}
+        return {
+            "auth_required": False,
+            "authenticated": True,
+            "is_host": is_host,
+            "host_token_required": bool(settings.host_token),
+        }
     token = _auth_token_from_request(request)
     ok = token is not None and hmac.compare_digest(token, expected)
-    return {"auth_required": True, "authenticated": ok}
+    return {
+        "auth_required": True,
+        "authenticated": ok,
+        "is_host": is_host,
+        "host_token_required": bool(settings.host_token),
+    }
 
 
 @app.get("/api/health")
@@ -426,8 +527,37 @@ async def health() -> dict[str, Any]:
     }
 
 
+def _broadcast_engine_state() -> asyncio.Task:
+    """Fire-and-forget SSE broadcast of the current engine state.
+
+    Returns the task so callers can await it explicitly when the test
+    suite needs determinism; production code drops the reference.
+    """
+    return asyncio.create_task(
+        notifications_db.broadcast(
+            {"type": "engine_state", "engine": engine.current_state()}
+        )
+    )
+
+
+@app.get("/api/engine/state")
+async def engine_state() -> dict[str, Any]:
+    """Current engine configuration. Readable by every authed client
+    so a non-host's UI can mirror the host's threads/hash/skill."""
+    return {"engine": engine.current_state()}
+
+
 @app.post("/api/engine/configure")
-async def engine_configure(req: EngineConfigRequest) -> dict[str, Any]:
+async def engine_configure(req: EngineConfigRequest, request: Request) -> dict[str, Any]:
+    if not _is_host_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only the server host can change Stockfish settings. "
+                "The host token is set by start-public.{sh,ps1} and "
+                "baked into the host's URL."
+            ),
+        )
     path = req.path or settings.resolve_stockfish_path()
     if not path:
         raise HTTPException(
@@ -448,6 +578,7 @@ async def engine_configure(req: EngineConfigRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Binary not found: {exc}") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Engine init failed: {exc}") from exc
+    _broadcast_engine_state()
     return {"ok": True, "engine": info}
 
 
@@ -499,8 +630,14 @@ async def engine_analyse(req: AnalyseRequest) -> dict[str, Any]:
 
 
 @app.post("/api/engine/stop")
-async def engine_stop() -> dict[str, Any]:
+async def engine_stop(request: Request) -> dict[str, Any]:
+    if not _is_host_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the server host can stop the shared Stockfish engine.",
+        )
     await engine.stop()
+    _broadcast_engine_state()
     return {"ok": True}
 
 
@@ -1235,6 +1372,7 @@ async def notifications_stream(
             hello = {
                 "type": "hello",
                 "invitations": notifications_db.pending_invitations_for(client_id),
+                "engine": engine.current_state(),
             }
             yield f"data: {json.dumps(hello)}\n\n"
             while True:

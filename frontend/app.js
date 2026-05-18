@@ -684,6 +684,11 @@ const state = {
   engine: {
     running: false,
     path: null,
+    // Set from /api/auth/check at boot and from the SSE engine_state
+    // frame whenever the host reconfigures the pool. Drives whether
+    // the engine panel renders read-only.
+    isHost: false,
+    hostTokenRequired: false,
   },
   // Review-mode visuals.
   bestArrow: null,        // { from, to } — primary green arrow on board
@@ -1693,6 +1698,20 @@ function tryFreeplayMove(from, to) {
   setStatus(`Ход: ${move.san}.`);
   // Freeplay: the user controls both sides, treat every move as "own".
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
+  // Analysis sandbox: when the user is exploring a what-if line from
+  // the imported game (legal-mode toggle on, analysis view, no drill /
+  // puzzle / daily / rush / opening "answer" mode active), update the
+  // eval bar so the position evaluation tracks the user's variation
+  // just like chess.com's "Try yourself" mode. We skip everything
+  // except the analysis view because no other view shows the bar in
+  // freeplay.
+  if (state.view === "analysis") {
+    try {
+      const fen = c.fen();
+      const stm = (fen.split(/\s+/)[1] || "w") === "w" ? "w" : "b";
+      _scheduleLiveEvalBarUpdate(fen, stm);
+    } catch (_) { /* ignore */ }
+  }
 }
 
 function ensureFreeplayChess() {
@@ -2457,6 +2476,78 @@ async function refreshEngineStatus() {
   }
 }
 
+// Apply an engine-state payload from the SSE hello / engine_state
+// frame to the panel controls. ``state`` shape mirrors
+// EnginePool.current_state() — see backend/stockfish_engine.py.
+// We only OVERWRITE inputs we don't currently own the focus on, so
+// the host can keep typing into Path / Threads while concurrent
+// updates arrive without their text getting blown away.
+function _applyEngineState(snap) {
+  if (!snap || typeof snap !== "object") return;
+  const pathEl = document.getElementById("engine-path");
+  const threadsEl = document.getElementById("engine-threads");
+  const hashEl = document.getElementById("engine-hash");
+  const skillEl = document.getElementById("engine-skill");
+  const statusEl = document.getElementById("engine-status");
+  state.engine.running = !!snap.running;
+  state.engine.path = snap.path || null;
+  if (statusEl) {
+    statusEl.textContent = snap.running ? `работает: ${snap.path || ""}` : "не настроен";
+    statusEl.className = snap.running ? "ok" : "muted";
+  }
+  const opts = snap.options || {};
+  // Only stomp a non-focused field; otherwise we'd erase the host's
+  // half-typed value mid-edit when the broadcast lands on their own
+  // tab. (Browsers report the active element via document.activeElement.)
+  const active = document.activeElement;
+  if (pathEl && pathEl !== active && snap.path) pathEl.value = snap.path;
+  if (threadsEl && threadsEl !== active && typeof opts.threads === "number") {
+    threadsEl.value = String(opts.threads);
+  }
+  if (hashEl && hashEl !== active && typeof opts.hash_mb === "number") {
+    hashEl.value = String(opts.hash_mb);
+  }
+  if (skillEl && skillEl !== active && typeof opts.skill_level === "number") {
+    skillEl.value = String(opts.skill_level);
+  }
+}
+
+// Toggle host-mode UI affordances. Non-host visitors get a read-only
+// engine panel with disabled inputs / hidden buttons + a banner that
+// explains the host owns the shared Stockfish pool. The host sees
+// the panel exactly as before.
+function _setHostMode({ isHost, hostTokenRequired }) {
+  state.engine.isHost = !!isHost;
+  state.engine.hostTokenRequired = !!hostTokenRequired;
+  const banner = document.getElementById("engine-readonly-banner");
+  const pathEl = document.getElementById("engine-path");
+  const threadsEl = document.getElementById("engine-threads");
+  const hashEl = document.getElementById("engine-hash");
+  const skillEl = document.getElementById("engine-skill");
+  const btnConfigure = document.getElementById("btn-engine-configure");
+  const btnStop = document.getElementById("btn-engine-stop");
+  // Only lock the panel when the host explicitly gated it with a
+  // token. On a default local install everyone on 127.0.0.1 is
+  // "host" so the legacy behaviour (every tab can reconfigure) is
+  // preserved.
+  const readOnly = hostTokenRequired && !isHost;
+  if (banner) banner.hidden = !readOnly;
+  [pathEl, threadsEl, hashEl, skillEl].forEach((el) => {
+    if (!el) return;
+    el.disabled = readOnly;
+    if (readOnly) el.setAttribute("title", "Параметры задаёт хост");
+    else el.removeAttribute("title");
+  });
+  if (btnConfigure) {
+    btnConfigure.disabled = readOnly;
+    btnConfigure.hidden = readOnly;
+  }
+  if (btnStop) {
+    btnStop.disabled = readOnly;
+    btnStop.hidden = readOnly;
+  }
+}
+
 function intOrDefault(value, fallback) {
   const n = parseInt(value, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -2879,6 +2970,14 @@ function applyChessMoveToBoard(move) {
   state.game.history.push(move.san);
   renderBoard();
   renderHistory();
+  // Live eval bar in vs-Stockfish: kick a quick analyse after every
+  // ply (engine + player) so the bar tracks the actual game state.
+  try {
+    const fen = state.game.chess.fen();
+    const stm = (fen.split(/\s+/)[1] || "w") === "w" ? "w" : "b";
+    _refreshEvalBarVisibility();
+    _scheduleLiveEvalBarUpdate(fen, stm);
+  } catch (_) { /* ignore */ }
 }
 
 function gameStateText() {
@@ -3219,12 +3318,60 @@ function setView(view) {
   if (prev === "opening" && v !== "opening") leaveOpeningView();
   if (prev === "battle" && v !== "battle") leaveBattleView();
   if (prev === "onevsone" && v !== "onevsone" && typeof leaveOneVsOneView === "function") leaveOneVsOneView();
+  // Mode-switch state cleanup. Without this, residual flags from the
+  // previous view (state.game.active from a vs-Stockfish session,
+  // state.puzzle.active from a puzzle that was never solved, a stuck
+  // drill or rush, etc) cause move-dispatch in the new view to be
+  // intercepted by the wrong handler:
+  //   - vs-engine flow checks state.game.active FIRST in handleDrop /
+  //     handleSquareClick, so a leftover true value swallows every
+  //     1v1 drag/click as an "engine move".
+  //   - tryFreeplayMove routes to tryPuzzleMove whenever
+  //     state.puzzle.active is true AND the view is "puzzle", so an
+  //     unsolved puzzle would otherwise haunt the sandbox if the user
+  //     ever lands back on puzzles via the tab.
+  // The fix is conservative: only clear flags that gate move dispatch
+  // and do it only when we're actually changing views, so no other
+  // state (history, leaderboard etc) is touched.
+  if (prev !== v) {
+    if (state.game && state.game.active && v !== "main") {
+      try { if (typeof stopGame === "function") stopGame(); } catch (_) { /* ignore */ }
+      state.game.active = false;
+      state.game.premoves = [];
+      state.game.premoveChess = null;
+    }
+    if (state.drill && state.drill.active && v !== "battle") {
+      state.drill.active = false;
+    }
+    if (state.puzzle && state.puzzle.active && v !== "puzzle") {
+      state.puzzle.active = false;
+    }
+    if (state.daily && state.daily.active && v !== "daily") {
+      state.daily.active = false;
+    }
+    if (state.rush && state.rush.active && v !== "rush") {
+      state.rush.active = false;
+    }
+    if (state.opening && state.opening.active && v !== "opening") {
+      state.opening.active = false;
+    }
+    // Drop any half-finished click-to-select / drag-highlight from the
+    // previous view so the new view doesn't paint stale "legal target"
+    // squares on its first render.
+    state.selectedSquare = null;
+    state.legalTargets = [];
+  }
   if (v === "puzzle")       enterPuzzleView();
   else if (v === "daily")   enterDailyView();
   else if (v === "rush")    enterRushView();
   else if (v === "battle")  enterBattleView();
   else if (v === "opening") enterOpeningView();
   else if (v === "onevsone" && typeof enterOneVsOneView === "function") enterOneVsOneView();
+  // Eval bar visibility tracks the current view. Analysis already
+  // toggles it via revealEvalBar() when the user imports a game;
+  // 1v1 and vs-Stockfish enable it from their respective enter
+  // hooks. Other views (sandbox, puzzles, rush, …) hide it.
+  try { _refreshEvalBarVisibility(); } catch (_) { /* ignore */ }
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
@@ -3781,6 +3928,146 @@ function revealEvalBar() {
 function hideEvalBar() {
   const bar = document.getElementById("eval-bar");
   if (bar) bar.hidden = true;
+}
+
+// Views that should display the live eval bar. Analysis always shows
+// it (filled from the loaded review); 1v1 and vs-Stockfish show it
+// once the position changes for the first time.
+const _EVAL_BAR_VIEWS = new Set(["analysis", "onevsone", "main"]);
+
+// Decide whether the eval bar should currently be visible based on
+// active view + sub-state. Called from setView() and from move
+// dispatchers so the bar appears as soon as a game starts.
+function _refreshEvalBarVisibility() {
+  const v = state.view;
+  if (!_EVAL_BAR_VIEWS.has(v)) {
+    hideEvalBar();
+    return;
+  }
+  if (v === "analysis") {
+    // Analysis owns its own visibility — only reveal once a review is
+    // loaded. Skip toggling here so we don't flicker the bar on top
+    // of the import form.
+    return;
+  }
+  if (v === "onevsone") {
+    const m = state.onevsone && state.onevsone.match;
+    if (m && !m.finished) { revealEvalBar(); return; }
+    hideEvalBar();
+    return;
+  }
+  if (v === "main") {
+    if (state.game && state.game.active) { revealEvalBar(); return; }
+    hideEvalBar();
+    return;
+  }
+}
+
+// Quick centipawn evaluation for an arbitrary FEN. Used outside
+// analysis (1v1, vs-Stockfish, sandbox-from-position) to drive the
+// live eval bar. Uses a short movetime to keep latency low; falls
+// back to a static heuristic when the server doesn't have a running
+// engine. Returns a value in white-POV centipawns or null if both
+// paths fail. Results are cached by FEN to avoid re-hitting the
+// engine for the same position twice in a row (e.g. when the player
+// flips the board or re-renders).
+const _evalBarCache = new Map();
+const _EVAL_BAR_CACHE_MAX = 256;
+
+function _evalBarCachePut(fen, cp) {
+  if (typeof cp !== "number") return;
+  _evalBarCache.set(fen, cp);
+  // Keep the cache small to dodge unbounded growth in marathon
+  // analysis sessions. ``Map`` preserves insertion order, so the
+  // oldest key falls out when we go over the cap.
+  if (_evalBarCache.size > _EVAL_BAR_CACHE_MAX) {
+    const firstKey = _evalBarCache.keys().next().value;
+    _evalBarCache.delete(firstKey);
+  }
+}
+
+async function _evalBarForFen(fen) {
+  if (typeof fen !== "string" || !fen) return null;
+  if (_evalBarCache.has(fen)) return _evalBarCache.get(fen);
+  // Stockfish path. ``movetime_ms`` is intentionally tiny — the eval
+  // bar wants "directional" not "tournament-grade". A 250ms search
+  // pegs depth around 12-14, more than enough to spot a forced mate
+  // in 5-6 ply and to render a stable bar without burning CPU on
+  // every move. The endpoint already 409s if the engine isn't
+  // running; we catch it below and fall through to the static eval.
+  try {
+    const resp = await fetch("/api/engine/analyse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fen, movetime_ms: 250, multipv: 1 }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      const line = (data && data.lines && data.lines[0]) || null;
+      if (line) {
+        // ``score_cp`` is from the side-to-move POV; convert to white
+        // POV for the bar (positive = white better).
+        const stm = (fen.split(/\s+/)[1] || "w") === "w" ? "w" : "b";
+        let cp = null;
+        if (typeof line.score_mate === "number") {
+          // ±100000 sentinel — same encoding the analysis review
+          // pipeline uses so updateEvalBar() renders "Mx" correctly.
+          const sign = line.score_mate > 0 ? 1 : -1;
+          const fromStm = sign * (100000 - Math.abs(line.score_mate));
+          cp = stm === "w" ? fromStm : -fromStm;
+        } else if (typeof line.score_cp === "number") {
+          cp = stm === "w" ? line.score_cp : -line.score_cp;
+        }
+        if (cp !== null) {
+          _evalBarCachePut(fen, cp);
+          return cp;
+        }
+      }
+    }
+  } catch (_) { /* ignore — fall through */ }
+  // Engine unavailable — fall back to a quick static material count so
+  // the bar still moves on every capture and the user has *something*
+  // rather than a frozen "0.0".
+  try {
+    const c = new Chess(fen);
+    const material = _staticMaterialCp(c);
+    _evalBarCachePut(fen, material);
+    return material;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _staticMaterialCp(c) {
+  // Crude material-balance heuristic in centipawns from white's POV.
+  // Pawn=100, N=320, B=330, R=500, Q=900. Used only when the engine
+  // pool can't help (e.g. host hasn't configured a binary yet) so the
+  // live eval bar still tracks captures.
+  const W = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 0 };
+  let cp = 0;
+  const board = c.board ? c.board() : [];
+  for (const row of board) {
+    for (const sq of row) {
+      if (!sq) continue;
+      const v = W[sq.type] || 0;
+      cp += sq.color === "w" ? v : -v;
+    }
+  }
+  return cp;
+}
+
+// Schedule a live eval-bar update for the given FEN. Coalesces rapid
+// callers (e.g. premove queue stutter) by remembering the most recent
+// FEN we asked for and discarding stale responses.
+let _evalBarPendingFen = null;
+function _scheduleLiveEvalBarUpdate(fen, moverSide) {
+  if (typeof fen !== "string" || !fen) return;
+  _evalBarPendingFen = fen;
+  _evalBarForFen(fen).then((cp) => {
+    if (_evalBarPendingFen !== fen) return; // stale
+    if (typeof cp !== "number") return;
+    try { updateEvalBar(cp, moverSide || "w"); } catch (_) { /* ignore */ }
+  }).catch(() => { /* ignore */ });
 }
 
 // Map cp (white POV) to a 0..1 fraction of board-height occupied by white.
@@ -11880,6 +12167,17 @@ function _renderOnevsoneMatchUi() {
     ? { from: m.history[m.history.length - 1].from, to: m.history[m.history.length - 1].to }
     : null;
   renderBoard();
+  // Live eval bar: reflects the *current* position (m.fen) from
+  // white's POV. When the match ends (or just landed in the lobby)
+  // _refreshEvalBarVisibility() hides the bar; while the match is
+  // running we kick a 250ms Stockfish ping per move.
+  try {
+    _refreshEvalBarVisibility();
+    if (!finished) {
+      const stmFen = (m.fen.split(/\s+/)[1] || "w") === "w" ? "w" : "b";
+      _scheduleLiveEvalBarUpdate(m.fen, stmFen);
+    }
+  } catch (_) { /* ignore */ }
   const you = m.you || {};
   const opp = m.opponent || {};
   const youClock = you.clock_remaining != null ? you.clock_remaining : (m.time_seconds || 0);
@@ -12892,6 +13190,22 @@ function handleNotificationEvent(msg) {
       state.notifications.reconnectAttempts = 0;
       (msg.invitations || []).forEach((inv) => _showInvitationToast(inv));
       (msg.onevsone_challenges || []).forEach((ch) => _onevsoneShowChallengeToast(ch));
+      // Engine state piggy-backs on the hello frame so the engine
+      // panel inputs reflect the host's pool settings the moment we
+      // open the page (instead of zeros until the next reconfigure).
+      if (msg.engine) {
+        try { _applyEngineState(msg.engine); } catch (_) { /* ignore */ }
+      }
+      break;
+    case "engine_state":
+      // Host changed Stockfish settings (threads / hash / skill /
+      // multipv / path) — mirror them into the engine panel so every
+      // tab in the session reflects the new configuration. The
+      // payload shape matches engine.current_state(): see
+      // backend/stockfish_engine.py.
+      if (msg.engine) {
+        try { _applyEngineState(msg.engine); } catch (_) { /* ignore */ }
+      }
       break;
     case "invitation":
       if (msg.invitation) _showInvitationToast(msg.invitation);
@@ -13943,6 +14257,25 @@ renderBoard();
 setBoardMode(true);
 refreshEngineStatus();
 _bootUser();
+_refreshHostMode();
+
+// Probe /api/auth/check at boot so we know whether the current
+// visitor is the server operator. The reply also tells us whether
+// the host gated the engine settings (host_token_required) so we
+// can render the panel read-only for everyone else. Re-running this
+// after the SSE engine_state arrives keeps the UI in sync after
+// reload without waiting for the next configure.
+async function _refreshHostMode() {
+  try {
+    const resp = await fetch("/api/auth/check", { credentials: "include" });
+    if (!resp.ok) return;
+    const j = await resp.json();
+    _setHostMode({
+      isHost: !!j.is_host,
+      hostTokenRequired: !!j.host_token_required,
+    });
+  } catch (_) { /* ignore */ }
+}
 
 // Expose for debugging. Includes the dispatchers so end-to-end test
 // harnesses (and humans poking around in DevTools) can simulate clicks

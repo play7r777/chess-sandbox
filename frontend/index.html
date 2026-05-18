@@ -94,7 +94,7 @@
             <div class="board-frame">
               <div id="player-top" class="player-strip" data-view="analysis" hidden></div>
               <div class="board-with-coords">
-                <div id="eval-bar" class="eval-bar" data-view="analysis" hidden>
+                <div id="eval-bar" class="eval-bar" hidden>
                   <div class="eval-bar-black"></div>
                   <div class="eval-bar-white"></div>
                   <div class="eval-bar-label" id="eval-bar-label">0.0</div>
@@ -175,6 +175,11 @@
 
         <section class="panel" id="panel-engine" data-view="main">
           <h2>Движок Stockfish</h2>
+          <div class="row" id="engine-readonly-banner" hidden>
+            <span class="muted" id="engine-readonly-text">
+              Настройки задаёт хост. Эти параметры применяются ко всем играм и анализу.
+            </span>
+          </div>
           <div class="row">
             <label>
               Path:
@@ -311,7 +316,7 @@
         <section class="panel" id="panel-review" data-view="analysis">
           <h2>Анализ партии</h2>
           <div class="row">
-            <input id="review-source" type="text" placeholder="https://www.chess.com/game/live/... или https://lichess.org/... или PGN" style="flex:1; min-width:260px;" />
+            <textarea id="review-source" rows="1" placeholder="https://www.chess.com/game/live/... или https://lichess.org/... или PGN" style="flex:1; min-width:260px; resize:vertical; font-family:inherit;"></textarea>
             <button id="btn-review-import" type="button">Загрузить</button>
           </div>
           <div class="row">
