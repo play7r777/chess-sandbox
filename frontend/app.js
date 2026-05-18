@@ -527,6 +527,15 @@ const state = {
     mode: "standard",
     ratingMin: 0,
     ratingMax: 0,
+    // Party Mode bookkeeping (mirrored from the server's lobby/state
+    // broadcasts). ``kind`` is "solo" (legacy free-for-all) or
+    // "party" (team A vs team B). ``teamMax`` is the per-team cap
+    // (10 by default). ``teams`` is a snapshot of the current team
+    // summary list `[{team:"A", members:[...], total:0}, ...]` used
+    // by the scoreboard / finish renderers to avoid recomputing.
+    kind: "solo",
+    teamMax: 10,
+    teams: [],
     // Local "I've been eliminated" flag — set to true after we receive
     // the "eliminated" WS frame so the puzzle UI / scoreboard can
     // dim our row, lock our board, and stop us from hammering the
@@ -7458,6 +7467,12 @@ function handlePartyMessage(msg) {
       if (typeof msg.mode === "string") state.party.mode = msg.mode;
       if (Number.isFinite(msg.rating_min)) state.party.ratingMin = Math.floor(msg.rating_min);
       if (Number.isFinite(msg.rating_max)) state.party.ratingMax = Math.floor(msg.rating_max);
+      // Party Mode bookkeeping: `kind` and `team_max` come down on every
+      // lobby/start/match_state frame so a late-joiner repaints with
+      // the host's current choice. Defaults preserve solo behaviour.
+      if (typeof msg.kind === "string") state.party.kind = msg.kind;
+      if (Number.isFinite(msg.team_max)) state.party.teamMax = Math.floor(msg.team_max);
+      if (Array.isArray(msg.teams)) state.party.teams = msg.teams;
       if (state.party.status === "lobby") renderPartyLobby();
       break;
     case "start":
@@ -7524,6 +7539,14 @@ function handlePartyMessage(msg) {
         rating_min: Number(msg.rating_min) || state.party.ratingMin || 0,
         rating_max: Number(msg.rating_max) || state.party.ratingMax || 0,
         avg_rating: Number(msg.avg_rating) || state.party.avgRating || 0,
+        // Party Mode tail-end fields: the server emits ``kind`` and a
+        // ``teams`` summary `[{team, total, members:[client_id,…]}, …]`
+        // with the rank-1 row marked ``is_winner: true`` (server-side
+        // tie-break). We thread both into finalMeta so the results
+        // modal can render the winner banner without having to peek
+        // back into state.party.kind (which is reset on Leave).
+        kind: typeof msg.kind === "string" ? msg.kind : state.party.kind,
+        teams: Array.isArray(msg.teams) ? msg.teams : (Array.isArray(state.party.teams) ? state.party.teams : []),
       };
       state.party.active = false;
       if (state.party.countdownInterval) {
@@ -8056,14 +8079,82 @@ function renderPartyLobby() {
   if (!body) return;
   const m = state.party;
   const isHost = m.host_id === state.user.client_id;
-  const memberRows = (m.members || []).map((mem) => `
-    <li class="party-member ${mem.online ? "is-online" : "is-offline"}">
-      <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
-      <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
-      ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
-      ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
-    </li>
-  `).join("");
+  const kind = m.kind === "party" ? "party" : "solo";
+  const teamMax = Number.isFinite(m.teamMax) && m.teamMax > 0 ? m.teamMax : 10;
+  // Party Mode lobby renders team-by-team. Solo keeps the legacy flat
+  // list so single-team-free-for-all lobbies look identical to before.
+  let memberListHtml;
+  if (kind === "party") {
+    const meId = state.user.client_id;
+    const teamLabel = { A: "Команда A", B: "Команда B" };
+    const teams = ["A", "B"].map((tid) => {
+      const inTeam = (m.members || []).filter((mem) => mem.team === tid);
+      const totalScore = inTeam.reduce((acc, mem) => acc + Number(mem.score || 0), 0);
+      const rows = inTeam.map((mem) => {
+        const movableBySelf = isHost || mem.client_id === meId;
+        const switchHtml = movableBySelf ? `
+          <span class="party-team-switch">
+            <button type="button" data-team-move data-cid="${escapeHtml(mem.client_id)}" data-team="${tid === "A" ? "B" : "A"}" class="party-team-mini" title="Перейти в команду ${tid === "A" ? "B" : "A"}">→ ${tid === "A" ? "B" : "A"}</button>
+          </span>` : "";
+        return `
+          <li class="party-member party-member-team team-${tid} ${mem.online ? "is-online" : "is-offline"}">
+            <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
+            <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
+            ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
+            ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
+            ${switchHtml}
+          </li>`;
+      }).join("");
+      return `
+        <div class="party-team-card team-${tid}">
+          <header class="party-team-head">
+            <span class="party-team-badge">${tid}</span>
+            <span class="party-team-name">${teamLabel[tid]}</span>
+            <span class="party-team-count">${inTeam.length}/${teamMax}</span>
+            <span class="party-team-total" title="Сумма очков команды">${totalScore} pts</span>
+          </header>
+          <ul class="party-members party-members-team">${rows || `<li class="party-empty">пусто</li>`}</ul>
+        </div>`;
+    }).join("");
+    // List members who are still un-teamed (e.g. just joined while
+    // the host hasn't auto-balanced yet) so they can pick a side or
+    // the host can drag them.
+    const unassigned = (m.members || []).filter((mem) => mem.team !== "A" && mem.team !== "B");
+    const unassignedHtml = unassigned.length ? `
+      <div class="party-team-card party-team-unassigned">
+        <header class="party-team-head">
+          <span class="party-team-badge">?</span>
+          <span class="party-team-name">Без команды</span>
+        </header>
+        <ul class="party-members party-members-team">
+          ${unassigned.map((mem) => {
+            const movable = isHost || mem.client_id === state.user.client_id;
+            const buttons = movable ? `
+              <span class="party-team-switch">
+                <button type="button" data-team-move data-cid="${escapeHtml(mem.client_id)}" data-team="A" class="party-team-mini">→ A</button>
+                <button type="button" data-team-move data-cid="${escapeHtml(mem.client_id)}" data-team="B" class="party-team-mini">→ B</button>
+              </span>` : "";
+            return `<li class="party-member ${mem.online ? "is-online" : "is-offline"}">
+              <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
+              <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
+              ${buttons}
+            </li>`;
+          }).join("")}
+        </ul>
+      </div>` : "";
+    memberListHtml = `<div class="party-team-grid">${teams}</div>${unassignedHtml}`;
+  } else {
+    memberListHtml = `<ul class="party-members">${
+      (m.members || []).map((mem) => `
+        <li class="party-member ${mem.online ? "is-online" : "is-offline"}">
+          <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
+          <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
+          ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
+          ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
+        </li>`).join("") || `<li class="party-empty">Пока никого…</li>`
+    }</ul>`;
+  }
+  const memberRows = memberListHtml; // legacy var name kept for the template below
   const startLabel = "Начать матч";
   const avgRatingPill = Number.isFinite(m.avgRating) && m.avgRating > 0
     ? `<span class="party-avg-pill" title="средний ELO лобби — под эту отметку подбираются пазлы">ср. ELO ${m.avgRating}</span>`
@@ -8083,7 +8174,31 @@ function renderPartyLobby() {
       <h2><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle — лобби</h2>
       <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code> ${avgRatingPill}</p>
     </header>
-    <ul class="party-members">${memberRows || `<li class="party-empty">Пока никого…</li>`}</ul>
+    ${isHost ? `
+    <section class="party-kind-section">
+      <div class="party-section-title">Формат матча</div>
+      <div class="party-mode-row" role="radiogroup" aria-label="Формат матча">
+        <label class="party-mode-opt ${kind === "solo" ? "is-active" : ""}">
+          <input type="radio" name="party-kind" value="solo" ${kind === "solo" ? "checked" : ""}>
+          <span class="party-mode-title">Соло</span>
+          <span class="party-mode-hint">каждый сам за себя</span>
+        </label>
+        <label class="party-mode-opt ${kind === "party" ? "is-active" : ""}">
+          <input type="radio" name="party-kind" value="party" ${kind === "party" ? "checked" : ""}>
+          <span class="party-mode-title">Команды (A vs B)</span>
+          <span class="party-mode-hint">до ${teamMax} в команде, очки суммируются</span>
+        </label>
+      </div>
+      ${kind === "party" ? `<div class="party-team-actions">
+        <button type="button" id="btn-party-balance" class="puzzle-ghost">Авто-баланс</button>
+        <span class="muted party-team-hint">Каждый игрок решает свой кусок пула пазлов. Команда с большей суммой выигрывает.</span>
+      </div>` : ""}
+    </section>` : `
+    <section class="party-kind-section party-kind-section-readonly">
+      <div class="party-section-title">Формат матча</div>
+      <div class="party-mode-readonly muted">${kind === "party" ? "Команды (A vs B)" : "Соло — каждый сам за себя"}</div>
+    </section>`}
+    ${memberRows}
     <section class="party-rules">
       <div class="party-rule"><span class="party-rule-key">Длительность</span><span class="party-rule-val">3 мин</span></div>
       <div class="party-rule"><span class="party-rule-key">Жизни</span><span class="party-rule-val">${livesN}</span></div>
@@ -8166,7 +8281,43 @@ function renderPartyLobby() {
         if (customBox) customBox.hidden = mode !== "custom";
       });
     });
+    // Kind toggle (Solo / Party). We don't optimistically flip the UI —
+    // the server is authoritative, so we just send `set_kind` and wait
+    // for the next `lobby` broadcast to repaint with the new kind.
+    body.querySelectorAll('input[name="party-kind"]').forEach((radio) => {
+      radio.addEventListener("change", () => {
+        const nextKind = body.querySelector('input[name="party-kind"]:checked')?.value || "solo";
+        const ws = state.party.ws;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "set_kind", kind: nextKind }));
+        }
+      });
+    });
+    // Auto-balance shuffles all members round-robin into A/B server-
+    // side; the broadcast triggers a repaint with the new balanced
+    // team grid.
+    body.querySelector("#btn-party-balance")?.addEventListener("click", () => {
+      const ws = state.party.ws;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "balance_teams" }));
+      }
+    });
   }
+  // Team-move buttons: each row in Party Mode renders a "→ A/B"
+  // shortcut. Anyone can move themselves; host can move others. We
+  // do not branch on isHost here because the server enforces the same
+  // rule — clients just get a friendly error if they aim at someone
+  // else.
+  body.querySelectorAll("[data-team-move]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cid = btn.dataset.cid;
+      const team = btn.dataset.team || "A";
+      const ws = state.party.ws;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "set_team", client_id: cid, team }));
+      }
+    });
+  });
   body.querySelector("#btn-party-start")?.addEventListener("click", (ev) => {
     const btn = ev.currentTarget;
     // Hard guard against the user clicking 'Start' multiple times
@@ -8365,14 +8516,20 @@ function _partyRenderScoreboard() {
   if (!host && !board) return;
   const me = state.user.client_id;
   const livesMax = Math.max(1, Math.floor(state.party.livesPerPlayer || 3));
-  const rowsList = (state.party.scoreboard || []).map((r, i) => {
+  const isPartyKind = state.party.kind === "party";
+
+  // Build the per-row HTML once; both solo and party modes use the
+  // same shape, but party mode groups them under a team header with
+  // the team's summed score above the rows.
+  const buildRow = (r, i) => {
     const livesRaw = (r.lives === undefined || r.lives === null) ? livesMax : r.lives;
     const livesHtml = _partyLivesHtml(livesRaw, r.lives_max || livesMax);
     const gridHtml = _partyStreakGridHtml(r.attempts_grid, r.lives_max || livesMax);
     const isSelf = r.client_id === me;
     const isOut = Number(livesRaw) <= 0;
+    const teamClass = r.team === "A" || r.team === "B" ? `team-row-${r.team}` : "";
     return `
-      <li class="party-row battle-row ${isSelf ? "is-self" : ""} ${isOut ? "is-out" : ""}">
+      <li class="party-row battle-row ${isSelf ? "is-self" : ""} ${isOut ? "is-out" : ""} ${teamClass}">
         <div class="battle-row-head">
           <span class="party-rank">#${i + 1}</span>
           <span class="party-avatar">${avatarHtml(r.avatar)}</span>
@@ -8385,7 +8542,41 @@ function _partyRenderScoreboard() {
         </div>
       </li>
     `;
-  }).join("");
+  };
+
+  let rowsList = "";
+  if (isPartyKind) {
+    // Group rows under their team. We compute the team sums from the
+    // live scoreboard so they update on every "scoreboard" tick
+    // without relying on the lobby snapshot. Unassigned rows (no
+    // team) fall under a third bucket so a misconfigured lobby still
+    // shows every player.
+    const teamGroups = { A: [], B: [], _: [] };
+    (state.party.scoreboard || []).forEach((r, i) => {
+      const bucket = r.team === "A" || r.team === "B" ? r.team : "_";
+      teamGroups[bucket].push({ row: r, idx: i });
+    });
+    const teamSum = (team) => teamGroups[team].reduce((acc, x) => acc + Number(x.row.score || 0), 0);
+    const order = ["A", "B"];
+    if (teamGroups._.length) order.push("_");
+    rowsList = order.map((team) => {
+      const label = team === "A" ? "Команда A" : team === "B" ? "Команда B" : "Без команды";
+      const sumHtml = team === "_" ? "" : `<span class="party-team-total">${teamSum(team)} pts</span>`;
+      const rows = teamGroups[team].map(({ row, idx }) => buildRow(row, idx)).join("");
+      const cls = team === "_" ? "party-team-block-unassigned" : `party-team-block-${team}`;
+      return `
+        <li class="party-team-block ${cls}">
+          <header class="party-team-block-head">
+            <span class="party-team-badge">${team === "_" ? "?" : team}</span>
+            <span class="party-team-name">${label}</span>
+            ${sumHtml}
+          </header>
+          <ul class="party-team-block-rows">${rows || `<li class="party-empty">пусто</li>`}</ul>
+        </li>`;
+    }).join("");
+  } else {
+    rowsList = (state.party.scoreboard || []).map(buildRow).join("");
+  }
   const timer = state.party.status === "playing"
     ? _formatPartyTimeLeft(state.party.endsAt)
     : (state.party.status === "finished" ? "0:00" : "3:00");
@@ -8847,11 +9038,40 @@ function _partyShowResults() {
   state.party.finalMeta = meta;
   const myCid = state.user.client_id;
   const tableHtml = _renderPartyResultsHTML(list, meta, { highlightId: myCid });
+  // Party Mode banner: pick the team with the largest summed score
+  // (ties broken by the server emitting ``is_winner`` on exactly one
+  // row). Solo lobbies skip the banner so the markup matches the old
+  // post-match modal byte-for-byte.
+  let teamBannerHtml = "";
+  if (meta && meta.kind === "party" && Array.isArray(meta.teams) && meta.teams.length) {
+    const teamsList = meta.teams.slice().sort((a, b) => Number(b.total || 0) - Number(a.total || 0));
+    const winner = teamsList.find((t) => t.is_winner) || teamsList[0];
+    const labelOf = (t) => t === "A" ? "Команда A" : t === "B" ? "Команда B" : "Без команды";
+    const teamCards = teamsList.map((t) => {
+      const isWin = winner && t.team === winner.team;
+      return `
+        <div class="party-results-team-card team-${t.team} ${isWin ? "is-winner" : ""}">
+          <header>
+            <span class="party-team-badge">${escapeHtml(t.team || "?")}</span>
+            <span class="party-team-name">${escapeHtml(labelOf(t.team))}</span>
+            ${isWin ? `<span class="party-team-trophy" title="Победители">🏆</span>` : ""}
+          </header>
+          <div class="party-team-total-big">${Number(t.total || 0)} pts</div>
+          <div class="muted party-team-card-members">${(Array.isArray(t.members) ? t.members.length : 0)} игрок(ов)</div>
+        </div>`;
+    }).join("");
+    teamBannerHtml = `
+      <div class="party-results-team-banner">
+        <div class="party-results-team-headline">${winner ? `${labelOf(winner.team)} победила — ${Number(winner.total || 0)} очков` : "Командный матч"}</div>
+        <div class="party-results-team-grid">${teamCards}</div>
+      </div>`;
+  }
   body.innerHTML = `
     <header class="party-header">
       <h2>🏁 Итоги пати</h2>
       <p class="muted">Результат сохранён в истории профиля. Рейтинг за пати не начисляется.</p>
     </header>
+    ${teamBannerHtml}
     <div class="party-results-card">${tableHtml}</div>
     <div class="party-actions party-actions-results">
       <button id="btn-party-save-img" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>

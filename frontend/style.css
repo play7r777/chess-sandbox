@@ -5712,3 +5712,171 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border-color: #81b64c;
   color: #f5f2ec;
 }
+
+/* -----------------------------------------------------------
+   Party Mode — additional lobby/scoreboard/results bits added
+   when the host enables "Команды (A vs B)". The base
+   .party-team-grid / .party-team-card rules above handle the
+   two-column layout; the rules below add the header strip
+   (team badge + name + member count + summed score) and the
+   per-row inline "→ A" / "→ B" team-move buttons.
+   ----------------------------------------------------------- */
+.party-kind-section { margin-top: 14px; }
+.party-kind-section-readonly { opacity: 0.92; }
+.party-team-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.party-team-hint { font-size: 12px; }
+.party-team-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 14px;
+  color: #e6e2d8;
+}
+.party-team-badge {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 13px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.party-team-card.team-A .party-team-badge { background: rgba(79, 157, 222, 0.20); color: #aed5f6; }
+.party-team-card.team-B .party-team-badge { background: rgba(224, 123, 86, 0.20); color: #f5c0a8; }
+.party-team-count {
+  font-size: 12px;
+  color: #94a4be;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.party-team-total {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 700;
+  color: #f1e7c8;
+  font-variant-numeric: tabular-nums;
+}
+.party-team-card.party-team-unassigned {
+  border-left: 3px solid #6f6f6f;
+  margin-top: 10px;
+}
+.party-members-team {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.party-member-team {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.party-member-team.team-A { border-left: 2px solid #4f9dde; }
+.party-member-team.team-B { border-left: 2px solid #e07b56; }
+.party-team-switch { margin-left: auto; display: inline-flex; gap: 4px; }
+.party-team-mini {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d6d2cb;
+  font-size: 11px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.party-team-mini:hover { background: rgba(129, 182, 76, 0.16); color: #f5f2ec; }
+
+/* Scoreboard during match — team blocks group rows under a sum
+   header so the spectator / players immediately see which team
+   is ahead without having to add scores in their head. */
+.party-team-block {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+.party-team-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.party-team-block-A .party-team-block-head { box-shadow: inset 3px 0 0 #4f9dde; }
+.party-team-block-B .party-team-block-head { box-shadow: inset 3px 0 0 #e07b56; }
+.party-team-block-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.battle-row.team-row-A { box-shadow: inset 2px 0 0 #4f9dde; }
+.battle-row.team-row-B { box-shadow: inset 2px 0 0 #e07b56; }
+
+/* Post-match team winner banner — pinned above the per-player
+   results table when the match was Party-kind. */
+.party-results-team-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(129, 182, 76, 0.08);
+  border: 1px solid rgba(129, 182, 76, 0.30);
+  margin-bottom: 14px;
+}
+.party-results-team-headline {
+  font-size: 17px;
+  font-weight: 800;
+  color: #f5f2ec;
+}
+.party-results-team-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.party-results-team-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.party-results-team-card.team-A { border-left: 3px solid #4f9dde; }
+.party-results-team-card.team-B { border-left: 3px solid #e07b56; }
+.party-results-team-card.is-winner {
+  background: rgba(129, 182, 76, 0.14);
+  border-color: #81b64c;
+}
+.party-results-team-card > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
+.party-team-total-big {
+  font-size: 22px;
+  font-weight: 800;
+  color: #f5f2ec;
+  font-variant-numeric: tabular-nums;
+}
+.party-team-trophy { margin-left: auto; font-size: 20px; }
