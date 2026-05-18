@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import secrets
 import shutil
 from pathlib import Path
 
@@ -43,11 +44,22 @@ class Settings(BaseSettings):
     # (cookie / header / ``?host_token=`` query string) are allowed to
     # change the shared Stockfish engine configuration — threads, hash
     # MB, skill level, etc — because those settings are pooled across
-    # every connected player. Empty (default) means "the operator runs
-    # everything on 127.0.0.1 and trusts every reachable client" and
-    # the engine controls fall back to the legacy behaviour where any
-    # client may reconfigure the pool.
+    # every connected player. If the user doesn't export
+    # ``CHESS_HOST_TOKEN`` we auto-generate one at startup via the
+    # ``default_factory`` below — so the operator who launched the
+    # server is the only one allowed to change shared engine settings
+    # without any extra ceremony. The token is printed to stdout so
+    # the operator can copy the host-only URL.
     host_token: str = ""
+
+    def model_post_init(self, __context: object) -> None:
+        # Auto-generate a host token if none was provided via env or
+        # the .env file. This closes the "anyone on localhost can
+        # reconfigure Stockfish" hole that the loopback-trust
+        # fallback used to leave open. The operator sees the URL on
+        # stdout; everyone else gets a read-only engine panel.
+        if not self.host_token:
+            object.__setattr__(self, "host_token", secrets.token_hex(16))
 
     frontend_dir: Path = Path(__file__).resolve().parent.parent / "frontend"
     backend_root: Path = Path(__file__).resolve().parent

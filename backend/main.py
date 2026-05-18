@@ -213,11 +213,15 @@ def _print_bind_banner() -> None:
     """
     if settings.host_is_loopback():
         if settings.host_token:
+            base = f"http://{settings.host}:{settings.port}"
+            qs = f"host_token={settings.host_token}"
+            if settings.auth_token:
+                qs = f"token={settings.auth_token}&{qs}"
             print(
                 "[chess-sandbox] CHESS_HOST_TOKEN включён — настройки "
-                "Stockfish (Threads / Hash / Skill) доступны только при "
-                "открытии URL с ?host_token=<секрет>."
+                "Stockfish (Threads / Hash / Skill) доступны только тебе."
             )
+            print(f"[chess-sandbox] Host URL: {base}/?{qs}")
         return
     if settings.auth_token:
         print(
@@ -348,29 +352,21 @@ def _host_token_from_request(request: Request) -> str | None:
 def _is_host_request(request: Request) -> bool:
     """Decide whether the caller is the operator who launched the server.
 
-    Two paths grant host privileges:
-
-    1. ``settings.host_token`` is set and the request presents that
-       same value via header / query / cookie. This is the canonical
-       mechanism used by the public-tunnel launcher scripts, which
-       auto-generate a fresh token and bake it into the host's URL.
-    2. ``settings.host_token`` is empty AND the request comes from a
-       loopback peer (``127.0.0.1`` / ``::1`` / the configured loopback
-       hostname). When no token is configured we fall back to "anyone
-       on localhost owns the box" so a default local install can still
-       tune the engine without any extra setup.
+    Host privileges require ``settings.host_token`` and the request
+    presenting that same value via header / query / cookie. The
+    backend auto-generates a token at startup if none was provided
+    (see ``Settings.__init__``) and the launcher scripts print a
+    "host URL" with ``?host_token=...`` baked in. Loopback no longer
+    grants host privileges by itself — the previous "anyone on
+    127.0.0.1 owns the box" fallback let any tab on the same machine
+    reconfigure the shared Stockfish pool, which is the exact issue
+    the host-token gate is meant to prevent.
     """
     expected = settings.host_token
-    if expected:
-        token = _host_token_from_request(request)
-        return token is not None and hmac.compare_digest(token, expected)
-    client = request.client
-    if client is None or not client.host:
+    if not expected:
         return False
-    try:
-        return ipaddress_is_loopback(client.host)
-    except Exception:
-        return False
+    token = _host_token_from_request(request)
+    return token is not None and hmac.compare_digest(token, expected)
 
 
 def ipaddress_is_loopback(host: str) -> bool:

@@ -12167,10 +12167,19 @@ function _renderOnevsoneMatchUi() {
     ? { from: m.history[m.history.length - 1].from, to: m.history[m.history.length - 1].to }
     : null;
   renderBoard();
+  const you = m.you || {};
+  const opp = m.opponent || {};
+  const youClock = you.clock_remaining != null ? you.clock_remaining : (m.time_seconds || 0);
+  const oppClock = opp.clock_remaining != null ? opp.clock_remaining : (m.time_seconds || 0);
+  const turnYou = m.turn === (you.color || "w");
+  const finished = !!m.finished;
   // Live eval bar: reflects the *current* position (m.fen) from
   // white's POV. When the match ends (or just landed in the lobby)
   // _refreshEvalBarVisibility() hides the bar; while the match is
-  // running we kick a 250ms Stockfish ping per move.
+  // running we kick a 250ms Stockfish ping per move. (Must run
+  // AFTER `finished` is initialised — earlier versions referenced
+  // `finished` in the TDZ which threw and the try/catch ate the
+  // error, leaving the bar frozen in 1v1.)
   try {
     _refreshEvalBarVisibility();
     if (!finished) {
@@ -12178,12 +12187,6 @@ function _renderOnevsoneMatchUi() {
       _scheduleLiveEvalBarUpdate(m.fen, stmFen);
     }
   } catch (_) { /* ignore */ }
-  const you = m.you || {};
-  const opp = m.opponent || {};
-  const youClock = you.clock_remaining != null ? you.clock_remaining : (m.time_seconds || 0);
-  const oppClock = opp.clock_remaining != null ? opp.clock_remaining : (m.time_seconds || 0);
-  const turnYou = m.turn === (you.color || "w");
-  const finished = !!m.finished;
   let finishedHtml = "";
   if (finished) {
     let txt = "Партия завершена";
