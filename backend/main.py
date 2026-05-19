@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from . import _paths
 from . import daily_puzzle as daily_puzzle_pack
 from . import notifications as notifications_db
 from . import onevsone as onevsone_room
@@ -196,6 +197,13 @@ def _print_puzzle_banner() -> None:
             f"[chess-sandbox] Пазлы: {count:,} (источник: {source} — встроенный набор). "
             f"Запусти `python -m backend.import_puzzles --all` для полной базы Lichess."
         )
+        # Flag the most common cause of "I imported the puzzles but the
+        # server still says 90": a stale ``pip install -e`` from a
+        # sibling checkout makes the importer and the server resolve
+        # ``backend/data/`` to different folders.
+        warning = _paths.stale_install_warning()
+        if warning:
+            print(f"[chess-sandbox] ⚠  {warning}")
 
 
 def _print_bind_banner() -> None:

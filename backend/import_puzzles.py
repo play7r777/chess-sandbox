@@ -30,11 +30,25 @@ from typing import Any
 import requests  # type: ignore[import-untyped]
 import zstandard  # type: ignore[import-untyped]
 
+from . import _paths
+
 # ── Constants ───────────────────────────────────────────────────────
 DB_URL = "https://database.lichess.org/lichess_db_puzzle.csv.zst"
-DATA_DIR = Path(__file__).resolve().parent / "data"
-ZST_PATH = DATA_DIR / "lichess_db_puzzle.csv.zst"
+# Resolved against the project root walked up from cwd (not __file__),
+# so the SQLite ends up where backend.main expects it even if the
+# ``backend`` package was ``pip install -e``'d from a stale sibling
+# checkout. See ``backend/_paths.py`` for the full rationale.
+DATA_DIR = _paths.resolve_data_dir()
+ZST_FILENAME = "lichess_db_puzzle.csv.zst"
+ZST_PATH = DATA_DIR / ZST_FILENAME
 DB_PATH = DATA_DIR / "puzzles.sqlite"
+
+# Where we additionally look for an already-downloaded CSV cache so
+# users don't re-pay the ~300 MB download just because the editable
+# install resolved to a different sibling folder last time.
+_FALLBACK_CACHE_DIRS: tuple[Path, ...] = (
+    _paths.module_dir() / "data",
+)
 
 CHUNK_SIZE = 1 << 20  # 1 MiB for download streaming
 
@@ -256,6 +270,33 @@ def _delete_with_retry(path: Path) -> None:
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
+def _resolve_zst_path(data_dir: Path) -> Path:
+    """Return the existing .csv.zst cache to use, preferring ``data_dir``.
+
+    Falls back to any sibling ``backend/data/`` directory we know about
+    (e.g. the one bundled with the loaded package) so users coming from
+    a stale editable install don't have to re-download 300 MB after
+    every checkout. When nothing exists yet we return the canonical
+    path inside ``data_dir`` so the downloader writes there.
+    """
+    primary = data_dir / ZST_FILENAME
+    if primary.exists():
+        return primary
+    for fallback_dir in _FALLBACK_CACHE_DIRS:
+        candidate = fallback_dir / ZST_FILENAME
+        try:
+            if candidate.resolve() == primary.resolve():
+                continue
+        except OSError:
+            continue
+        if candidate.is_file():
+            print(
+                f"Нашёл кэш в соседней папке: {candidate} — использую его без копирования."
+            )
+            return candidate
+    return primary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Импорт пазлов Lichess → SQLite",
@@ -272,24 +313,41 @@ def main() -> None:
         "--url", default=DB_URL,
         help="URL .csv.zst (по умолчанию Lichess)",
     )
+    parser.add_argument(
+        "--data-dir", type=Path, default=None,
+        help=(
+            "Папка для кэша .csv.zst и итогового puzzles.sqlite. "
+            "По умолчанию — backend/data/ в корне этого репозитория (или $CHESS_DATA_DIR)."
+        ),
+    )
     args = parser.parse_args()
 
     target: int | None = None if args.all else args.target
 
+    data_dir = (args.data_dir.expanduser().resolve() if args.data_dir else DATA_DIR)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db_path = data_dir / "puzzles.sqlite"
+    zst_path = _resolve_zst_path(data_dir)
+
+    warning = _paths.stale_install_warning()
+    if warning:
+        print(f"[chess-sandbox] ⚠  {warning}")
+    print(f"Папка данных: {data_dir}")
+
     # Download if missing.
-    if not ZST_PATH.exists():
-        _download(args.url, ZST_PATH)
+    if not zst_path.exists():
+        _download(args.url, zst_path)
     else:
-        print(f"Используем кэш: {ZST_PATH} ({ZST_PATH.stat().st_size / 1e6:.1f} MB)")
+        print(f"Используем кэш: {zst_path} ({zst_path.stat().st_size / 1e6:.1f} MB)")
 
     # Parse + sample.
-    rows = _stream_puzzles(ZST_PATH, target)
+    rows = _stream_puzzles(zst_path, target)
     if not rows:
         print("Нет пазлов — выход.")
         sys.exit(1)
 
     # Insert into SQLite.
-    _insert(DB_PATH, rows)
+    _insert(db_path, rows)
     print(f"\nГотово! {len(rows):,} пазлов доступны серверу.")
 
 

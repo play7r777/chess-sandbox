@@ -100,6 +100,19 @@ pip install -e .
 Так что сразу видно, какая база подключилась. Если SQLite-файла нет,
 бэкенд автоматически работает с встроенными 90 пазлами (`source: "json"`).
 
+> **Импорт записал базу, но сервер всё равно говорит 90?** Скорее всего
+> в системном Python остался старый `pip install -e ...` из соседнего
+> чекаута (например, `chess-sandbox(4)`), и `python -m backend.import_puzzles`
+> уезжает писать в ту папку. С этой версии импортёр и сервер вычисляют
+> `backend/data/` от корня репо, найденного по `pyproject.toml` вверх
+> от cwd, поэтому SQLite пишется туда же, откуда читает сервер. Если
+> увидишь в логах `[chess-sandbox] ⚠  Пакет backend загружен из ...`,
+> почини установку: создай локальный venv в актуальной папке и поставь
+> пакет заново — `py -3.11 -m venv .venv` и
+> `.venv\Scripts\pip install -e .`. Альтернативно — передай явный путь:
+> `python -m backend.import_puzzles --all --data-dir backend\data` или
+> экспортни `CHESS_DATA_DIR`.
+
 ### 4. Запуск сервера
 
 ```powershell
@@ -306,6 +319,8 @@ API:
 | `CHESS_STOCKFISH_DEFAULT_SKILL_LEVEL` | 20         | UCI Skill Level (0..20)            |
 | `CHESS_HOST`                        | 127.0.0.1    | bind хост                          |
 | `CHESS_PORT`                        | 8001         | bind порт                          |
+| `CHESS_DATA_DIR`                    | `backend/data` (от корня репо) | куда писать `puzzles.sqlite` / `users.json` / `avatars/` |
+| `CHESS_PROJECT_ROOT`                | — (вычисляется от cwd) | принудительно указать корень репо, если автодетект промахивается |
 | `CHESS_OLLAMA_BASE_URL`             | `http://127.0.0.1:11434` | URL локального Ollama-демона |
 | `CHESS_OLLAMA_MODEL`                | `qwen2.5:7b` | модель для AI-тренера дебютов (стоит понимать шахматную нотацию) |
 | `CHESS_OLLAMA_TIMEOUT_S`            | 60           | таймаут на ответ модели (сек)      |

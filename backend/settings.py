@@ -6,7 +6,10 @@ import secrets
 import shutil
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from . import _paths
 
 
 class Settings(BaseSettings):
@@ -65,9 +68,15 @@ class Settings(BaseSettings):
     backend_root: Path = Path(__file__).resolve().parent
 
     # Where mutable state lives (users / leaderboard / party history /
-    # puzzle SQLite). Sits next to the bundled puzzle pack so the app
-    # is fully self-contained for a local install.
-    data_dir: Path = Path(__file__).resolve().parent / "data"
+    # puzzle SQLite). The default is resolved at instantiation time
+    # against the *project root walked up from cwd*, not against
+    # ``__file__``. This keeps ``backend.import_puzzles`` (which writes
+    # the SQLite) and ``backend.main`` (which reads it) on the same
+    # ``backend/data/`` folder even when the ``backend`` package was
+    # ``pip install -e``'d from a sibling checkout — see
+    # ``backend/_paths.py`` for the full rationale. Override with
+    # ``CHESS_DATA_DIR`` if you really need to point somewhere else.
+    data_dir: Path = Field(default_factory=_paths.resolve_data_dir)
 
     def host_is_loopback(self) -> bool:
         """True iff ``host`` resolves to a loopback IP (127.x or ::1)."""
