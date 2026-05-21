@@ -30,6 +30,11 @@ backend/data/users.json
 backend/data/users.json.tmp
 backend/data/puzzles.sqlite
 backend/data/*.csv.zst
+# Runtime state — written by FastAPI on every game move. Persisting
+# this in git would just create noise on every commit and leak local
+# dev nicknames into the repo.
+backend/data/onevsone_matches.json
+backend/data/onevsone_matches.json.tmp
 # Tunnel binaries — users drop these into repo root or scripts/ so the
 # start-public scripts can find them without touching PATH.
 ngrok

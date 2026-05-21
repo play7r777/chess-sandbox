@@ -332,6 +332,7 @@ const SOUND_FILES = {
   "castle":        "/static/sounds/castle.wav",
   "promote":       "/static/sounds/promote.wav",
   "illegal":       "/static/sounds/illegal.wav",
+  "incorrect":     "/static/sounds/incorrect.wav",
 };
 const _soundCache = {};
 function _getSound(name) {
@@ -526,11 +527,44 @@ const state = {
     mode: "standard",
     ratingMin: 0,
     ratingMax: 0,
+    // Party Mode bookkeeping (mirrored from the server's lobby/state
+    // broadcasts). ``kind`` is "solo" (legacy free-for-all) or
+    // "party" (team A vs team B). ``teamMax`` is the per-team cap
+    // (10 by default). ``teams`` is a snapshot of the current team
+    // summary list `[{team:"A", members:[...], total:0}, ...]` used
+    // by the scoreboard / finish renderers to avoid recomputing.
+    kind: "solo",
+    teamMax: 10,
+    teams: [],
     // Local "I've been eliminated" flag — set to true after we receive
     // the "eliminated" WS frame so the puzzle UI / scoreboard can
     // dim our row, lock our board, and stop us from hammering the
     // hint/skip buttons. Cleared on the next match start / leave.
     selfEliminated: false,
+    // Live chat / reaction log mirroring the server's bounded ring
+    // buffer (see ``party.PARTY_CHAT_LOG_MAX``). Each entry is one
+    // ``{type:"chat"|"reaction", seq, client_id, nickname, avatar,
+    // text|code, ts}`` payload as delivered by the WS broadcast.
+    chatLog: [],
+    chatSeq: 0,
+    // Last-sent timestamps for client-side throttling so a stuck
+    // send button can't outpace the server-side per-player rate
+    // limit (which silently drops, leaving the user wondering why
+    // their reaction didn't show up).
+    lastChatAt: 0,
+    lastReactAt: 0,
+    // Live-connection bookkeeping for the auto-reconnect path. The
+    // party WS is the long-poll heartbeat for the puzzle relay —
+    // when a phone backgrounds the tab or the carrier NAT silently
+    // drops the socket, the client side previously had no way to
+    // recover and the board would freeze for everyone in the room.
+    // pingTimer fires `{type:"ping"}` every PARTY_WS_PING_MS so the
+    // server detects a dead client (and so middleboxes don't kill
+    // the socket on idle). wsRetry tracks reconnect attempts for
+    // exponential backoff.
+    pingTimer: null,
+    wsRetry: 0,
+    reconnectTimer: null,
   },
   // Spectator session (view-only, separate from `party`).
   spectator: {
@@ -567,6 +601,10 @@ const state = {
     es: null,           // EventSource
     invitations: {},    // invite_id -> invitation payload
     reconnectTimer: null,
+    // Exponential-backoff state for manual reconnects. Reset to 0
+    // on every successful "hello" message; doubles on every retry
+    // up to a 30s ceiling so a stuck server doesn't get hammered.
+    reconnectAttempts: 0,
   },
   // 1 vs 1 mode — challenge lobby + live match (legal moves over WS).
   // `outgoing` tracks the in-flight challenge we sent (so we can cancel
@@ -575,17 +613,42 @@ const state = {
   onevsone: {
     online: [],
     selectedTime: 300,        // 5 min default
+    selectedColor: "random", // "w" | "b" | "random" — challenger's preferred side
     outgoing: null,           // { challenge_id, target_id, target_nickname, time_seconds }
     incoming: {},             // challenge_id -> challenge payload (toast index)
     match: null,              // server-shaped match object
+    // Premove queue mirrors the Play-vs-Stockfish one: [{from, to,
+    // promotion}], unlimited length, drains after every opponent
+    // reply. An illegal premove plays the illegal sound and clears
+    // the whole queue.
+    premoves: [],
+    premoveChess: null,
     ws: null,                 // WebSocket
     wsRetry: 0,
+    // Tracks the match.id we last opened (or attempted to open) a
+    // WebSocket for. When the active match changes we reset
+    // `wsRetry` so a new game doesn't inherit the previous match's
+    // backoff (otherwise a flaky 5+0 match leaves us with an 8s
+    // reconnect delay on the very first attempt of the next game).
+    wsMatchId: null,
+    // Outbound message queue: any payloads we tried to send while the
+    // socket was still CONNECTING (or briefly disconnected) so we
+    // don't silently drop a move/resign/draw_offer the user just
+    // performed. Drained from `ws.onopen`. Each entry is the JSON
+    // string we'd otherwise send.
+    pendingSend: [],
     clockTimer: null,
     chess: null,              // chess.js position mirror
     selected: null,           // selected square in live game
     legalTargets: [],
     pendingPromotion: null,   // { from, to } awaiting piece pick
     refreshTimer: null,       // online list periodic refresh
+    // Survives the async lobby render race when the user clicks
+    // "Челлендж" from a popover — enterOneVsOneView() awaits the
+    // active-match recovery API before rendering the lobby, which
+    // wipes #onevsone-form-host. Stashing the target here lets the
+    // eventual _renderOnevsoneLobby() restore the challenge form.
+    pendingChallenge: null,
   },
   // Global Leaderboard panel (right column on Rush + 1v1 views).
   // Pure dataset = every visitor that has appeared on /api/users.
@@ -633,6 +696,11 @@ const state = {
   engine: {
     running: false,
     path: null,
+    // Set from /api/auth/check at boot and from the SSE engine_state
+    // frame whenever the host reconfigures the pool. Drives whether
+    // the engine panel renders read-only.
+    isHost: false,
+    hostTokenRequired: false,
   },
   // Review-mode visuals.
   bestArrow: null,        // { from, to } — primary green arrow on board
@@ -684,6 +752,12 @@ const state = {
     needsNextOnReturn: false, // user left mid-pendingNext; advance when they come back
     timerHandle: null,        // setInterval handle for live timer display
     idle: true,               // gate auto-load behind a "Начать игру" click
+    // Replay-only mode: the user clicked a puzzle from a *Battle*
+    // results modal to re-attempt it. Stats, rating, history and the
+    // /api/users/puzzle_attempt POST are all suppressed so the
+    // attempt doesn't pollute the profile or leaderboards.
+    replayOnly: false,
+    replayMeta: null,         // optional { source: "battle", ... } for the sidebar banner
   },
   // Daily Puzzle — one shared puzzle per UTC day with leaderboard + streak.
   daily: {
@@ -1143,8 +1217,72 @@ function loadFen(fen) {
 const boardEl = document.getElementById("board");
 const statusEl = document.getElementById("status-line");
 
+// Right-click anywhere on the board cancels any queued premoves
+// (chess.com behaviour). Native contextmenu is suppressed so the
+// browser menu never pops up while the user is queuing premoves.
+if (boardEl) {
+  boardEl.addEventListener("contextmenu", (ev) => {
+    let cancelled = false;
+    if (state.game && state.game.active
+        && state.game.premoves && state.game.premoves.length) {
+      state.game.premoves = [];
+      state.game.premoveChess = null;
+      cancelled = true;
+    }
+    if (state.view === "onevsone" && state.onevsone && state.onevsone.match
+        && state.onevsone.premoves && state.onevsone.premoves.length) {
+      state.onevsone.premoves = [];
+      state.onevsone.premoveChess = null;
+      cancelled = true;
+    }
+    if (cancelled) {
+      state.selectedSquare = null;
+      state.legalTargets = [];
+      ev.preventDefault();
+      renderBoard();
+    }
+  });
+}
+
+// When a premove queue is active (Main or 1 vs 1), build a 64-cell
+// display board from the speculative position so the premoved
+// pieces visually appear on their destination squares (chess.com
+// "ghost" rendering). Returns null when no premove queue is active
+// or the speculative chess can't be built — in either case the
+// caller renders state.board as usual. If the queue contains a
+// move that can no longer be made pseudo-legally (own piece on
+// destination after the opponent moved, etc.), the queue is dropped
+// here so stale orange highlights don't linger past the failure.
+function _getDisplayBoardForRender() {
+  if (state.game && state.game.active
+      && state.game.premoves && state.game.premoves.length) {
+    const spec = _premoveSpeculativeChess();
+    if (spec) {
+      const arr = _boardFromFen(spec.fen());
+      if (arr) return arr;
+    }
+    state.game.premoves = [];
+    state.game.premoveChess = null;
+    return null;
+  }
+  if (state.view === "onevsone" && state.onevsone && state.onevsone.match
+      && !state.onevsone.match.finished
+      && state.onevsone.premoves && state.onevsone.premoves.length) {
+    const spec = _onevsonePremoveSpeculativeChess();
+    if (spec) {
+      const arr = _boardFromFen(spec.fen());
+      if (arr) return arr;
+    }
+    state.onevsone.premoves = [];
+    state.onevsone.premoveChess = null;
+    return null;
+  }
+  return null;
+}
+
 function renderBoard() {
   boardEl.innerHTML = "";
+  const displayBoard = _getDisplayBoardForRender() || state.board;
   for (let visualRow = 0; visualRow < 8; visualRow++) {
     for (let visualCol = 0; visualCol < 8; visualCol++) {
       const r = state.flipped ? 7 - visualRow : visualRow;
@@ -1159,7 +1297,7 @@ function renderBoard() {
       // Coordinates are rendered outside the board in dedicated strips
       // (.board-ranks left, .board-files bottom) — see renderBoardCoords().
 
-      const piece = state.board[idx];
+      const piece = displayBoard[idx];
       if (piece) {
         const pieceEl = document.createElement("span");
         pieceEl.className = "piece " + (piece === piece.toUpperCase() ? "white" : "black");
@@ -1178,8 +1316,20 @@ function renderBoard() {
         cell.classList.add(piece ? "legal-capture" : "legal-move");
       }
       // Highlight queued premoves (any number) on both endpoints.
+      // Premoves are tracked separately for Play-vs-Stockfish
+      // (state.game.premoves) and 1 vs 1 (state.onevsone.premoves) —
+      // both can be live in a given session so we mark both.
       if (state.game && state.game.active && state.game.premoves && state.game.premoves.length) {
         for (const pm of state.game.premoves) {
+          if (pm.from === sqName || pm.to === sqName) {
+            cell.classList.add("premove");
+          }
+        }
+      }
+      if (state.view === "onevsone" && state.onevsone && state.onevsone.match
+          && !state.onevsone.match.finished
+          && state.onevsone.premoves && state.onevsone.premoves.length) {
+        for (const pm of state.onevsone.premoves) {
           if (pm.from === sqName || pm.to === sqName) {
             cell.classList.add("premove");
           }
@@ -1385,10 +1535,15 @@ document.addEventListener("touchend", (ev) => {
   if (!dropCell || !dropCell.dataset.square) return;
   const targetSquare = dropCell.dataset.square;
   if (targetSquare === fromSquare) return;
-  // Mirror handleDrop's branching: game / legal-mode / sandbox.
+  // Mirror handleDrop's branching: game / 1v1 / legal-mode / sandbox.
   if (state.game.active) {
     if (!fromSquare) return;
     tryMakePlayerMove(fromSquare, targetSquare);
+    return;
+  }
+  if (state.view === "onevsone" && state.onevsone && state.onevsone.match) {
+    if (!fromSquare) return;
+    tryOneVsOneMove(fromSquare, targetSquare);
     return;
   }
   if (state.legalMode) {
@@ -1555,6 +1710,20 @@ function tryFreeplayMove(from, to) {
   setStatus(`Ход: ${move.san}.`);
   // Freeplay: the user controls both sides, treat every move as "own".
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
+  // Analysis sandbox: when the user is exploring a what-if line from
+  // the imported game (legal-mode toggle on, analysis view, no drill /
+  // puzzle / daily / rush / opening "answer" mode active), update the
+  // eval bar so the position evaluation tracks the user's variation
+  // just like chess.com's "Try yourself" mode. We skip everything
+  // except the analysis view because no other view shows the bar in
+  // freeplay.
+  if (state.view === "analysis") {
+    try {
+      const fen = c.fen();
+      const stm = (fen.split(/\s+/)[1] || "w") === "w" ? "w" : "b";
+      _scheduleLiveEvalBarUpdate(fen, stm);
+    } catch (_) { /* ignore */ }
+  }
 }
 
 function ensureFreeplayChess() {
@@ -1604,11 +1773,16 @@ function handleSquareClick(squareName) {
 }
 
 function handleOneVsOneSquareClick(squareName) {
-  const c = state.onevsone.chess;
-  if (!c) return;
+  const baseC = state.onevsone.chess;
+  if (!baseC) return;
   const m = state.onevsone.match;
   if (!m || m.finished) return;
   const you = m.you;
+  if (!you) return;
+  // Use the speculative position (real FEN + queued premoves, side
+  // forced to ours) so click-to-select keeps working while it's the
+  // opponent's turn and we want to chain more premoves.
+  const c = _onevsonePremoveSpeculativeChess() || baseC;
   const piece = c.get(squareName);
   if (state.selectedSquare) {
     if (state.selectedSquare === squareName) {
@@ -1621,7 +1795,7 @@ function handleOneVsOneSquareClick(squareName) {
       tryOneVsOneMove(state.selectedSquare, squareName);
       return;
     }
-    if (piece && you && piece.color === you.color && c.turn() === you.color) {
+    if (piece && piece.color === you.color) {
       _onevsoneSelectSquare(squareName);
       return;
     }
@@ -1630,18 +1804,24 @@ function handleOneVsOneSquareClick(squareName) {
     renderBoard();
     return;
   }
-  if (piece && you && piece.color === you.color && c.turn() === you.color) {
+  if (piece && piece.color === you.color) {
     _onevsoneSelectSquare(squareName);
   }
 }
 
 function _onevsoneSelectSquare(squareName) {
-  const c = state.onevsone.chess;
+  const baseC = state.onevsone.chess;
+  const c = _onevsonePremoveSpeculativeChess() || baseC;
   if (!c) return;
   let moves = [];
   try { moves = c.moves({ square: squareName, verbose: true }); } catch { moves = []; }
+  const targets = moves.map((mv) => mv.to);
+  if (c !== baseC) {
+    const piece = c.get(squareName);
+    _addPawnPremoveCaptureSquares(c, squareName, piece, targets);
+  }
   state.selectedSquare = squareName;
-  state.legalTargets = moves.map((mv) => mv.to);
+  state.legalTargets = targets;
   renderBoard();
 }
 
@@ -1688,8 +1868,31 @@ function _legalTargetsForSquare(squareName) {
   // landings for the piece on `squareName`, or { ok: false } if there
   // are no legal targets to highlight (wrong colour, sandbox, etc.).
   let c = null;
+  // 1v1 first \u2014 the player is also in `legalMode` while a 1v1 match
+  // is live, so without this branch the freeplay chess (always
+  // white-to-move from the starting position) was used and Black saw
+  // White's legal moves while their own pieces stayed unhighlighted.
+  if (state.view === "onevsone" && state.onevsone && state.onevsone.match) {
+    const baseC = state.onevsone.chess;
+    const you = state.onevsone.match.you;
+    if (!baseC || !you) return { ok: false };
+    // While it's the opponent's turn we evaluate against the
+    // speculative position (real FEN with side forced to ours +
+    // every queued premove applied) so the player still sees legal
+    // targets and can chain premoves chess.com-style.
+    const specC = _onevsonePremoveSpeculativeChess() || baseC;
+    const piece0 = specC.get(squareName);
+    if (!piece0 || piece0.color !== you.color) return { ok: false };
+    if (specC.turn() !== you.color) return { ok: false };
+    const moves0 = specC.moves({ square: squareName, verbose: true });
+    const targets0 = moves0.map((m) => m.to);
+    _addPawnPremoveCaptureSquares(specC, squareName, piece0, targets0);
+    return { ok: true, chess: specC, targets: targets0 };
+  }
   if (state.game.active) {
-    c = state.game.chess;
+    // Same idea as the 1v1 branch — use the premove speculative
+    // position so legal targets light up while the engine thinks.
+    c = _premoveSpeculativeChess() || state.game.chess;
     if (c.turn() !== state.game.playerColor) return { ok: false };
   } else if (state.legalMode) {
     c = ensureFreeplayChess();
@@ -1712,7 +1915,40 @@ function _legalTargetsForSquare(squareName) {
       if (!targets.includes(rookSq)) targets.push(rookSq);
     }
   }
+  // Premove pseudo-legal extras: pawns can target their two diagonal
+  // squares even when empty (chess.com lets you premove exd5 hoping
+  // the opponent advances a pawn to d5). Only adds extras when we
+  // are actually queuing a premove (i.e., a premove queue is live).
+  if (state.game.active && state.game.premoves && state.game.premoves.length) {
+    _addPawnPremoveCaptureSquares(c, squareName, piece, targets);
+  } else if (state.game.active && c.turn() === state.game.playerColor
+      && c !== state.game.chess) {
+    // Even the first premove of a turn should show diagonal pawn
+    // captures while the engine thinks.
+    _addPawnPremoveCaptureSquares(c, squareName, piece, targets);
+  }
   return { ok: true, chess: c, targets };
+}
+
+// Append pawn diagonal-capture squares (both sides, even if empty)
+// to `targets` so premove highlighting matches chess.com behaviour.
+// Mutates the passed-in array in place. Safe to call on any piece —
+// non-pawns are a no-op.
+function _addPawnPremoveCaptureSquares(c, fromSquare, piece, targets) {
+  if (!piece || piece.type !== "p") return;
+  const fromFile = fromSquare.charCodeAt(0) - 97;
+  const fromRank = parseInt(fromSquare[1], 10) - 1;
+  if (fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7) return;
+  const dir = piece.color === "w" ? 1 : -1;
+  for (const df of [-1, 1]) {
+    const tf = fromFile + df;
+    const tr = fromRank + dir;
+    if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
+    const sq = String.fromCharCode(97 + tf) + String(tr + 1);
+    const tgt = c.get(sq);
+    if (tgt && tgt.color === piece.color) continue;
+    if (!targets.includes(sq)) targets.push(sq);
+  }
 }
 
 function paintDragLegalTargets(squareName) {
@@ -2252,6 +2488,78 @@ async function refreshEngineStatus() {
   }
 }
 
+// Apply an engine-state payload from the SSE hello / engine_state
+// frame to the panel controls. ``state`` shape mirrors
+// EnginePool.current_state() — see backend/stockfish_engine.py.
+// We only OVERWRITE inputs we don't currently own the focus on, so
+// the host can keep typing into Path / Threads while concurrent
+// updates arrive without their text getting blown away.
+function _applyEngineState(snap) {
+  if (!snap || typeof snap !== "object") return;
+  const pathEl = document.getElementById("engine-path");
+  const threadsEl = document.getElementById("engine-threads");
+  const hashEl = document.getElementById("engine-hash");
+  const skillEl = document.getElementById("engine-skill");
+  const statusEl = document.getElementById("engine-status");
+  state.engine.running = !!snap.running;
+  state.engine.path = snap.path || null;
+  if (statusEl) {
+    statusEl.textContent = snap.running ? `работает: ${snap.path || ""}` : "не настроен";
+    statusEl.className = snap.running ? "ok" : "muted";
+  }
+  const opts = snap.options || {};
+  // Only stomp a non-focused field; otherwise we'd erase the host's
+  // half-typed value mid-edit when the broadcast lands on their own
+  // tab. (Browsers report the active element via document.activeElement.)
+  const active = document.activeElement;
+  if (pathEl && pathEl !== active && snap.path) pathEl.value = snap.path;
+  if (threadsEl && threadsEl !== active && typeof opts.threads === "number") {
+    threadsEl.value = String(opts.threads);
+  }
+  if (hashEl && hashEl !== active && typeof opts.hash_mb === "number") {
+    hashEl.value = String(opts.hash_mb);
+  }
+  if (skillEl && skillEl !== active && typeof opts.skill_level === "number") {
+    skillEl.value = String(opts.skill_level);
+  }
+}
+
+// Toggle host-mode UI affordances. Non-host visitors get a read-only
+// engine panel with disabled inputs / hidden buttons + a banner that
+// explains the host owns the shared Stockfish pool. The host sees
+// the panel exactly as before.
+function _setHostMode({ isHost, hostTokenRequired }) {
+  state.engine.isHost = !!isHost;
+  state.engine.hostTokenRequired = !!hostTokenRequired;
+  const banner = document.getElementById("engine-readonly-banner");
+  const pathEl = document.getElementById("engine-path");
+  const threadsEl = document.getElementById("engine-threads");
+  const hashEl = document.getElementById("engine-hash");
+  const skillEl = document.getElementById("engine-skill");
+  const btnConfigure = document.getElementById("btn-engine-configure");
+  const btnStop = document.getElementById("btn-engine-stop");
+  // Only lock the panel when the host explicitly gated it with a
+  // token. On a default local install everyone on 127.0.0.1 is
+  // "host" so the legacy behaviour (every tab can reconfigure) is
+  // preserved.
+  const readOnly = hostTokenRequired && !isHost;
+  if (banner) banner.hidden = !readOnly;
+  [pathEl, threadsEl, hashEl, skillEl].forEach((el) => {
+    if (!el) return;
+    el.disabled = readOnly;
+    if (readOnly) el.setAttribute("title", "Параметры задаёт хост");
+    else el.removeAttribute("title");
+  });
+  if (btnConfigure) {
+    btnConfigure.disabled = readOnly;
+    btnConfigure.hidden = readOnly;
+  }
+  if (btnStop) {
+    btnStop.disabled = readOnly;
+    btnStop.hidden = readOnly;
+  }
+}
+
 function intOrDefault(value, fallback) {
   const n = parseInt(value, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -2347,6 +2655,12 @@ document.getElementById("btn-play-start").addEventListener("click", async () => 
     movetimeMs: parseInt(document.getElementById("movetime").value, 10) || 1000,
     history: [],
     stopRequested: false,
+    // Premove queue + speculative chess.js position. Must be initialised
+    // here, otherwise the very first call to engineMove() crashes on
+    // `myGame.premoves.length` with "Cannot read properties of
+    // undefined (reading 'length')" and the game halts after one move.
+    premoves: [],
+    premoveChess: null,
   };
   document.getElementById("btn-play-stop").disabled = false;
   document.getElementById("btn-play-start").disabled = true;
@@ -2373,38 +2687,179 @@ function stopGame() {
 
 // ---------- Premoves (Play vs Stockfish) ----------
 
+// Force a FEN to have a specific side to move. Used when validating
+// premoves: while it's the engine's turn, we still want chess.js to
+// accept the *player*'s pseudo-legal move on the same position. If we
+// fed chess.js the unmodified FEN it would reject every premove with
+// "wrong colour to move" (and the move handler would play the illegal
+// sound), which is exactly the bug players hit when premoving in Main.
+// EP target is cleared on a flip because the file-4 square in FEN is
+// always the en-passant target for the side to move — keeping the old
+// value after swapping sides would let chess.js "capture" the
+// player's own pawn en-passant, which is nonsensical.
+function _fenWithSide(fen, color) {
+  if (!fen || !color) return fen;
+  const parts = fen.split(" ");
+  if (parts.length < 4) return fen;
+  if (parts[1] === color) return fen;
+  parts[1] = color;
+  parts[3] = "-";
+  return parts.join(" ");
+}
+
+// Convert an arbitrary FEN's placement field into our 64-cell array
+// (same layout state.board uses) without mutating any global state.
+// Returns null on malformed input. Used to render the speculative
+// position while premoves are queued.
+function _boardFromFen(fen) {
+  const placement = (fen || "").split(/\s+/)[0] || "";
+  const ranks = placement.split("/");
+  if (ranks.length !== 8) return null;
+  const out = new Array(64).fill(null);
+  for (let r = 0; r < 8; r++) {
+    let f = 0;
+    for (const ch of ranks[r]) {
+      if (/[1-8]/.test(ch)) {
+        f += parseInt(ch, 10);
+      } else if ("KQRBNPkqrbnp".includes(ch)) {
+        out[r * 8 + f] = ch;
+        f++;
+      } else {
+        return null;
+      }
+      if (f > 8) return null;
+    }
+    if (f !== 8) return null;
+  }
+  return out;
+}
+
+// Pseudo-legal premove geometry — chess.com lets you premove moves
+// that aren't *currently* legal but could become legal after the
+// opponent's reply (e.g. pawn captures into empty diagonals,
+// sliders that look blocked right now). Returns true if the
+// (from, to) pair matches the piece's move shape, regardless of
+// blocking pieces along the path or occupancy at the destination
+// (own-piece-on-destination is still rejected). chess.js stays
+// the source of truth for *legal* moves at drain time.
+function _isPseudoLegalPremovePattern(c, piece, from, to) {
+  if (!piece || from === to) return false;
+  const fromFile = from.charCodeAt(0) - 97;
+  const fromRank = parseInt(from[1], 10) - 1;
+  const toFile = to.charCodeAt(0) - 97;
+  const toRank = parseInt(to[1], 10) - 1;
+  if (toFile < 0 || toFile > 7 || toRank < 0 || toRank > 7) return false;
+  if (fromFile < 0 || fromFile > 7 || fromRank < 0 || fromRank > 7) return false;
+  const target = c.get(to);
+  if (target && target.color === piece.color) return false;
+  const df = toFile - fromFile;
+  const dr = toRank - fromRank;
+  switch (piece.type) {
+    case "p": {
+      const dir = piece.color === "w" ? 1 : -1;
+      const startRank = piece.color === "w" ? 1 : 6;
+      if (df === 0 && dr === dir && !target) return true;
+      if (df === 0 && dr === 2 * dir && fromRank === startRank && !target) {
+        const midSq = String.fromCharCode(97 + fromFile) + String(fromRank + dir + 1);
+        return !c.get(midSq);
+      }
+      // Diagonal capture is pseudo-legal even on an empty square so
+      // the player can premove e.g. exd5 expecting the opponent's
+      // pawn to advance.
+      if (Math.abs(df) === 1 && dr === dir) return true;
+      return false;
+    }
+    case "n":
+      return (Math.abs(df) === 1 && Math.abs(dr) === 2)
+        || (Math.abs(df) === 2 && Math.abs(dr) === 1);
+    case "k":
+      // 1-square king. Castling-via-king-to-g/c is handled separately
+      // via castlingTargetIfKingOnRook so we keep this strict.
+      return Math.abs(df) <= 1 && Math.abs(dr) <= 1;
+    case "b":
+      return Math.abs(df) === Math.abs(dr);
+    case "r":
+      return df === 0 || dr === 0;
+    case "q":
+      return df === 0 || dr === 0 || Math.abs(df) === Math.abs(dr);
+    default:
+      return false;
+  }
+}
+
+// Mutate a chess.js instance to apply a single premove, falling
+// back to manual put/remove for pseudo-legal moves chess.js refuses
+// (pawn captures into empty squares, sliders "through" pieces).
+// After applying, side-to-move is forced back to the player's
+// colour so the next premove can chain off the same instance.
+// Returns true on success.
+function _applyPremoveToSpecChess(c, pm, color) {
+  if (!c || !pm) return false;
+  let applied = false;
+  try {
+    const m = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
+    if (m) applied = true;
+  } catch (_) { /* fall through to manual apply */ }
+  if (!applied) {
+    const piece = c.get(pm.from);
+    if (!piece || piece.color !== color) return false;
+    if (!_isPseudoLegalPremovePattern(c, piece, pm.from, pm.to)) return false;
+    let putType = piece.type;
+    if (piece.type === "p") {
+      const toRank = pm.to[1];
+      if ((piece.color === "w" && toRank === "8")
+          || (piece.color === "b" && toRank === "1")) {
+        putType = pm.promotion || "q";
+      }
+    }
+    try {
+      c.remove(pm.from);
+      c.remove(pm.to);
+      c.put({ type: putType, color: piece.color }, pm.to);
+    } catch (_) { return false; }
+  }
+  // Force side back to player so the next premove sees their turn.
+  try {
+    const parts = c.fen().split(" ");
+    if (parts[1] !== color) {
+      parts[1] = color;
+      parts[3] = "-";
+      c.load(parts.join(" "));
+    }
+  } catch (_) { return false; }
+  return true;
+}
+
 // Returns a chess.js instance reflecting the current real position
-// plus every queued premove. Used both to validate a *new* premove
-// at queue time and to compute legal targets while the engine thinks.
+// plus every queued premove, with side-to-move forced to the player
+// so a brand-new premove can be validated even while the engine is
+// still thinking. After each applied premove we flip the side back to
+// the player's colour so additional premoves can chain off the
+// pseudo-position. Used both to validate a *new* premove at queue
+// time and to compute legal targets while the engine thinks.
 function _premoveSpeculativeChess() {
   if (!state.game.chess) return null;
-  const c = new Chess(state.game.chess.fen());
+  const youColor = state.game.playerColor;
+  let c;
+  try { c = new Chess(_fenWithSide(state.game.chess.fen(), youColor)); }
+  catch (_) { return null; }
+  if (!c) return null;
   for (const pm of state.game.premoves) {
-    try {
-      const m = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" });
-      if (!m) return null;
-    } catch (_) {
-      return null;
-    }
+    if (!_applyPremoveToSpecChess(c, pm, youColor)) return null;
   }
   return c;
 }
 
 // Queue a player move as a premove. Returns true if the move was
-// legal in the speculative position and got queued, false otherwise.
+// pseudo-legal in the speculative position and got queued.
 function _queuePremove(from, to) {
   const c = _premoveSpeculativeChess();
   if (!c) return false;
   if (c.turn() !== state.game.playerColor) return false;
   // Resolve king-on-rook castle drag: the king moves to g/c, not the rook.
   const moveTo = castlingTargetIfKingOnRook(from, to) || to;
-  let move;
-  try {
-    move = c.move({ from, to: moveTo, promotion: "q" });
-  } catch {
-    move = null;
-  }
-  if (!move) return false;
+  if (!_applyPremoveToSpecChess(c, { from, to: moveTo, promotion: "q" },
+      state.game.playerColor)) return false;
   state.game.premoves.push({ from, to: moveTo, promotion: "q" });
   state.game.premoveChess = c;
   state.selectedSquare = null;
@@ -2527,6 +2982,14 @@ function applyChessMoveToBoard(move) {
   state.game.history.push(move.san);
   renderBoard();
   renderHistory();
+  // Live eval bar in vs-Stockfish: kick a quick analyse after every
+  // ply (engine + player) so the bar tracks the actual game state.
+  try {
+    const fen = state.game.chess.fen();
+    const stm = (fen.split(/\s+/)[1] || "w") === "w" ? "w" : "b";
+    _refreshEvalBarVisibility();
+    _scheduleLiveEvalBarUpdate(fen, stm);
+  } catch (_) { /* ignore */ }
 }
 
 function gameStateText() {
@@ -2599,6 +3062,13 @@ function selectSquare(squareName) {
       const rookSq = m.flags.includes("k") ? "h" + rank : "a" + rank;
       if (!targets.includes(rookSq)) targets.push(rookSq);
     }
+  }
+  // Add pawn pseudo-legal diagonal squares for click-to-select too,
+  // so a click on a pawn during the engine's turn shows both diagonal
+  // capture options like chess.com's premove highlights.
+  if (c !== state.game.chess) {
+    const piece = c.get(squareName);
+    _addPawnPremoveCaptureSquares(c, squareName, piece, targets);
   }
   state.legalTargets = targets;
   renderBoard();
@@ -2860,12 +3330,60 @@ function setView(view) {
   if (prev === "opening" && v !== "opening") leaveOpeningView();
   if (prev === "battle" && v !== "battle") leaveBattleView();
   if (prev === "onevsone" && v !== "onevsone" && typeof leaveOneVsOneView === "function") leaveOneVsOneView();
+  // Mode-switch state cleanup. Without this, residual flags from the
+  // previous view (state.game.active from a vs-Stockfish session,
+  // state.puzzle.active from a puzzle that was never solved, a stuck
+  // drill or rush, etc) cause move-dispatch in the new view to be
+  // intercepted by the wrong handler:
+  //   - vs-engine flow checks state.game.active FIRST in handleDrop /
+  //     handleSquareClick, so a leftover true value swallows every
+  //     1v1 drag/click as an "engine move".
+  //   - tryFreeplayMove routes to tryPuzzleMove whenever
+  //     state.puzzle.active is true AND the view is "puzzle", so an
+  //     unsolved puzzle would otherwise haunt the sandbox if the user
+  //     ever lands back on puzzles via the tab.
+  // The fix is conservative: only clear flags that gate move dispatch
+  // and do it only when we're actually changing views, so no other
+  // state (history, leaderboard etc) is touched.
+  if (prev !== v) {
+    if (state.game && state.game.active && v !== "main") {
+      try { if (typeof stopGame === "function") stopGame(); } catch (_) { /* ignore */ }
+      state.game.active = false;
+      state.game.premoves = [];
+      state.game.premoveChess = null;
+    }
+    if (state.drill && state.drill.active && v !== "battle") {
+      state.drill.active = false;
+    }
+    if (state.puzzle && state.puzzle.active && v !== "puzzle") {
+      state.puzzle.active = false;
+    }
+    if (state.daily && state.daily.active && v !== "daily") {
+      state.daily.active = false;
+    }
+    if (state.rush && state.rush.active && v !== "rush") {
+      state.rush.active = false;
+    }
+    if (state.opening && state.opening.active && v !== "opening") {
+      state.opening.active = false;
+    }
+    // Drop any half-finished click-to-select / drag-highlight from the
+    // previous view so the new view doesn't paint stale "legal target"
+    // squares on its first render.
+    state.selectedSquare = null;
+    state.legalTargets = [];
+  }
   if (v === "puzzle")       enterPuzzleView();
   else if (v === "daily")   enterDailyView();
   else if (v === "rush")    enterRushView();
   else if (v === "battle")  enterBattleView();
   else if (v === "opening") enterOpeningView();
   else if (v === "onevsone" && typeof enterOneVsOneView === "function") enterOneVsOneView();
+  // Eval bar visibility tracks the current view. Analysis already
+  // toggles it via revealEvalBar() when the user imports a game;
+  // 1v1 and vs-Stockfish enable it from their respective enter
+  // hooks. Other views (sandbox, puzzles, rush, …) hide it.
+  try { _refreshEvalBarVisibility(); } catch (_) { /* ignore */ }
 }
 
 document.querySelectorAll(".view-tab").forEach((btn) => {
@@ -3049,6 +3567,16 @@ function normalizeReviewSource(raw) {
       const kind = m[1].toLowerCase();
       const id = m[2];
       return `https://www.chess.com/game/${kind}/${id}`;
+    }
+    // Bare /game/<id> (and /analysis/game/<id>, /live/game/<id>) without
+    // a kind segment — chess.com's importer only handles /game/<kind>/<id>,
+    // so we silently default to `live` (the most common kind for the
+    // chess.com share URL) and let the user see an error if it turns out
+    // to be a daily. This matches the spec: paste any chess.com game URL
+    // and it should auto-resolve.
+    const bare = url.pathname.match(/\/(?:analysis\/)?game\/(\d+)/i);
+    if (bare) {
+      return `https://www.chess.com/game/live/${bare[1]}`;
     }
     return src;
   }
@@ -3414,6 +3942,146 @@ function hideEvalBar() {
   if (bar) bar.hidden = true;
 }
 
+// Views that should display the live eval bar. Analysis always shows
+// it (filled from the loaded review); 1v1 and vs-Stockfish show it
+// once the position changes for the first time.
+const _EVAL_BAR_VIEWS = new Set(["analysis", "onevsone", "main"]);
+
+// Decide whether the eval bar should currently be visible based on
+// active view + sub-state. Called from setView() and from move
+// dispatchers so the bar appears as soon as a game starts.
+function _refreshEvalBarVisibility() {
+  const v = state.view;
+  if (!_EVAL_BAR_VIEWS.has(v)) {
+    hideEvalBar();
+    return;
+  }
+  if (v === "analysis") {
+    // Analysis owns its own visibility — only reveal once a review is
+    // loaded. Skip toggling here so we don't flicker the bar on top
+    // of the import form.
+    return;
+  }
+  if (v === "onevsone") {
+    const m = state.onevsone && state.onevsone.match;
+    if (m && !m.finished) { revealEvalBar(); return; }
+    hideEvalBar();
+    return;
+  }
+  if (v === "main") {
+    if (state.game && state.game.active) { revealEvalBar(); return; }
+    hideEvalBar();
+    return;
+  }
+}
+
+// Quick centipawn evaluation for an arbitrary FEN. Used outside
+// analysis (1v1, vs-Stockfish, sandbox-from-position) to drive the
+// live eval bar. Uses a short movetime to keep latency low; falls
+// back to a static heuristic when the server doesn't have a running
+// engine. Returns a value in white-POV centipawns or null if both
+// paths fail. Results are cached by FEN to avoid re-hitting the
+// engine for the same position twice in a row (e.g. when the player
+// flips the board or re-renders).
+const _evalBarCache = new Map();
+const _EVAL_BAR_CACHE_MAX = 256;
+
+function _evalBarCachePut(fen, cp) {
+  if (typeof cp !== "number") return;
+  _evalBarCache.set(fen, cp);
+  // Keep the cache small to dodge unbounded growth in marathon
+  // analysis sessions. ``Map`` preserves insertion order, so the
+  // oldest key falls out when we go over the cap.
+  if (_evalBarCache.size > _EVAL_BAR_CACHE_MAX) {
+    const firstKey = _evalBarCache.keys().next().value;
+    _evalBarCache.delete(firstKey);
+  }
+}
+
+async function _evalBarForFen(fen) {
+  if (typeof fen !== "string" || !fen) return null;
+  if (_evalBarCache.has(fen)) return _evalBarCache.get(fen);
+  // Stockfish path. ``movetime_ms`` is intentionally tiny — the eval
+  // bar wants "directional" not "tournament-grade". A 250ms search
+  // pegs depth around 12-14, more than enough to spot a forced mate
+  // in 5-6 ply and to render a stable bar without burning CPU on
+  // every move. The endpoint already 409s if the engine isn't
+  // running; we catch it below and fall through to the static eval.
+  try {
+    const resp = await fetch("/api/engine/analyse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fen, movetime_ms: 250, multipv: 1 }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      const line = (data && data.lines && data.lines[0]) || null;
+      if (line) {
+        // ``score_cp`` is from the side-to-move POV; convert to white
+        // POV for the bar (positive = white better).
+        const stm = (fen.split(/\s+/)[1] || "w") === "w" ? "w" : "b";
+        let cp = null;
+        if (typeof line.score_mate === "number") {
+          // ±100000 sentinel — same encoding the analysis review
+          // pipeline uses so updateEvalBar() renders "Mx" correctly.
+          const sign = line.score_mate > 0 ? 1 : -1;
+          const fromStm = sign * (100000 - Math.abs(line.score_mate));
+          cp = stm === "w" ? fromStm : -fromStm;
+        } else if (typeof line.score_cp === "number") {
+          cp = stm === "w" ? line.score_cp : -line.score_cp;
+        }
+        if (cp !== null) {
+          _evalBarCachePut(fen, cp);
+          return cp;
+        }
+      }
+    }
+  } catch (_) { /* ignore — fall through */ }
+  // Engine unavailable — fall back to a quick static material count so
+  // the bar still moves on every capture and the user has *something*
+  // rather than a frozen "0.0".
+  try {
+    const c = new Chess(fen);
+    const material = _staticMaterialCp(c);
+    _evalBarCachePut(fen, material);
+    return material;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _staticMaterialCp(c) {
+  // Crude material-balance heuristic in centipawns from white's POV.
+  // Pawn=100, N=320, B=330, R=500, Q=900. Used only when the engine
+  // pool can't help (e.g. host hasn't configured a binary yet) so the
+  // live eval bar still tracks captures.
+  const W = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 0 };
+  let cp = 0;
+  const board = c.board ? c.board() : [];
+  for (const row of board) {
+    for (const sq of row) {
+      if (!sq) continue;
+      const v = W[sq.type] || 0;
+      cp += sq.color === "w" ? v : -v;
+    }
+  }
+  return cp;
+}
+
+// Schedule a live eval-bar update for the given FEN. Coalesces rapid
+// callers (e.g. premove queue stutter) by remembering the most recent
+// FEN we asked for and discarding stale responses.
+let _evalBarPendingFen = null;
+function _scheduleLiveEvalBarUpdate(fen, moverSide) {
+  if (typeof fen !== "string" || !fen) return;
+  _evalBarPendingFen = fen;
+  _evalBarForFen(fen).then((cp) => {
+    if (_evalBarPendingFen !== fen) return; // stale
+    if (typeof cp !== "number") return;
+    try { updateEvalBar(cp, moverSide || "w"); } catch (_) { /* ignore */ }
+  }).catch(() => { /* ignore */ });
+}
+
 // Map cp (white POV) to a 0..1 fraction of board-height occupied by white.
 function cpToWhiteFrac(cpWhitePov) {
   if (cpWhitePov >= 99000) return 1.0;
@@ -3428,14 +4096,25 @@ function updateEvalBar(cpWhitePov, _moverSide) {
   const label = document.getElementById("eval-bar-label");
   if (!bar || !label) return;
   const frac = cpToWhiteFrac(cpWhitePov);
-  // The white block always represents white's share of the bar and the
-  // black block always represents black's share. To make the bar match
-  // the board orientation when it is flipped, the eval-bar element itself
-  // uses flex-direction: column-reverse via the .flipped class, swapping
-  // their visual order without inverting the meaning of the values.
-  const flipped = state.flipped;
+  // The bar is rendered as a single white overlay over a black container:
+  //   - container background = black (= black's share)
+  //   - .eval-bar-white      = white's share, absolutely positioned and
+  //                            anchored to white's side of the board.
+  //
+  // Anchoring via `.flipped` class is what keeps the bar oriented to the
+  // board: when state.flipped is false the player has white at the bottom,
+  // so white fills from the BOTTOM of the bar upwards; when flipped (black
+  // at the bottom), white fills from the TOP. This is a single source of
+  // truth — there is no flex-direction swap that can leave the bar
+  // half-rotated between renders, which is what made the analysis eval
+  // bar appear to "flip" inconsistently when clicking through moves.
+  const flipped = !!state.flipped;
   const whiteBottom = !flipped;
   bar.classList.toggle("flipped", flipped);
+  // .eval-bar-black is rendered as part of the container background now
+  // (see style.css). We keep --eval-black for callers that still read it
+  // from the DOM (e.g. screenshots / external instrumentation) but the
+  // actual paint is driven purely by --eval-white.
   bar.style.setProperty("--eval-white", `${(frac * 100).toFixed(2)}%`);
   bar.style.setProperty("--eval-black", `${((1 - frac) * 100).toFixed(2)}%`);
   // Pretty number.
@@ -4129,6 +4808,20 @@ function leavePuzzleView() {
   // `state.puzzle.startedAt`) so users can't dodge a hard puzzle by
   // bouncing tabs and hitting "Следующая" without penalty. Board input
   // is gated on `state.view === "puzzle"` instead of the active flag.
+  // Replay-only mode is single-shot — leaving the puzzle view ends
+  // the "no-save" session so the next regular puzzle resumes normal
+  // bookkeeping. The current puzzle object is also cleared so we
+  // don't accidentally "restore" the replay on re-entry.
+  if (state.puzzle.replayOnly) {
+    state.puzzle.replayOnly = false;
+    state.puzzle.replayMeta = null;
+    state.puzzle.current = null;
+    state.puzzle.moves = [];
+    state.puzzle.fenStart = null;
+    state.puzzle.side = null;
+    state.puzzle.feedback = null;
+    state.puzzle.idle = true;
+  }
   _stopPuzzleTimer();
   // Drop the solo-broadcast connection — outside puzzle view there's
   // nothing meaningful to broadcast and we don't want to clutter the
@@ -4346,6 +5039,7 @@ function tryPuzzleMove(from, to) {
   try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
   if (!move) {
     setStatus("Нелегальный ход.", "error");
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
@@ -4375,6 +5069,11 @@ function tryPuzzleMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
+    // Sound feedback even on wrong moves: play the regular move /
+    // capture SFX. The "incorrect" buzzer is reserved for rule-violating
+    // (illegal) moves only — a legal-but-wrong puzzle solution is still
+    // a real chess move, so we don't punish it with the buzzer here.
+    try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
     // Show the wrong-move position to spectators with the same red ✕
     // badge the player sees — without this they'd see the piece teleport
     // back to its origin (we never broadcast wrong moves before the
@@ -4400,11 +5099,19 @@ function tryPuzzleMove(from, to) {
   }
   // Correct! Apply the user's move visually.
   loadFen(c.fen());
-  _partyReportPosition(c.fen());
   state.lastMove = { from: move.from, to: move.to };
   // Same green check ("Хороший ход") that the Analysis page paints
   // in the corner of the played square — chess.com-style.
   state.reviewBadge = { square: move.to, classification: "good" };
+  // Mirror to spectators with the green ✓ badge + green from→to so the
+  // mini-board matches what the player sees (the broadcast must include
+  // reviewBadge explicitly — _partyReportPosition reads from opts before
+  // state, and we want the spectator badge tied to *this* square even
+  // if state.reviewBadge later changes for the next move).
+  _partyReportPosition(c.fen(), {
+    reviewBadge: { square: move.to, classification: "good" },
+    lastMove: { from: move.from, to: move.to },
+  });
   state.bestArrow = null;
   state.bestPv = null;
   state.puzzle.feedback = "correct";
@@ -4522,6 +5229,18 @@ function finalizePuzzle(result) {
   }
   state.puzzle.feedback =
     (outcome === "solved" || outcome === "solved-hint") ? "solved" : "shown";
+  // Replay-only path: the user re-attempted a puzzle they clicked
+  // from a Battle results modal. Surface visual feedback but skip the
+  // rating math, session-stats updates, server attempt POST and the
+  // recent-id history so the replay never touches the profile or
+  // leaderboards.
+  if (state.puzzle.replayOnly) {
+    spawnPuzzleCelebration(outcome === "failed" || outcome === "skipped" ? "bad" : "ok");
+    renderPuzzleUi();
+    renderPuzzleStatsBar();
+    renderPuzzleHistory();
+    return;
+  }
   // Update session counters.
   const ss = state.puzzle.sessionStats;
   if (outcome === "solved" || outcome === "solved-hint") {
@@ -5934,6 +6653,10 @@ document.getElementById("btn-onboarding-save")?.addEventListener("click", async 
   _saveLocalUser();
   await syncUserProfile();
   hideOnboarding();
+  // First-visit via invite link: a pending join was stashed because we
+  // couldn't fire it without a registered profile. Now that the user
+  // has a nickname + a synced backend record, kick the join off.
+  try { _runPendingInvite(); } catch (_) { /* ignore */ }
 });
 
 // Hamburger menu (Profile / Leaderboard).
@@ -6354,6 +7077,12 @@ async function _bootUser() {
     state.user.client_id = _uuidv4();
     showOnboarding();
   }
+  // Pull invite-link params off the URL. We do this *after* the user has
+  // a client_id so the join handlers can authenticate immediately. If
+  // the visitor still has the onboarding modal open we stash the pending
+  // invite — the modal's save handler kicks it off once the profile is
+  // synced. See `_consumeInviteLinkParams`.
+  try { _consumeInviteLinkParams(); } catch (_) { /* ignore — invite UX is best-effort */ }
   // Heartbeat every 30s so the backend "online" flag stays accurate
   // (window is 90s — see users.py::_summarize). Frontend leaderboards
   // and the 1 vs 1 / Battle online lists all read this single flag, so
@@ -6962,34 +7691,308 @@ async function partyJoin(code) {
   partyConnect(code);
 }
 
-function partyConnect(code) {
-  if (state.party.ws) {
-    try { state.party.ws.close(); } catch (_) {}
+// Build a shareable URL pointing at this same deployment. We keep any
+// pre-existing `token` / `host_token` style query params off the share
+// link — the auth proxy issues a cookie on the first hit so a fresh
+// visitor only needs the base URL + the join param. Callers can append
+// their own param via ``params``.
+function _buildShareableUrl(params) {
+  try {
+    const u = new URL(location.href);
+    // Strip everything that's either auth-sensitive (host_token) or
+    // pollution from a previous invite, then layer the requested
+    // params on top.
+    const drop = new Set([
+      "host_token", "join_party", "party", "join_1v1", "ovo",
+    ]);
+    for (const key of Array.from(u.searchParams.keys())) {
+      if (drop.has(key)) u.searchParams.delete(key);
+    }
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v == null || v === "") continue;
+      u.searchParams.set(k, String(v));
+    }
+    // Wipe the hash — invites should land on the default view, the
+    // setView call inside _runPendingInvite picks the right tab.
+    u.hash = "";
+    return u.toString();
+  } catch (_) {
+    // Fall back to a relative URL — better than throwing because the
+    // user can still hand-copy it out of the clipboard toast.
+    const qs = Object.entries(params || {})
+      .filter(([_, v]) => v != null && v !== "")
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join("&");
+    return location.origin + (qs ? `?${qs}` : "");
   }
+}
+
+function _buildPartyInviteLink(code) {
+  return _buildShareableUrl({ join_party: code });
+}
+
+function _buildOnevsoneInviteLink(challengeId) {
+  return _buildShareableUrl({ join_1v1: challengeId });
+}
+
+async function _copyTextToClipboard(text) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* fall through to legacy path */ }
+  // Legacy fallback: hidden textarea + execCommand. Required for
+  // Safari and any non-secure context (ngrok deploys behind HTTPS are
+  // fine but in-app webviews sometimes lack the async API).
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+// ---------- Invite via link ----------
+//
+// Two flavours of invite link, both designed to play nicely with the
+// ngrok-based public-URL flow described in `scripts/start-public.sh`:
+//
+//   ?join_party=<CODE>       — drop straight into a Battle Puzzle lobby
+//   ?join_1v1=<CHALLENGE_ID> — auto-accept a link-shareable 1v1 challenge
+//
+// We strip the param off the URL the moment we read it so a refresh
+// doesn't endlessly re-trigger the join (and so the URL bar stays clean
+// for screenshots / sharing back to a different friend).
+let _pendingInvite = null;
+
+function _readInviteLinkParams() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const partyCode = (params.get("join_party") || params.get("party") || "").trim();
+    const onevsoneId = (params.get("join_1v1") || params.get("ovo") || "").trim();
+    if (partyCode) return { kind: "party", code: partyCode.toUpperCase().slice(0, 16) };
+    if (onevsoneId) return { kind: "onevsone", challengeId: onevsoneId.slice(0, 64) };
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+function _scrubInviteParamsFromUrl() {
+  try {
+    const url = new URL(location.href);
+    let touched = false;
+    for (const key of ["join_party", "party", "join_1v1", "ovo"]) {
+      if (url.searchParams.has(key)) {
+        url.searchParams.delete(key);
+        touched = true;
+      }
+    }
+    if (touched) {
+      const next = url.pathname + (url.searchParams.toString() ? `?${url.searchParams}` : "") + url.hash;
+      history.replaceState(null, "", next);
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function _consumeInviteLinkParams() {
+  const invite = _readInviteLinkParams();
+  if (!invite) return;
+  _scrubInviteParamsFromUrl();
+  _pendingInvite = invite;
+  // If onboarding is still open the user hasn't picked a nickname yet —
+  // defer until they hit "Save". Otherwise run immediately.
+  const modal = document.getElementById("onboarding-modal");
+  if (modal && !modal.hidden) return;
+  _runPendingInvite();
+}
+
+async function _runPendingInvite() {
+  if (!_pendingInvite) return;
+  const inv = _pendingInvite;
+  _pendingInvite = null;
+  if (!state.user.client_id) return;
+  try {
+    if (inv.kind === "party") {
+      try { setView("battle"); } catch (_) { /* ignore */ }
+      await partyJoin(inv.code);
+      _showInfoToast(`Зашли в пати по ссылке · ${inv.code}`);
+    } else if (inv.kind === "onevsone") {
+      try { setView("onevsone"); } catch (_) { /* ignore */ }
+      await _onevsoneAcceptOpenChallenge(inv.challengeId);
+    }
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    _showInfoToast(`Не удалось зайти по ссылке: ${msg}`);
+  }
+}
+
+async function _onevsoneAcceptOpenChallenge(challengeId) {
+  if (!challengeId || !state.user.client_id) return;
+  // Peek at the metadata first so we can give the user a meaningful
+  // toast ("Sergey wants to play 5 min · accepting…") and bail cleanly
+  // if the link was already consumed by someone else.
+  let meta = null;
+  try {
+    meta = await api(`/api/onevsone/open/${encodeURIComponent(challengeId)}`);
+  } catch (e) {
+    throw new Error("Ссылка устарела или уже использована");
+  }
+  const ch = meta && meta.challenge;
+  if (!ch) throw new Error("Ссылка устарела или уже использована");
+  if (ch.challenger_id === state.user.client_id) {
+    // You can't accept your own challenge — just keep them on the
+    // 1v1 view; they'll see their own outgoing card.
+    _showInfoToast("Это твоя собственная ссылка — отправь её другу");
+    return;
+  }
+  const r = await api(`/api/onevsone/open/${encodeURIComponent(challengeId)}/accept`, {
+    method: "POST",
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname || "Гость",
+      avatar: state.user.avatar || "♟",
+    }),
+  });
+  if (r && r.match) {
+    state.onevsone.match = r.match;
+    try { _renderOnevsoneMatchUi(); } catch (_) { /* ignore */ }
+    try { _onevsoneEnsureWs(); } catch (_) { /* ignore */ }
+    _showInfoToast(`Игра началась · ${ch.challenger_nickname || "Гость"}`);
+  }
+}
+
+// Application-level WS heartbeat. Anything under ~20s is enough to keep
+// most mobile carrier NATs from killing the socket on idle, and lets us
+// detect a half-open connection via send-failure between ticks.
+const PARTY_WS_PING_MS = 15_000;
+// Cap for the reconnect backoff so we don't end up waiting a full
+// minute after a brief network blip.
+const PARTY_WS_MAX_BACKOFF_MS = 8_000;
+
+function _partyClearPingTimer() {
+  if (state.party.pingTimer) {
+    clearInterval(state.party.pingTimer);
+    state.party.pingTimer = null;
+  }
+}
+
+function _partyClearReconnectTimer() {
+  if (state.party.reconnectTimer) {
+    clearTimeout(state.party.reconnectTimer);
+    state.party.reconnectTimer = null;
+  }
+}
+
+function _partyShouldReconnect() {
+  // Only auto-reconnect while the user has an active room — leaving the
+  // view (state.view !== "battle") or finishing the match drops us back
+  // to the regular lobby flow.
+  return state.party.active
+    && state.party.code
+    && state.party.status !== "finished"
+    && state.view === "battle";
+}
+
+function _partyScheduleReconnect() {
+  if (!_partyShouldReconnect()) return;
+  _partyClearReconnectTimer();
+  const attempt = state.party.wsRetry++;
+  const delay = Math.min(
+    PARTY_WS_MAX_BACKOFF_MS,
+    500 * Math.pow(2, attempt),
+  );
+  state.party.reconnectTimer = setTimeout(() => {
+    state.party.reconnectTimer = null;
+    if (!_partyShouldReconnect()) return;
+    try {
+      partyConnect(state.party.code, /* isReconnect= */ true);
+    } catch (_) { /* ignore — onclose will reschedule */ }
+  }, delay);
+}
+
+function partyConnect(code, isReconnect) {
+  if (state.party.ws) {
+    try {
+      // Defang the previous socket so a stale onclose can't race the new
+      // one we're about to install and tear down the freshly-attached
+      // ping interval / reconnect bookkeeping.
+      state.party.ws.onclose = null;
+      state.party.ws.onerror = null;
+      state.party.ws.onmessage = null;
+      state.party.ws.close();
+    } catch (_) {}
+  }
+  _partyClearPingTimer();
+  _partyClearReconnectTimer();
   // Party owns the live broadcast channel — drop the solo presence
   // socket so spectator messages don't get duplicated across both.
   try { presenceDisconnect(); } catch (_) { /* ignore */ }
   state.party.code = code;
   state.party.active = true;
-  state.party.status = "lobby";
-  state.party.finalResults = null;
-  state.party.finalMeta = null;
-  state.party.scoreboard = [];
-  state.party.members = [];
-  // Match length is fixed at 3 min (chess.com Puzzle Battle style);
-  // the duration selector is gone but we keep the field around so
-  // legacy code paths reading state.party.durationSec still work.
-  state.party.durationSec = 180;
-  state.party.allowedDurations = [180];
+  if (!isReconnect) {
+    state.party.status = "lobby";
+    state.party.finalResults = null;
+    state.party.finalMeta = null;
+    state.party.scoreboard = [];
+    state.party.members = [];
+    // Match length is fixed at 3 min (chess.com Puzzle Battle style);
+    // the duration selector is gone but we keep the field around so
+    // legacy code paths reading state.party.durationSec still work.
+    state.party.durationSec = 180;
+    state.party.allowedDurations = [180];
+  }
   const ws = new WebSocket(_partyWsUrl(code));
   state.party.ws = ws;
+  ws.onopen = () => {
+    // Successful handshake clears the backoff counter so the next
+    // disconnect doesn't immediately bake in the previous attempt's
+    // delay.
+    state.party.wsRetry = 0;
+    // Application-layer keepalive so middleboxes don't silently kill
+    // the socket on idle and the server's per-connection ping/pong
+    // can prune dead phones in <=PING_INTERVAL + send_timeout.
+    _partyClearPingTimer();
+    state.party.pingTimer = setInterval(() => {
+      try {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: "ping", t: Date.now() }));
+      } catch (_) {
+        // Send failed — let onclose handle the reconnect path.
+      }
+    }, PARTY_WS_PING_MS);
+  };
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     handlePartyMessage(msg);
   };
-  ws.onerror = () => _partyShowError(new Error("Соединение потеряно"));
+  ws.onerror = () => {
+    // We surface the error only when there's no active session to
+    // resume into — the reconnect path is preferred over a hard
+    // user-facing alert because the room is still alive on the
+    // server and we'll fold back in on the next attempt.
+    if (!_partyShouldReconnect()) {
+      _partyShowError(new Error("Соединение потеряно"));
+    }
+  };
   ws.onclose = () => {
+    _partyClearPingTimer();
+    // If we still want to be in the room, auto-reconnect — server-side
+    // state is preserved across short disconnects (Party._mark_disconnect
+    // grants ~30s grace before kicking the member).
+    if (_partyShouldReconnect()) {
+      _partyScheduleReconnect();
+      return;
+    }
     if (state.party.active && state.party.status !== "finished") {
       // Disconnected before match end — surface as finished and keep board.
       state.party.active = false;
@@ -7003,13 +8006,41 @@ function partyConnect(code) {
 
 function handlePartyMessage(msg) {
   if (!msg || typeof msg !== "object") return;
+  // B1: when the user is replaying a single puzzle from the Battle
+  // results modal (or any "replay only" context), the party WS may
+  // still be open and broadcasting fresh puzzles. Ignore anything
+  // that would mutate the board so the replay isn't yanked out from
+  // under the user. Chat/reaction/finish are still allowed through
+  // so the result screen stays in sync.
+  if (state.puzzle && state.puzzle.replayOnly) {
+    if (msg.type === "start"
+      || msg.type === "match_state"
+      || msg.type === "next_puzzle"
+      || msg.type === "scoreboard"
+      || msg.type === "eliminated") {
+      return;
+    }
+  }
   switch (msg.type) {
+    case "chat":
+    case "reaction":
+      _partyAbsorbChatEvent(msg);
+      _renderPartyChatLog();
+      break;
     case "lobby":
       state.party.party_id = msg.party_id;
       state.party.host_id = msg.host_id;
       state.party.status = msg.status;
       state.party.endsAt = msg.ends_at || 0;
       state.party.startedAt = msg.started_at || 0;
+      // Replay-buffer snapshot the server tacks onto every state
+      // payload. Replace ours instead of merging — the server is
+      // authoritative on order and we'd otherwise duplicate every
+      // entry between an attach and the live broadcast.
+      if (Array.isArray(msg.chat_log)) {
+        state.party.chatLog = msg.chat_log.slice();
+        state.party.chatSeq = Number(msg.chat_seq) || 0;
+      }
       // Mirror server-supplied lobby duration so non-host clients see
       // the same selection the host picked, and so the host's UI
       // matches the server-side authoritative value after a reconnect.
@@ -7030,6 +8061,12 @@ function handlePartyMessage(msg) {
       if (typeof msg.mode === "string") state.party.mode = msg.mode;
       if (Number.isFinite(msg.rating_min)) state.party.ratingMin = Math.floor(msg.rating_min);
       if (Number.isFinite(msg.rating_max)) state.party.ratingMax = Math.floor(msg.rating_max);
+      // Party Mode bookkeeping: `kind` and `team_max` come down on every
+      // lobby/start/match_state frame so a late-joiner repaints with
+      // the host's current choice. Defaults preserve solo behaviour.
+      if (typeof msg.kind === "string") state.party.kind = msg.kind;
+      if (Number.isFinite(msg.team_max)) state.party.teamMax = Math.floor(msg.team_max);
+      if (Array.isArray(msg.teams)) state.party.teams = msg.teams;
       if (state.party.status === "lobby") renderPartyLobby();
       break;
     case "start":
@@ -7096,6 +8133,14 @@ function handlePartyMessage(msg) {
         rating_min: Number(msg.rating_min) || state.party.ratingMin || 0,
         rating_max: Number(msg.rating_max) || state.party.ratingMax || 0,
         avg_rating: Number(msg.avg_rating) || state.party.avgRating || 0,
+        // Party Mode tail-end fields: the server emits ``kind`` and a
+        // ``teams`` summary `[{team, total, members:[client_id,…]}, …]`
+        // with the rank-1 row marked ``is_winner: true`` (server-side
+        // tie-break). We thread both into finalMeta so the results
+        // modal can render the winner banner without having to peek
+        // back into state.party.kind (which is reset on Leave).
+        kind: typeof msg.kind === "string" ? msg.kind : state.party.kind,
+        teams: Array.isArray(msg.teams) ? msg.teams : (Array.isArray(state.party.teams) ? state.party.teams : []),
       };
       state.party.active = false;
       if (state.party.countdownInterval) {
@@ -7504,19 +8549,206 @@ function _partyDurationLabel(sec) {
   return `${n} мин`;
 }
 
+// Set of reaction codes the frontend exposes as emoji buttons. Keep
+// this short — the goal is one-tap "good game", "lol", "blunder",
+// not a full emoji picker. Keys must match the backend
+// ``PARTY_REACT_ALLOWED`` allow-list (server rejects everything else).
+const PARTY_REACT_BUTTONS = [
+  { code: "fire",         emoji: "🔥" },
+  { code: "rocket",       emoji: "🚀" },
+  { code: "laugh",        emoji: "😂" },
+  { code: "skull",        emoji: "💀" },
+  { code: "clown",        emoji: "🤡" },
+  { code: "brain",        emoji: "🧠" },
+  { code: "trophy",       emoji: "🏆" },
+  { code: "heart",        emoji: "❤️" },
+  { code: "thumbs_up",    emoji: "👍" },
+  { code: "brilliant",    emoji: "‼" },
+  { code: "blunder",      emoji: "??" },
+];
+const PARTY_REACT_EMOJI = Object.fromEntries(PARTY_REACT_BUTTONS.map((b) => [b.code, b.emoji]));
+
+function _partyAbsorbChatEvent(ev) {
+  if (!ev || typeof ev !== "object") return;
+  if (ev.type !== "chat" && ev.type !== "reaction") return;
+  // Dedupe by seq — the server stamps a monotonically increasing
+  // ``seq`` on every event so we drop anything we've already seen
+  // (replay-on-attach payload overlaps the live broadcast).
+  const seq = Number(ev.seq) || 0;
+  if (seq && seq <= state.party.chatSeq) return;
+  state.party.chatLog.push(ev);
+  if (state.party.chatLog.length > 200) {
+    state.party.chatLog.splice(0, state.party.chatLog.length - 200);
+  }
+  if (seq) state.party.chatSeq = seq;
+}
+
+function _partyChatPanelHtml() {
+  // The chat log is reverse-rendered (newest at the bottom) inside
+  // a fixed-height scrolling container; the input row sits below.
+  // Reactions render as a single horizontal row of buttons so the
+  // panel doesn't blow up vertically.
+  const reactionButtons = PARTY_REACT_BUTTONS.map((b) =>
+    `<button type="button" class="party-react-btn" data-react="${escapeHtml(b.code)}" title="${escapeHtml(b.code)}">${b.emoji}</button>`
+  ).join("");
+  return `
+    <section class="party-chat">
+      <div class="party-section-title">Чат</div>
+      <div id="party-chat-log" class="party-chat-log" role="log" aria-live="polite"></div>
+      <div class="party-chat-react">${reactionButtons}</div>
+      <form id="party-chat-form" class="party-chat-form" autocomplete="off">
+        <input id="party-chat-input" type="text" maxlength="280" placeholder="Написать в чат…" />
+        <button type="submit" class="puzzle-ghost">Отправить</button>
+      </form>
+    </section>
+  `;
+}
+
+function _renderPartyChatLog() {
+  const host = document.getElementById("party-chat-log");
+  if (!host) return;
+  const entries = state.party.chatLog.slice(-80);
+  const html = entries.map((e) => {
+    const who = `<span class="party-chat-av">${avatarHtml(e.avatar)}</span>` +
+      `<span class="party-chat-nick">${escapeHtml(e.nickname || "Гость")}</span>`;
+    if (e.type === "reaction") {
+      const emoji = PARTY_REACT_EMOJI[e.code] || "·";
+      return `<div class="party-chat-row is-reaction">${who}<span class="party-chat-emoji">${emoji}</span></div>`;
+    }
+    return `<div class="party-chat-row is-msg">${who}<span class="party-chat-text">${escapeHtml(e.text || "")}</span></div>`;
+  }).join("");
+  host.innerHTML = html;
+  // Auto-scroll to the bottom so the latest line is visible —
+  // skip if the user has scrolled up to read history (within 64px
+  // of the bottom we treat as "still pinned").
+  if (host.scrollHeight - host.scrollTop - host.clientHeight < 64) {
+    host.scrollTop = host.scrollHeight;
+  }
+}
+
+function _partySendChat(text) {
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  // Mirror the server's per-player rate limit so the user gets
+  // immediate feedback (otherwise drops are silent).
+  const now = Date.now();
+  if (now - state.party.lastChatAt < 500) return false;
+  const t = (text || "").trim();
+  if (!t) return false;
+  state.party.lastChatAt = now;
+  try { ws.send(JSON.stringify({ type: "chat", text: t.slice(0, 280) })); } catch (_) { return false; }
+  return true;
+}
+
+function _partySendReaction(code) {
+  const ws = state.party.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  const now = Date.now();
+  if (now - state.party.lastReactAt < 200) return false;
+  state.party.lastReactAt = now;
+  try { ws.send(JSON.stringify({ type: "reaction", code: String(code || "") })); } catch (_) { return false; }
+  return true;
+}
+
+function _wirePartyChatInput(root) {
+  if (!root) return;
+  const form = root.querySelector("#party-chat-form");
+  const input = root.querySelector("#party-chat-input");
+  if (form && input) {
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      if (_partySendChat(input.value)) input.value = "";
+    });
+  }
+  root.querySelectorAll(".party-react-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const code = btn.getAttribute("data-react");
+      if (code) _partySendReaction(code);
+    });
+  });
+}
+
 function renderPartyLobby() {
   const body = _partyEnsureModal();
   if (!body) return;
   const m = state.party;
   const isHost = m.host_id === state.user.client_id;
-  const memberRows = (m.members || []).map((mem) => `
-    <li class="party-member ${mem.online ? "is-online" : "is-offline"}">
-      <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
-      <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
-      ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
-      ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
-    </li>
-  `).join("");
+  const kind = m.kind === "party" ? "party" : "solo";
+  const teamMax = Number.isFinite(m.teamMax) && m.teamMax > 0 ? m.teamMax : 10;
+  // Party Mode lobby renders team-by-team. Solo keeps the legacy flat
+  // list so single-team-free-for-all lobbies look identical to before.
+  let memberListHtml;
+  if (kind === "party") {
+    const meId = state.user.client_id;
+    const teamLabel = { A: "Команда A", B: "Команда B" };
+    const teams = ["A", "B"].map((tid) => {
+      const inTeam = (m.members || []).filter((mem) => mem.team === tid);
+      const totalScore = inTeam.reduce((acc, mem) => acc + Number(mem.score || 0), 0);
+      const rows = inTeam.map((mem) => {
+        const movableBySelf = isHost || mem.client_id === meId;
+        const switchHtml = movableBySelf ? `
+          <span class="party-team-switch">
+            <button type="button" data-team-move data-cid="${escapeHtml(mem.client_id)}" data-team="${tid === "A" ? "B" : "A"}" class="party-team-mini" title="Перейти в команду ${tid === "A" ? "B" : "A"}">→ ${tid === "A" ? "B" : "A"}</button>
+          </span>` : "";
+        return `
+          <li class="party-member party-member-team team-${tid} ${mem.online ? "is-online" : "is-offline"}">
+            <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
+            <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
+            ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
+            ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
+            ${switchHtml}
+          </li>`;
+      }).join("");
+      return `
+        <div class="party-team-card team-${tid}">
+          <header class="party-team-head">
+            <span class="party-team-badge">${tid}</span>
+            <span class="party-team-name">${teamLabel[tid]}</span>
+            <span class="party-team-count">${inTeam.length}/${teamMax}</span>
+            <span class="party-team-total" title="Сумма очков команды">${totalScore} pts</span>
+          </header>
+          <ul class="party-members party-members-team">${rows || `<li class="party-empty">пусто</li>`}</ul>
+        </div>`;
+    }).join("");
+    // List members who are still un-teamed (e.g. just joined while
+    // the host hasn't auto-balanced yet) so they can pick a side or
+    // the host can drag them.
+    const unassigned = (m.members || []).filter((mem) => mem.team !== "A" && mem.team !== "B");
+    const unassignedHtml = unassigned.length ? `
+      <div class="party-team-card party-team-unassigned">
+        <header class="party-team-head">
+          <span class="party-team-badge">?</span>
+          <span class="party-team-name">Без команды</span>
+        </header>
+        <ul class="party-members party-members-team">
+          ${unassigned.map((mem) => {
+            const movable = isHost || mem.client_id === state.user.client_id;
+            const buttons = movable ? `
+              <span class="party-team-switch">
+                <button type="button" data-team-move data-cid="${escapeHtml(mem.client_id)}" data-team="A" class="party-team-mini">→ A</button>
+                <button type="button" data-team-move data-cid="${escapeHtml(mem.client_id)}" data-team="B" class="party-team-mini">→ B</button>
+              </span>` : "";
+            return `<li class="party-member ${mem.online ? "is-online" : "is-offline"}">
+              <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
+              <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
+              ${buttons}
+            </li>`;
+          }).join("")}
+        </ul>
+      </div>` : "";
+    memberListHtml = `<div class="party-team-grid">${teams}</div>${unassignedHtml}`;
+  } else {
+    memberListHtml = `<ul class="party-members">${
+      (m.members || []).map((mem) => `
+        <li class="party-member ${mem.online ? "is-online" : "is-offline"}">
+          <span class="party-avatar">${avatarHtml(mem.avatar)}</span>
+          <span class="party-name">${escapeHtml(mem.nickname || "Гость")}</span>
+          ${mem.is_host ? `<span class="party-tag party-tag-host">host</span>` : ""}
+          ${!mem.online ? `<span class="party-tag party-tag-off">offline</span>` : ""}
+        </li>`).join("") || `<li class="party-empty">Пока никого…</li>`
+    }</ul>`;
+  }
+  const memberRows = memberListHtml; // legacy var name kept for the template below
   const startLabel = "Начать матч";
   const avgRatingPill = Number.isFinite(m.avgRating) && m.avgRating > 0
     ? `<span class="party-avg-pill" title="средний ELO лобби — под эту отметку подбираются пазлы">ср. ELO ${m.avgRating}</span>`
@@ -7535,8 +8767,36 @@ function renderPartyLobby() {
     <header class="party-header">
       <h2><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle — лобби</h2>
       <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code> ${avgRatingPill}</p>
+      <div class="party-invite-link-row">
+        <button id="btn-party-copy-link" type="button" class="puzzle-ghost party-invite-link-btn" title="Скопировать ссылку — открой её на телефоне друга, чтобы он зашёл в пати">🔗 Скопировать ссылку для друга</button>
+        <span id="party-invite-link-hint" class="muted party-invite-link-hint" hidden></span>
+      </div>
     </header>
-    <ul class="party-members">${memberRows || `<li class="party-empty">Пока никого…</li>`}</ul>
+    ${isHost ? `
+    <section class="party-kind-section">
+      <div class="party-section-title">Формат матча</div>
+      <div class="party-mode-row" role="radiogroup" aria-label="Формат матча">
+        <label class="party-mode-opt ${kind === "solo" ? "is-active" : ""}">
+          <input type="radio" name="party-kind" value="solo" ${kind === "solo" ? "checked" : ""}>
+          <span class="party-mode-title">Соло</span>
+          <span class="party-mode-hint">каждый сам за себя</span>
+        </label>
+        <label class="party-mode-opt ${kind === "party" ? "is-active" : ""}">
+          <input type="radio" name="party-kind" value="party" ${kind === "party" ? "checked" : ""}>
+          <span class="party-mode-title">Команды (A vs B)</span>
+          <span class="party-mode-hint">до ${teamMax} в команде, очки суммируются</span>
+        </label>
+      </div>
+      ${kind === "party" ? `<div class="party-team-actions">
+        <button type="button" id="btn-party-balance" class="puzzle-ghost">Авто-баланс</button>
+        <span class="muted party-team-hint">Каждый игрок решает свой кусок пула пазлов. Команда с большей суммой выигрывает.</span>
+      </div>` : ""}
+    </section>` : `
+    <section class="party-kind-section party-kind-section-readonly">
+      <div class="party-section-title">Формат матча</div>
+      <div class="party-mode-readonly muted">${kind === "party" ? "Команды (A vs B)" : "Соло — каждый сам за себя"}</div>
+    </section>`}
+    ${memberRows}
     <section class="party-rules">
       <div class="party-rule"><span class="party-rule-key">Длительность</span><span class="party-rule-val">3 мин</span></div>
       <div class="party-rule"><span class="party-rule-key">Жизни</span><span class="party-rule-val">${livesN}</span></div>
@@ -7591,10 +8851,28 @@ function renderPartyLobby() {
         : `<div class="muted">Ждём, пока хост запустит матч…</div>`}
       <button id="btn-party-leave" type="button" class="puzzle-ghost">Выйти</button>
     </div>
+    ${_partyChatPanelHtml()}
     <div id="party-error" class="party-error" hidden></div>
   `;
+  _renderPartyChatLog();
+  _wirePartyChatInput(body);
   body.querySelector("#btn-party-leave")?.addEventListener("click", () => {
     leaveParty();
+  });
+  body.querySelector("#btn-party-copy-link")?.addEventListener("click", async () => {
+    const code = state.party.code || m.code;
+    if (!code) return;
+    const link = _buildPartyInviteLink(code);
+    const hint = body.querySelector("#party-invite-link-hint");
+    const ok = await _copyTextToClipboard(link);
+    if (hint) {
+      hint.hidden = false;
+      hint.textContent = ok
+        ? `Готово · ${link}`
+        : `Скопируй вручную: ${link}`;
+      // Auto-hide so the lobby doesn't permanently show a long URL.
+      setTimeout(() => { if (hint) hint.hidden = true; }, 12000);
+    }
   });
   if (isHost) {
     _renderFriendPicker(m.code).catch(() => {});
@@ -7616,7 +8894,43 @@ function renderPartyLobby() {
         if (customBox) customBox.hidden = mode !== "custom";
       });
     });
+    // Kind toggle (Solo / Party). We don't optimistically flip the UI —
+    // the server is authoritative, so we just send `set_kind` and wait
+    // for the next `lobby` broadcast to repaint with the new kind.
+    body.querySelectorAll('input[name="party-kind"]').forEach((radio) => {
+      radio.addEventListener("change", () => {
+        const nextKind = body.querySelector('input[name="party-kind"]:checked')?.value || "solo";
+        const ws = state.party.ws;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "set_kind", kind: nextKind }));
+        }
+      });
+    });
+    // Auto-balance shuffles all members round-robin into A/B server-
+    // side; the broadcast triggers a repaint with the new balanced
+    // team grid.
+    body.querySelector("#btn-party-balance")?.addEventListener("click", () => {
+      const ws = state.party.ws;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "balance_teams" }));
+      }
+    });
   }
+  // Team-move buttons: each row in Party Mode renders a "→ A/B"
+  // shortcut. Anyone can move themselves; host can move others. We
+  // do not branch on isHost here because the server enforces the same
+  // rule — clients just get a friendly error if they aim at someone
+  // else.
+  body.querySelectorAll("[data-team-move]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cid = btn.dataset.cid;
+      const team = btn.dataset.team || "A";
+      const ws = state.party.ws;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "set_team", client_id: cid, team }));
+      }
+    });
+  });
   body.querySelector("#btn-party-start")?.addEventListener("click", (ev) => {
     const btn = ev.currentTarget;
     // Hard guard against the user clicking 'Start' multiple times
@@ -7654,11 +8968,17 @@ function renderPartyLobby() {
 }
 
 function leaveParty() {
+  // Mark the session inactive BEFORE closing the WS so the onclose
+  // handler doesn't kick off a reconnect for a room we're explicitly
+  // bailing out of.
+  state.party.active = false;
   if (state.party.ws) {
     try { state.party.ws.send(JSON.stringify({ type: "leave" })); } catch (_) {}
     try { state.party.ws.close(); } catch (_) {}
   }
-  state.party.active = false;
+  _partyClearPingTimer();
+  _partyClearReconnectTimer();
+  state.party.wsRetry = 0;
   state.party.ws = null;
   state.party.status = "lobby";
   if (state.party.countdownInterval) {
@@ -7815,14 +9135,20 @@ function _partyRenderScoreboard() {
   if (!host && !board) return;
   const me = state.user.client_id;
   const livesMax = Math.max(1, Math.floor(state.party.livesPerPlayer || 3));
-  const rowsList = (state.party.scoreboard || []).map((r, i) => {
+  const isPartyKind = state.party.kind === "party";
+
+  // Build the per-row HTML once; both solo and party modes use the
+  // same shape, but party mode groups them under a team header with
+  // the team's summed score above the rows.
+  const buildRow = (r, i) => {
     const livesRaw = (r.lives === undefined || r.lives === null) ? livesMax : r.lives;
     const livesHtml = _partyLivesHtml(livesRaw, r.lives_max || livesMax);
     const gridHtml = _partyStreakGridHtml(r.attempts_grid, r.lives_max || livesMax);
     const isSelf = r.client_id === me;
     const isOut = Number(livesRaw) <= 0;
+    const teamClass = r.team === "A" || r.team === "B" ? `team-row-${r.team}` : "";
     return `
-      <li class="party-row battle-row ${isSelf ? "is-self" : ""} ${isOut ? "is-out" : ""}">
+      <li class="party-row battle-row ${isSelf ? "is-self" : ""} ${isOut ? "is-out" : ""} ${teamClass}">
         <div class="battle-row-head">
           <span class="party-rank">#${i + 1}</span>
           <span class="party-avatar">${avatarHtml(r.avatar)}</span>
@@ -7835,7 +9161,41 @@ function _partyRenderScoreboard() {
         </div>
       </li>
     `;
-  }).join("");
+  };
+
+  let rowsList = "";
+  if (isPartyKind) {
+    // Group rows under their team. We compute the team sums from the
+    // live scoreboard so they update on every "scoreboard" tick
+    // without relying on the lobby snapshot. Unassigned rows (no
+    // team) fall under a third bucket so a misconfigured lobby still
+    // shows every player.
+    const teamGroups = { A: [], B: [], _: [] };
+    (state.party.scoreboard || []).forEach((r, i) => {
+      const bucket = r.team === "A" || r.team === "B" ? r.team : "_";
+      teamGroups[bucket].push({ row: r, idx: i });
+    });
+    const teamSum = (team) => teamGroups[team].reduce((acc, x) => acc + Number(x.row.score || 0), 0);
+    const order = ["A", "B"];
+    if (teamGroups._.length) order.push("_");
+    rowsList = order.map((team) => {
+      const label = team === "A" ? "Команда A" : team === "B" ? "Команда B" : "Без команды";
+      const sumHtml = team === "_" ? "" : `<span class="party-team-total">${teamSum(team)} pts</span>`;
+      const rows = teamGroups[team].map(({ row, idx }) => buildRow(row, idx)).join("");
+      const cls = team === "_" ? "party-team-block-unassigned" : `party-team-block-${team}`;
+      return `
+        <li class="party-team-block ${cls}">
+          <header class="party-team-block-head">
+            <span class="party-team-badge">${team === "_" ? "?" : team}</span>
+            <span class="party-team-name">${label}</span>
+            ${sumHtml}
+          </header>
+          <ul class="party-team-block-rows">${rows || `<li class="party-empty">пусто</li>`}</ul>
+        </li>`;
+    }).join("");
+  } else {
+    rowsList = (state.party.scoreboard || []).map(buildRow).join("");
+  }
   const timer = state.party.status === "playing"
     ? _formatPartyTimeLeft(state.party.endsAt)
     : (state.party.status === "finished" ? "0:00" : "3:00");
@@ -8048,10 +9408,18 @@ function _renderPartyResultsHTML(results, meta, opts) {
       const sym = outcome === "solved" ? "✔" : (outcome === "failed" ? "✘" : "↷");
       const themes = Array.isArray(a.themes) ? a.themes.slice(0, 3).join(" · ") : "";
       const score = Number(a.score || 0);
+      // Rows are made clickable when we have a puzzle_id so the user
+      // can re-attempt the exact puzzle (handler attached after the
+      // table mounts — see `openPartyResultDetail` / `_partyShowResults`).
+      // Replays never touch the rating / streak / server attempt log.
+      const pid = String(a.puzzle_id || "");
+      const rowAttrs = pid
+        ? `class="party-results-attempt-row" data-replay-puzzle-id="${escapeHtml(pid)}" tabindex="0" role="button" title="Решить ещё раз (не сохраняется)"`
+        : "";
       return `
-        <tr>
+        <tr ${rowAttrs}>
           <td class="party-results-num muted">${attempts.length - idx}</td>
-          <td><span class="party-results-attempt-id">#${escapeHtml(String(a.puzzle_id || ""))}</span></td>
+          <td><span class="party-results-attempt-id">#${escapeHtml(pid)}</span></td>
           <td class="party-results-num">${Number(a.rating || 0)}</td>
           <td class="party-results-num ${cls}">${sym}</td>
           <td class="party-results-num">${_formatSolveMs(a.solve_ms)}</td>
@@ -8061,7 +9429,7 @@ function _renderPartyResultsHTML(results, meta, opts) {
     }).join("");
     attemptsHtml = `
       <details class="party-results-attempts" open>
-        <summary>Ваши попытки (${attempts.length})</summary>
+        <summary>Ваши попытки (${attempts.length}) · <span class="muted">клик по строке — попробовать ещё раз</span></summary>
         <div class="party-results-tablewrap">
           <table class="party-results-table party-results-attempts-table">
             <thead>
@@ -8289,11 +9657,40 @@ function _partyShowResults() {
   state.party.finalMeta = meta;
   const myCid = state.user.client_id;
   const tableHtml = _renderPartyResultsHTML(list, meta, { highlightId: myCid });
+  // Party Mode banner: pick the team with the largest summed score
+  // (ties broken by the server emitting ``is_winner`` on exactly one
+  // row). Solo lobbies skip the banner so the markup matches the old
+  // post-match modal byte-for-byte.
+  let teamBannerHtml = "";
+  if (meta && meta.kind === "party" && Array.isArray(meta.teams) && meta.teams.length) {
+    const teamsList = meta.teams.slice().sort((a, b) => Number(b.total || 0) - Number(a.total || 0));
+    const winner = teamsList.find((t) => t.is_winner) || teamsList[0];
+    const labelOf = (t) => t === "A" ? "Команда A" : t === "B" ? "Команда B" : "Без команды";
+    const teamCards = teamsList.map((t) => {
+      const isWin = winner && t.team === winner.team;
+      return `
+        <div class="party-results-team-card team-${t.team} ${isWin ? "is-winner" : ""}">
+          <header>
+            <span class="party-team-badge">${escapeHtml(t.team || "?")}</span>
+            <span class="party-team-name">${escapeHtml(labelOf(t.team))}</span>
+            ${isWin ? `<span class="party-team-trophy" title="Победители">🏆</span>` : ""}
+          </header>
+          <div class="party-team-total-big">${Number(t.total || 0)} pts</div>
+          <div class="muted party-team-card-members">${(Array.isArray(t.members) ? t.members.length : 0)} игрок(ов)</div>
+        </div>`;
+    }).join("");
+    teamBannerHtml = `
+      <div class="party-results-team-banner">
+        <div class="party-results-team-headline">${winner ? `${labelOf(winner.team)} победила — ${Number(winner.total || 0)} очков` : "Командный матч"}</div>
+        <div class="party-results-team-grid">${teamCards}</div>
+      </div>`;
+  }
   body.innerHTML = `
     <header class="party-header">
       <h2>🏁 Итоги пати</h2>
       <p class="muted">Результат сохранён в истории профиля. Рейтинг за пати не начисляется.</p>
     </header>
+    ${teamBannerHtml}
     <div class="party-results-card">${tableHtml}</div>
     <div class="party-actions party-actions-results">
       <button id="btn-party-save-img" type="button" class="puzzle-secondary">📷 Сохранить в галерею</button>
@@ -8434,10 +9831,80 @@ function openPartyResultDetail(entry, opts) {
   body.querySelector("#btn-party-detail-close")?.addEventListener("click", () => {
     closePartyModal();
   });
+  // Make per-attempt rows clickable: re-attempt the exact puzzle in
+  // replay-only mode (no rating change, no streak update, no server
+  // attempt POST). The modal closes so the puzzle board is visible.
+  _bindPartyAttemptReplayRows(body);
 }
 
 // Expose so profile rows can call it through inline onclick fallbacks.
 window.openPartyResultDetail = openPartyResultDetail;
+
+// Wires click + keyboard activation on any `.party-results-attempt-row`
+// inside `root`. Each row carries `data-replay-puzzle-id`; activating it
+// closes the party modal and hands the puzzle id to `replayPuzzleById`
+// which loads the puzzle in replay-only mode (skips persistence).
+function _bindPartyAttemptReplayRows(root) {
+  if (!root) return;
+  const rows = root.querySelectorAll(".party-results-attempt-row[data-replay-puzzle-id]");
+  rows.forEach((row) => {
+    const pid = row.getAttribute("data-replay-puzzle-id") || "";
+    if (!pid) return;
+    const trigger = (ev) => {
+      ev.preventDefault();
+      try { closePartyModal(); } catch (_) { /* ignore */ }
+      replayPuzzleById(pid, { source: "battle" });
+    };
+    row.addEventListener("click", trigger);
+    row.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") trigger(ev);
+    });
+  });
+}
+
+// Re-attempt a specific puzzle by ID without touching rating, streak,
+// server attempts log or recent-id history. Used by the Battle Puzzle
+// results modal so users can drill down into a specific position they
+// (or someone in the lobby) ran into.
+async function replayPuzzleById(puzzleId, meta) {
+  const pid = String(puzzleId || "").trim();
+  if (!pid) return;
+  // Flip to the puzzle tab first so the spinner/loading message has
+  // somewhere to render (the puzzle-card is only present inside
+  // `#panel-puzzle`).
+  try { setView("puzzle"); } catch (_) { /* ignore */ }
+  state.puzzle.idle = false;
+  state.puzzle.replayOnly = true;
+  state.puzzle.replayMeta = meta && typeof meta === "object" ? { ...meta } : null;
+  const card = document.getElementById("puzzle-card");
+  const actions = document.getElementById("puzzle-actions");
+  // C8: render a skeleton block instead of a plain text line so users
+  // get an immediate "something is happening" cue even on a slow
+  // backend. The skeleton CSS lives in style.css (.puzzle-skeleton-*).
+  if (card) card.innerHTML = `
+    <div class="puzzle-skeleton" aria-live="polite" aria-busy="true">
+      <div class="puzzle-skeleton-row puzzle-skeleton-title"></div>
+      <div class="puzzle-skeleton-row puzzle-skeleton-meta"></div>
+      <div class="puzzle-skeleton-row puzzle-skeleton-meta short"></div>
+      <div class="puzzle-skeleton-hint muted">Загружаем пазл #${escapeHtml(pid)}…</div>
+    </div>`;
+  if (actions) actions.innerHTML = "";
+  let p;
+  try {
+    p = await api(`/api/puzzles/${encodeURIComponent(pid)}`);
+  } catch (err) {
+    state.puzzle.replayOnly = false;
+    state.puzzle.replayMeta = null;
+    if (card) card.innerHTML =
+      `<div class="puzzle-empty">Не удалось загрузить пазл #${escapeHtml(pid)}: ${escapeHtml(String(err && err.message || err))}</div>`;
+    return;
+  }
+  startPuzzle(p);
+}
+
+// Expose so any future inline handler / external trigger can call it
+// without needing module scope.
+window.replayPuzzleById = replayPuzzleById;
 
 // ---------- Daily Puzzle / Puzzle Rush / Opening Trainer ----------
 //
@@ -8651,6 +10118,11 @@ function startDailyPuzzle() {
   state.lastMove = null;
   renderBoard();
   renderDailyUi();
+  // Sync spectators to the new puzzle's pre-setup FEN + flip immediately.
+  _partyReportPosition(state.daily.fenStart, {
+    lastMove: null,
+    reviewBadge: { square: "", classification: "" },
+  });
   setTimeout(() => _playDailySetupMove(), 220);
 }
 
@@ -8671,6 +10143,11 @@ function _playDailySetupMove() {
   state.daily.startedAt = Date.now();
   _startDailyTimer();
   renderDailyUi();
+  // Mirror the setup move to spectators so they see the same animation.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: { square: "", classification: "" },
+  });
 }
 
 function tryDailyMove(from, to) {
@@ -8682,6 +10159,7 @@ function tryDailyMove(from, to) {
   try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
   if (!move) {
     setStatus("Нелегальный ход.", "error");
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
@@ -8713,6 +10191,7 @@ function tryDailyMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
+    try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
     // Spectator mirror — without this the watcher only ever sees the
     // reverted FEN below, which makes the wrong piece teleport back.
     _partyReportPosition(c.fen(), {
@@ -8746,6 +10225,12 @@ function tryDailyMove(from, to) {
   renderDailyUi();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");
+  // Mirror correct move to spectators so the mini-board shows the
+  // green ✓ + green from→to that the player just got.
+  _partyReportPosition(c.fen(), {
+    reviewBadge: { square: move.to, classification: "good" },
+    lastMove: { from: move.from, to: move.to },
+  });
   if (state.daily.nextIdx >= state.daily.moves.length) {
     finalizeDailyPuzzle("solved");
     return;
@@ -8776,6 +10261,11 @@ function _playDailyOpponentReply() {
   state.daily.nextIdx += 1;
   state.daily.feedback = null;
   renderDailyUi();
+  // Mirror the bot's reply to spectators.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: keepBadge || { square: "", classification: "" },
+  });
   if (state.daily.nextIdx >= state.daily.moves.length) {
     finalizeDailyPuzzle("solved");
   }
@@ -9104,6 +10594,14 @@ function _serveNextRushPuzzle() {
   state.lastMove = null;
   renderBoard();
   renderRushUi();
+  // Sync spectators to the new puzzle's pre-setup FEN + flip immediately
+  // so they switch boards in lockstep with the player. Without this the
+  // watcher keeps showing the previous puzzle while the player is
+  // already dragging pieces in the next one.
+  _partyReportPosition(p.fen, {
+    lastMove: null,
+    reviewBadge: { square: "", classification: "" },
+  });
   setTimeout(() => _playRushSetupMove(), 200);
 }
 
@@ -9121,6 +10619,12 @@ function _playRushSetupMove() {
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.rush.nextIdx = 1;
+  // Mirror the setup move to spectators so they see the same animated
+  // opening as the player, not just the bare FEN.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: { square: "", classification: "" },
+  });
 }
 
 function _restoreRushBoard() {
@@ -9146,6 +10650,7 @@ function tryRushMove(from, to) {
   try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
   if (!move) {
     setStatus("Нелегальный ход.", "error");
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
@@ -9178,6 +10683,7 @@ function tryRushMove(from, to) {
     state.lastMove = { from: move.from, to: move.to };
     _reportRushAttempt({ outcome: "failed", solve_ms: 0 });
     renderBoard();
+    try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
     // Mirror to spectators so they see the same red ✕ on the
     // wrong square instead of a piece teleport.
     _partyReportPosition(c.fen(), {
@@ -9202,6 +10708,11 @@ function tryRushMove(from, to) {
   renderBoard();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");
+  // Mirror correct move to spectators with green ✓ + green from→to.
+  _partyReportPosition(c.fen(), {
+    reviewBadge: { square: move.to, classification: "good" },
+    lastMove: { from: move.from, to: move.to },
+  });
   if (state.rush.nextIdx >= state.rush.moves.length) {
     state.rush.score += 1;
     state.rush.feedback = "solved";
@@ -9241,6 +10752,13 @@ function _playRushOpponentReply() {
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
   state.rush.nextIdx += 1;
+  // Mirror the bot's reply to spectators so they don't see the player's
+  // green-check still on the previous square while the position has
+  // already advanced.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: keepBadge || { square: "", classification: "" },
+  });
   if (state.rush.nextIdx >= state.rush.moves.length) {
     state.rush.score += 1;
     state.rush.feedback = "solved";
@@ -9365,7 +10883,12 @@ async function _refreshRushLeaderboard() {
   } catch (_) {
     state.rush.leaderboard[m] = [];
   }
-  renderRushLeaderboard();
+  // Re-render only the rows host so the mode-tab DOM keeps its
+  // click handlers (renderRushLeaderboard is the entry point that
+  // builds those tabs once per panel mount).
+  if (typeof _renderRushModeLeaderboardBody === "function") {
+    _renderRushModeLeaderboardBody();
+  }
 }
 
 // SVG glyphs for the chess.com-style sidebar headers. Inline so they
@@ -9392,11 +10915,25 @@ const CC_STAT_RATING = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/s
 
 // Holds the in-memory selection for the rush picker so the sidebar
 // remembers which mode the user clicked between re-renders. Defaults
-// to "180" (3 min) — same as the legacy mode picker order.
+// to "180" (3 min) — same as the legacy mode picker order. The
+// selection is mirrored to localStorage (B2) so a page reload
+// restores whichever mode the user was working through, instead of
+// snapping back to 180 every time.
 const _rushSidebarState = {
-  selectedMode: "180",
+  selectedMode: (() => {
+    try {
+      const raw = localStorage.getItem("cs.rushMode");
+      return (raw === "180" || raw === "300" || raw === "survival") ? raw : "180";
+    } catch (_) {
+      return "180";
+    }
+  })(),
   tab: "play", // "play" | "leaderboard"
 };
+
+function _persistRushMode(mode) {
+  try { localStorage.setItem("cs.rushMode", String(mode || "180")); } catch (_) { /* ignore */ }
+}
 
 // Holds the in-memory tab + filter state for the battle sidebar so
 // switching online/offline / Play / Watch persists across re-renders
@@ -9496,6 +11033,11 @@ function _renderRushSidebar(card, actions) {
           <div class="sidebar-start-cardContainer">
             ${modeButtons}
           </div>
+          <div class="cc-rush-cta cc-rush-cta-inline">
+            <button class="cc-button-component cc-button-primary cc-button-xx-large cc-bg-primary cc-button-full" type="button" data-cy="startSession" id="btn-cc-rush-play">
+              <span>Играть</span>
+            </button>
+          </div>
         </div>
       </div>
       <div role="tabpanel" aria-labelledby="rush-tab-leaderboard" id="rush-tabpanel-leaderboard" class="sidebar-start-tabpanel-rush-start" data-cc-tab-pane="leaderboard"${tab === "leaderboard" ? "" : " hidden"}>
@@ -9503,19 +11045,18 @@ function _renderRushSidebar(card, actions) {
       </div>
     </section>
   `;
-  actions.innerHTML = `
-    <div class="cc-rush-cta">
-      <button class="cc-button-component cc-button-primary cc-button-xx-large cc-bg-primary cc-button-full" type="button" data-cy="startSession" id="btn-cc-rush-play">
-        <span>Играть</span>
-      </button>
-    </div>
-  `;
+  // The big Play CTA used to live in a separate `#rush-actions` slot
+  // below the gray sidebar — we moved it inside the sidebar-content
+  // container (just under the 3/5/survival mode rows) so it sits in
+  // the same gray card as the mode pickers, per the requested layout.
+  actions.innerHTML = "";
   // Mode-button click — update the selection (no auto-start; the big
   // primary Play button below starts the chosen mode, matching the
   // chess.com flow).
   card.querySelectorAll("[data-mode]").forEach((b) => {
     b.addEventListener("click", () => {
       _rushSidebarState.selectedMode = b.dataset.mode;
+      _persistRushMode(b.dataset.mode);
       card.querySelectorAll("[data-mode]").forEach((x) => {
         x.classList.toggle("cc-selected-border", x.dataset.mode === b.dataset.mode);
       });
@@ -9543,7 +11084,9 @@ function _renderRushSidebar(card, actions) {
       try { setView("main"); } catch (_) { /* ignore */ }
     });
   }
-  const playBtn = actions.querySelector("#btn-cc-rush-play");
+  // The Play button now lives inside `card` (under the modes) — query
+  // it there. The legacy `#rush-actions` host is intentionally empty.
+  const playBtn = card.querySelector("#btn-cc-rush-play");
   if (playBtn) {
     playBtn.addEventListener("click", () => {
       const mode = _rushSidebarState.selectedMode || "180";
@@ -9670,14 +11213,115 @@ function renderRushHistory() {
 function renderRushLeaderboard() {
   const host = document.getElementById("rush-tabpanel-leaderboard-body");
   if (!host) return;
-  // Make sure the global mount point exists inside the rush sidebar
-  // tab so renderGlobalLeaderboard() can fill it. We avoid stomping
-  // it on every call so the click handlers attached by
-  // renderGlobalLeaderboard() survive.
-  if (!host.querySelector("#global-leaderboard-rush")) {
-    host.innerHTML = `<div id="global-leaderboard-rush"></div>`;
+  const m = state.rush.leaderboardMode;
+  // Three category tabs (3 мин / 5 мин / Survival) styled like the
+  // sibling Играть / Лидерборд tabs at the top of the Rush sidebar so
+  // the visual rhythm of the picker matches across the panel. We
+  // re-render the body each time but only update the highlighted
+  // class on the buttons + the rows list, which keeps the per-button
+  // click handler attached and avoids flicker.
+  const modes = [
+    { id: "180",      label: "3 мин" },
+    { id: "300",      label: "5 мин" },
+    { id: "survival", label: "Survival" },
+  ];
+  const tabs = modes.map((mode) => {
+    const isActive = mode.id === m;
+    return `<button type="button"
+      class="cc-tab-item-component${isActive ? " cc-tab-item-active" : ""}"
+      aria-selected="${isActive}"
+      data-rush-lb-mode="${mode.id}">
+      <span class="cc-tab-item-label cc-text-medium-bold">${escapeHtml(mode.label)}</span>
+    </button>`;
+  }).join("");
+  if (!host.querySelector("[data-rush-lb-mode]")) {
+    host.innerHTML = `
+      <div role="tablist" class="cc-tab-group-component cc-tab-group-secondary rush-lb-mode-tabs">
+        ${tabs}
+      </div>
+      <div id="rush-mode-leaderboard"></div>
+    `;
+    host.querySelectorAll("[data-rush-lb-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.rush.leaderboardMode = btn.dataset.rushLbMode;
+        host.querySelectorAll("[data-rush-lb-mode]").forEach((x) => {
+          const isActive = x.dataset.rushLbMode === state.rush.leaderboardMode;
+          x.classList.toggle("cc-tab-item-active", isActive);
+          x.setAttribute("aria-selected", String(isActive));
+        });
+        _refreshRushLeaderboard();
+      });
+    });
+  } else {
+    host.querySelectorAll("[data-rush-lb-mode]").forEach((x) => {
+      const isActive = x.dataset.rushLbMode === m;
+      x.classList.toggle("cc-tab-item-active", isActive);
+      x.setAttribute("aria-selected", String(isActive));
+    });
   }
-  _refreshGlobalLeaderboard(false);
+  _renderRushModeLeaderboardBody();
+  // Kick a refresh so the rows reflect the active mode. Cached state
+  // (state.rush.leaderboard[m]) is rendered immediately above so users
+  // never see an empty placeholder while the request is in flight.
+  _refreshRushLeaderboard();
+}
+
+// Render the cached rows for the currently selected leaderboard mode
+// into #rush-mode-leaderboard. Used by both the initial render and the
+// post-fetch refresh so the rows can come from cache or from a fresh
+// /api/puzzle_rush/leaderboard call without duplicating the markup.
+function _renderRushModeLeaderboardBody() {
+  const host = document.getElementById("rush-mode-leaderboard");
+  if (!host) return;
+  const m = state.rush.leaderboardMode;
+  const rows = state.rush.leaderboard[m] || [];
+  const label = RUSH_MODE_LABEL[m] || m;
+  if (!rows.length) {
+    host.innerHTML = `
+      <div class="global-leaderboard">
+        <div class="gl-title">Leaderboard · Rush · ${escapeHtml(label)}</div>
+        <div class="cc-rush-lb-tab-empty">Пока никого нет.</div>
+      </div>
+    `;
+    return;
+  }
+  const list = rows.slice(0, 30).map((u, i) => {
+    const av = avatarHtml(u.avatar);
+    const nick = escapeHtml(u.nickname || "Гость");
+    const cid = escapeHtml(u.client_id || "");
+    const isSelf = u.client_id === state.user.client_id;
+    const score = Number(u.score || 0);
+    const online = !!u.online;
+    const dotCls = online ? "gl-dot is-online" : "gl-dot is-offline";
+    const statusLabel = online ? "в сети" : "не в сети";
+    return `<div class="gl-row" data-cid="${cid}" data-nick="${nick}">
+      <span class="gl-rank">#${i + 1}</span>
+      <span class="gl-av">${av}</span>
+      <span class="gl-nick">
+        <span class="gl-nick-line">
+          <span class="${dotCls}" title="${statusLabel}"></span>
+          ${nick}${isSelf ? ' <span class="muted">(вы)</span>' : ""}
+        </span>
+        <span class="gl-metric">Лучший рекорд · ${escapeHtml(label)}</span>
+      </span>
+      <span class="gl-score">${score}</span>
+    </div>`;
+  }).join("");
+  host.innerHTML = `
+    <div class="global-leaderboard">
+      <div class="gl-title">Leaderboard · Rush · ${escapeHtml(label)}</div>
+      <div class="gl-list">${list}</div>
+    </div>
+  `;
+  host.querySelectorAll(".gl-row[data-cid]").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      const cid = row.dataset.cid;
+      const nick = row.dataset.nick;
+      if (cid && cid !== state.user.client_id) {
+        openPlayerChallengeProfile({ client_id: cid, nickname: nick }, e.currentTarget);
+      }
+    });
+  });
 }
 
 // ============================================================
@@ -9997,13 +11641,21 @@ function _renderUserPopover(u, anchorEl) {
   card.querySelector(".user-popover-avatar").addEventListener("click", navigateToProfile);
   card.querySelector('[data-cy="user-popover-challenge"]').addEventListener("click", () => {
     host.hidden = true;
+    // Stash the target *before* setView() so the lobby render that
+    // happens at the end of enterOneVsOneView() picks it up. Without
+    // this, an earlier setTimeout-based render would briefly show the
+    // form and then get wiped when the (async) lobby render landed.
+    state.onevsone.pendingChallenge = {
+      client_id: u.client_id,
+      nickname: u.nickname || "Гость",
+      avatar: u.avatar,
+    };
     setView("onevsone");
     // Force the "Играть" subtab — without this the user lands on
     // whatever subtab they last selected (often "Лидерборд"), which
     // hides the challenge form and makes the Challenge button look
     // like a no-op.
     _activatePanelSubtab("onevsone", "play");
-    setTimeout(() => _onevsoneFocusChallengeFor(u), 60);
   });
   card.querySelector('[data-cy="user-popover-more"]').addEventListener("click", () => {
     // Right now there are no extra actions to show — just bounce to
@@ -10030,10 +11682,31 @@ async function enterOneVsOneView() {
     try { _puzzleViewSnapshotFlipped("onevsone"); } catch (_) { /* ignore */ }
   }
   if (state.legalMode === false && typeof setBoardMode === "function") setBoardMode(true);
+  // Spectators following this player from /api/presence need the
+  // solo-presence relay open whether we land in the lobby or in an
+  // active match. presenceConnect() is a no-op if a party owns the
+  // channel or if we're already connected, so it's safe to call
+  // unconditionally.
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   if (state.onevsone.match) {
     _renderOnevsoneMatchUi();
     _onevsoneEnsureWs();
     return;
+  }
+  // Active-match recovery: if the SSE "onevsone_challenge_accepted"
+  // notification got dropped (page reload, lost connection, etc.) the
+  // server still has our match — ask for it before showing the lobby
+  // so the player isn't stuck unable to rejoin.
+  if (state.user.client_id) {
+    try {
+      const r = await api(`/api/onevsone/active?client_id=${encodeURIComponent(state.user.client_id)}`);
+      if (r && r.match) {
+        state.onevsone.match = r.match;
+        _renderOnevsoneMatchUi();
+        _onevsoneEnsureWs();
+        return;
+      }
+    } catch (_) { /* ignore — fall through to lobby */ }
   }
   _renderOnevsoneLobby();
   await _refreshOnevsoneOnline(true);
@@ -10060,11 +11733,21 @@ function leaveOneVsOneView() {
     clearInterval(state.onevsone.clockTimer);
     state.onevsone.clockTimer = null;
   }
+  // Premoves are tied to the live board state — drop the queue
+  // when the player leaves the view so it doesn't quietly replay
+  // on the next match.
+  try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
   if (typeof _puzzleViewRestoreFlipped === "function") {
     try { _puzzleViewRestoreFlipped("onevsone"); } catch (_) { /* ignore */ }
   }
   if (typeof _puzzleResetBoardCommon === "function" && !state.onevsone.match) {
     try { _puzzleResetBoardCommon(); } catch (_) { /* ignore */ }
+  }
+  // Tear down the solo-presence relay only when leaving 1v1 without
+  // an active match — if a match is in flight (player tabbed away),
+  // keep broadcasting so spectators can keep watching.
+  if (!state.onevsone.match && !state.party.active) {
+    try { presenceDisconnect(); } catch (_) { /* ignore */ }
   }
 }
 
@@ -10108,12 +11791,89 @@ function _renderOnevsoneLobby() {
       <h2>1 vs 1</h2>
       <span class="onevsone-sub">Сыграй легальную партию против живого соперника</span>
     </div>
+    <div id="onevsone-invite-link" class="onevsone-invite-link"></div>
     <div id="onevsone-online" class="onevsone-online-list"></div>
     <div id="onevsone-form-host"></div>
   `;
+  _renderOnevsoneInviteLinkPanel();
   _renderOnevsoneOnlineList();
-  _renderOnevsoneChallengeForm(null);
+  // If the user clicked "Челлендж" from a popover before the lobby
+  // finished loading, restore the challenge form for the stashed
+  // target instead of clearing it.
+  const pending = state.onevsone.pendingChallenge;
+  state.onevsone.pendingChallenge = null;
+  _renderOnevsoneChallengeForm(pending || null);
   renderGlobalLeaderboard();
+}
+
+// Standalone "create invite link" panel rendered at the top of the
+// 1v1 lobby. Lets the host pick time + side and copy a shareable URL
+// in one click — no need to wait for the friend to appear in the
+// online list. The user requirement was: "1v1 — only after picking
+// time and side, then the invite link becomes available".
+function _renderOnevsoneInviteLinkPanel() {
+  const host = document.getElementById("onevsone-invite-link");
+  if (!host) return;
+  const sel = state.onevsone.selectedTime || 300;
+  const selColor = state.onevsone.selectedColor || "random";
+  const buttons = ONEVSONE_TIME_OPTIONS.map((o) => {
+    const active = o.sec === sel ? " is-active" : "";
+    return `<button type="button" data-sec="${o.sec}" class="${active}">${o.label}</button>`;
+  }).join("");
+  const colorOpts = [
+    { v: "w", label: "⛪ Белые" },
+    { v: "random", label: "🎲 Случайно" },
+    { v: "b", label: "♚ Черные" },
+  ];
+  const colorButtons = colorOpts.map((o) => {
+    const active = o.v === selColor ? " is-active" : "";
+    return `<button type="button" data-color="${o.v}" class="${active}">${o.label}</button>`;
+  }).join("");
+  host.innerHTML = `
+    <div class="onevsone-invite-card">
+      <div class="onevsone-invite-title">🔗 Пригласить друга по ссылке</div>
+      <div class="onevsone-invite-hint muted">Выбери время и сторону — получишь ссылку, которую можно отправить в Telegram / WhatsApp. Друг откроет — и сразу начнётся партия.</div>
+      <div class="ov-times">${buttons}</div>
+      <div class="ov-colors">${colorButtons}</div>
+      <div class="onevsone-invite-actions">
+        <button type="button" class="primary onevsone-invite-make">Сделать ссылку</button>
+      </div>
+      <div class="onevsone-invite-result muted" hidden></div>
+    </div>
+  `;
+  host.querySelectorAll(".ov-times button").forEach((b) => {
+    b.onclick = () => {
+      state.onevsone.selectedTime = parseInt(b.dataset.sec, 10) || 300;
+      _renderOnevsoneInviteLinkPanel();
+      // Keep the per-target challenge form (if open) in sync with the
+      // shared time/side selection.
+      _renderOnevsoneChallengeForm(state.onevsone.pendingChallenge || null);
+    };
+  });
+  host.querySelectorAll(".ov-colors button").forEach((b) => {
+    b.onclick = () => {
+      const v = b.dataset.color;
+      state.onevsone.selectedColor = (v === "w" || v === "b") ? v : "random";
+      _renderOnevsoneInviteLinkPanel();
+      _renderOnevsoneChallengeForm(state.onevsone.pendingChallenge || null);
+    };
+  });
+  host.querySelector(".onevsone-invite-make").onclick = async () => {
+    const result = host.querySelector(".onevsone-invite-result");
+    try {
+      const link = await _onevsoneCreateInviteLink();
+      const ok = await _copyTextToClipboard(link);
+      if (result) {
+        result.hidden = false;
+        result.textContent = ok
+          ? `Ссылка скопирована · ${link}`
+          : `Скопируй вручную: ${link}`;
+      }
+      _showInfoToast(ok ? "Ссылка скопирована — отправь её другу" : "Не удалось скопировать ссылку");
+    } catch (e) {
+      _showInfoToast(`Ошибка: ${(e && e.message) || e}`);
+    }
+  };
 }
 
 function _renderOnevsoneOnlineList() {
@@ -10179,23 +11939,43 @@ function _renderOnevsoneChallengeForm(target) {
     return;
   }
   const sel = state.onevsone.selectedTime || 300;
+  const selColor = state.onevsone.selectedColor || "random";
   const buttons = ONEVSONE_TIME_OPTIONS.map((o) => {
     const active = o.sec === sel ? " is-active" : "";
     return `<button type="button" data-sec="${o.sec}" class="${active}">${o.label}</button>`;
+  }).join("");
+  const colorOpts = [
+    { v: "w", label: "⛪ Белые" },
+    { v: "random", label: "🎲 Случайно" },
+    { v: "b", label: "♚ Черные" },
+  ];
+  const colorButtons = colorOpts.map((o) => {
+    const active = o.v === selColor ? " is-active" : "";
+    return `<button type="button" data-color="${o.v}" class="${active}">${o.label}</button>`;
   }).join("");
   host.innerHTML = `
     <div class="onevsone-challenge-form">
       <div><b>Бросить вызов:</b> ${escapeHtml(target.nickname || "Гость")}</div>
       <div class="ov-times">${buttons}</div>
+      <div class="ov-colors">${colorButtons}</div>
       <div class="ov-actions">
         <button type="button" class="ov-cancel">Отмена</button>
+        <button type="button" class="ov-link" title="Сгенерировать ссылку и скопировать в буфер — отправь её другу в Telegram / WhatsApp">🔗 Ссылкой</button>
         <button type="button" class="primary ov-send">Отправить вызов</button>
       </div>
+      <div class="ov-link-hint muted" hidden></div>
     </div>
   `;
   host.querySelectorAll(".ov-times button").forEach((b) => {
     b.onclick = () => {
       state.onevsone.selectedTime = parseInt(b.dataset.sec, 10) || 300;
+      _renderOnevsoneChallengeForm(target);
+    };
+  });
+  host.querySelectorAll(".ov-colors button").forEach((b) => {
+    b.onclick = () => {
+      const v = b.dataset.color;
+      state.onevsone.selectedColor = (v === "w" || v === "b") ? v : "random";
       _renderOnevsoneChallengeForm(target);
     };
   });
@@ -10209,11 +11989,51 @@ function _renderOnevsoneChallengeForm(target) {
       _showInfoToast(`Ошибка: ${(e && e.message) || e}`);
     }
   };
+  host.querySelector(".ov-link").onclick = async () => {
+    try {
+      const link = await _onevsoneCreateInviteLink();
+      const hint = host.querySelector(".ov-link-hint");
+      const ok = await _copyTextToClipboard(link);
+      if (hint) {
+        hint.hidden = false;
+        hint.textContent = ok
+          ? `Ссылка скопирована · ${link}`
+          : `Скопируй вручную: ${link}`;
+      }
+      _showInfoToast(ok ? "Ссылка скопирована — отправь её другу" : "Не удалось скопировать ссылку");
+    } catch (e) {
+      _showInfoToast(`Ошибка: ${(e && e.message) || e}`);
+    }
+  };
+}
+
+// Create a link-shareable 1v1 challenge using whatever time + side the
+// user picked in the challenge form, and return a URL the recipient can
+// open. Used by both the per-target challenge form and the standalone
+// "Ссылкой" lobby button so a host can invite a friend who isn't on
+// the online list yet.
+async function _onevsoneCreateInviteLink() {
+  if (!state.user.client_id) throw new Error("Нет клиентского ID");
+  const sec = state.onevsone.selectedTime || 300;
+  const color = state.onevsone.selectedColor || "random";
+  const r = await api("/api/onevsone/open", {
+    method: "POST",
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      time_seconds: sec,
+      challenger_color: color,
+    }),
+  });
+  if (!r || !r.challenge || !r.challenge.id) {
+    throw new Error("Сервер не вернул ссылку");
+  }
+  return _buildOnevsoneInviteLink(r.challenge.id);
 }
 
 async function _onevsoneSendChallenge(targetId, targetNickname) {
   if (!state.user.client_id) throw new Error("Нет клиентского ID");
   const sec = state.onevsone.selectedTime || 300;
+  const color = state.onevsone.selectedColor || "random";
   const r = await api("/api/onevsone/challenge", {
     method: "POST",
     body: JSON.stringify({
@@ -10223,6 +12043,7 @@ async function _onevsoneSendChallenge(targetId, targetNickname) {
       target_id: targetId,
       target_nickname: targetNickname || "Гость",
       time_seconds: sec,
+      challenger_color: color,
     }),
   });
   if (r && r.challenge) {
@@ -10274,7 +12095,17 @@ function _onevsoneShowChallengeToast(ch) {
       _onevsoneDismissChallengeToast(ch.id);
       if (r && r.match) {
         state.onevsone.match = r.match;
+        // Drop any stale chess instance from a previous match so
+        // _renderOnevsoneMatchUi rebuilds it from the fresh m.fen.
+        // Without this the target keeps using the previous match's
+        // chess.js state and the board orientation / legal-move
+        // overlay desyncs from the new game.
+        state.onevsone.chess = null;
+        // Likewise wipe any leftover premoves from a previous match
+        // so they don't replay on the new board.
+        try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
         setView("onevsone");
+        try { _activatePanelSubtab("onevsone", "play"); } catch (_) { /* ignore */ }
         _renderOnevsoneMatchUi();
         _onevsoneEnsureWs();
       }
@@ -10306,8 +12137,25 @@ function _onevsoneDismissChallengeToast(challengeId) {
 // ============================================================
 function _onevsoneEnsureWs() {
   const m = state.onevsone.match;
+  // Reset the exponential-backoff retry counter when the active
+  // match has changed. Without this, a previous flaky match that
+  // accumulated retries leaves the very first connect of the next
+  // match waiting up to 8s before it even tries.
+  if (m && m.id && state.onevsone.wsMatchId !== m.id) {
+    state.onevsone.wsMatchId = m.id;
+    state.onevsone.wsRetry = 0;
+  }
   if (!m || !m.id || !state.user.client_id) return;
-  if (state.onevsone.ws && state.onevsone.ws.readyState === WebSocket.OPEN) return;
+  // Skip both OPEN and CONNECTING — the previous check only
+  // matched OPEN, so a second caller (e.g. the SSE
+  // "onevsone_match" handler firing right after the REST accept)
+  // would create a second concurrent WebSocket while the first
+  // was still negotiating. attach_socket replaces the entry
+  // server-side, but both client sockets receive their own
+  // "state" snapshot and double-render the match panel.
+  if (state.onevsone.ws
+      && (state.onevsone.ws.readyState === WebSocket.OPEN
+        || state.onevsone.ws.readyState === WebSocket.CONNECTING)) return;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL(`${proto}//${location.host}/api/onevsone/ws`);
   url.searchParams.set("match_id", m.id);
@@ -10315,7 +12163,18 @@ function _onevsoneEnsureWs() {
   let ws;
   try { ws = new WebSocket(url.toString()); } catch (_) { return; }
   state.onevsone.ws = ws;
-  ws.onopen = () => { state.onevsone.wsRetry = 0; };
+  ws.onopen = () => {
+    state.onevsone.wsRetry = 0;
+    // Drain anything the user did while the socket was still
+    // CONNECTING (e.g. dragged a piece the moment the match view
+    // mounted) — without this the move silently vanishes and the
+    // boards desync.
+    const queue = state.onevsone.pendingSend || [];
+    state.onevsone.pendingSend = [];
+    for (const payload of queue) {
+      try { ws.send(payload); } catch (_) { /* ignore */ }
+    }
+  };
   ws.onmessage = (ev) => {
     let payload;
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
@@ -10331,24 +12190,92 @@ function _onevsoneEnsureWs() {
   ws.onerror = () => { try { ws.close(); } catch (_) {} };
 }
 
+// Send (or queue) a JSON payload over the 1v1 WebSocket. Returns true
+// if the payload was either sent immediately or queued for delivery
+// when the socket opens. Returns false only if there is no live match
+// to send for (in which case dropping the payload is the right call).
+function _onevsoneEnqueueWs(obj) {
+  const m = state.onevsone.match;
+  if (!m || !m.id) return false;
+  const data = JSON.stringify(obj);
+  const ws = state.onevsone.ws;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(data); return true; } catch (_) { /* fall through to queue */ }
+  }
+  state.onevsone.pendingSend = state.onevsone.pendingSend || [];
+  state.onevsone.pendingSend.push(data);
+  // Cap the queue so a stuck socket can't grow it unbounded.
+  if (state.onevsone.pendingSend.length > 32) {
+    state.onevsone.pendingSend.splice(0, state.onevsone.pendingSend.length - 32);
+  }
+  // Kick the connector in case the WS is closed or never opened.
+  try { _onevsoneEnsureWs(); } catch (_) { /* ignore */ }
+  return true;
+}
+
 function _onevsoneHandleWsEvent(msg) {
   if (!msg || typeof msg !== "object") return;
   const m = state.onevsone.match;
   if (!m) return;
   switch (msg.type) {
     case "hello":
-      if (msg.match) {
-        state.onevsone.match = msg.match;
-        _renderOnevsoneMatchUi();
+    case "state": {
+      // "state" is a full match snapshot the server sends on demand /
+      // after a reconnect. The server emits one immediately after
+      // ``ws.accept()`` — which races with any optimistic local move
+      // the user already made while the socket was still CONNECTING
+      // (the move is queued and sent on ``onopen``). If we blindly
+      // overwrite ``state.onevsone.match`` here, the optimistic move
+      // gets erased and the piece "teleports back" until the server's
+      // own ``move`` broadcast arrives a moment later (and the clock
+      // briefly snaps back to the pre-move 5:00). Skip the overwrite
+      // when our local history is already ahead of the snapshot — the
+      // pending ``move`` event will arrive next and reconcile both
+      // peers.
+      if (!msg.match) break;
+      const localLen = (m.history && m.history.length) || 0;
+      const serverLen = (msg.match.history && msg.match.history.length) || 0;
+      const sameMatch = m.id && msg.match.id && m.id === msg.match.id;
+      if (sameMatch && serverLen < localLen) {
+        // Still pull in the authoritative clocks/turn so the side bar
+        // doesn't show a stale 5:00 — but keep the local FEN/history
+        // we computed from the optimistic move.
+        if (msg.match.white) m.white = msg.match.white;
+        if (msg.match.black) m.black = msg.match.black;
+        if (msg.match.you && m.you && m.you.color === msg.match.you.color) {
+          m.you = { ...m.you, ...msg.match.you, clock_remaining: m.you.clock_remaining };
+        }
+        if (msg.match.opponent && m.opponent && m.opponent.color === msg.match.opponent.color) {
+          m.opponent = { ...m.opponent, ...msg.match.opponent, clock_remaining: m.opponent.clock_remaining };
+        }
+        break;
       }
+      state.onevsone.match = msg.match;
+      // Authoritative snapshot supersedes whatever premoves we had
+      // speculatively layered on the previous local state.
+      try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
+      _renderOnevsoneMatchUi();
       break;
+    }
     case "move": {
       m.fen = msg.fen;
       m.turn = msg.turn;
       m.history = m.history || [];
-      m.history.push({
-        uci: msg.uci, san: msg.san, from: msg.from, to: msg.to, by: msg.by, capture: !!msg.capture, fen_after: msg.fen,
-      });
+      // Avoid duplicating the entry that tryOneVsOneMove() already
+      // pushed locally for the side that just moved (the server
+      // broadcasts the move back to both peers, including the one
+      // who sent it).
+      const last = m.history[m.history.length - 1];
+      const dup = last
+        && last.from === msg.from
+        && last.to === msg.to
+        && last.by === msg.by
+        && last.fen_after === msg.fen;
+      if (!dup) {
+        m.history.push({
+          uci: msg.uci, san: msg.san, from: msg.from, to: msg.to, by: msg.by, capture: !!msg.capture, fen_after: msg.fen,
+        });
+      }
       if (typeof msg.white_clock === "number") {
         m.white = m.white || {};
         m.white.clock_remaining = msg.white_clock;
@@ -10364,6 +12291,10 @@ function _onevsoneHandleWsEvent(msg) {
       m.finished = !!msg.finished;
       m.finish_reason = msg.finish_reason || "";
       m.winner = msg.winner || "";
+      // A move auto-cancels any pending draw offer (server already
+      // does this; mirror locally so the offer banner disappears
+      // immediately for both sides).
+      m.draw_offer_by = "";
       try {
         if (state.onevsone.chess) {
           state.onevsone.chess.load(m.fen);
@@ -10377,27 +12308,216 @@ function _onevsoneHandleWsEvent(msg) {
         _playWav(sound);
       } catch (_) { /* ignore */ }
       _renderOnevsoneMatchUi();
+      // Spectator mirror: relay the new position to the solo-presence
+      // viewer so they see the opponent's reply on their mini-board
+      // instead of a stale pre-move FEN.
+      try {
+        _partyReportPosition(m.fen, {
+          lastMove: { from: msg.from, to: msg.to },
+          mode: "onevsone",
+        });
+      } catch (_) { /* ignore */ }
+      // Opponent's move just landed and our local chess.js mirror is
+      // synced — try to apply the head of the premove queue.
+      if (!m.finished
+          && state.onevsone.premoves && state.onevsone.premoves.length
+          && m.you && m.turn === m.you.color) {
+        try { _onevsoneDrainPremoves(); } catch (_) { /* ignore */ }
+      }
       break;
     }
     case "finished":
+    case "resigned":
+    case "draw_accepted":
       m.finished = true;
-      m.finish_reason = msg.finish_reason || m.finish_reason || "";
+      m.finish_reason = msg.finish_reason
+        || (msg.type === "resigned" ? "resign"
+          : msg.type === "draw_accepted" ? "agreed_draw"
+          : m.finish_reason)
+        || "";
       m.winner = msg.winner || m.winner || "";
+      m.draw_offer_by = "";
+      // Wipe pending premoves the moment the match ends so a
+      // queued-but-undrained premove doesn't visually persist on
+      // the finished board.
+      try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
       _renderOnevsoneMatchUi();
+      break;
+    case "draw_offer":
+      m.draw_offer_by = msg.by || "";
+      _renderOnevsoneMatchUi();
+      break;
+    case "draw_declined":
+      m.draw_offer_by = "";
+      _renderOnevsoneMatchUi();
+      break;
+    case "error":
+      // Server rejected something we sent (most commonly an
+      // out-of-turn or illegal move from a stale local mirror). Pull
+      // the authoritative state back from the active-match endpoint
+      // so the boards re-sync instead of drifting silently.
+      try {
+        const code = String(msg.code || "");
+        if (code === "illegal" || code === "bad_uci") {
+          setStatus("Сервер отклонил ход. Состояние синхронизировано.", "error");
+          try { _playWav("illegal"); } catch (_) { /* ignore */ }
+        } else if (code === "not_your_turn") {
+          setStatus("Сейчас ход соперника.", "info");
+        } else if (code === "match_gone") {
+          setStatus("Матч завершён.", "info");
+        }
+      } catch (_) { /* ignore */ }
+      // Drop the speculative premove queue when the server
+      // disagrees with us — replaying it on top of a re-synced
+      // position is unsafe and the human player can re-queue easily.
+      try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
+      try {
+        if (state.user.client_id) {
+          api(`/api/onevsone/active?client_id=${encodeURIComponent(state.user.client_id)}`)
+            .then((r) => {
+              if (r && r.match && state.onevsone.match
+                  && r.match.id === state.onevsone.match.id) {
+                state.onevsone.match = r.match;
+                state.onevsone.chess = null;
+                _renderOnevsoneMatchUi();
+              }
+            })
+            .catch(() => { /* ignore */ });
+        }
+      } catch (_) { /* ignore */ }
       break;
   }
 }
 
 function _onevsoneSendMove(uci) {
-  const ws = state.onevsone.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  try { ws.send(JSON.stringify({ type: "move", uci })); return true; } catch (_) { return false; }
+  return _onevsoneEnqueueWs({ type: "move", uci });
 }
 
 function _onevsoneSendResign() {
-  const ws = state.onevsone.ws;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  try { ws.send(JSON.stringify({ type: "resign" })); return true; } catch (_) { return false; }
+  return _onevsoneEnqueueWs({ type: "resign" });
+}
+
+function _onevsoneSendDrawOffer() {
+  return _onevsoneEnqueueWs({ type: "draw_offer" });
+}
+
+function _onevsoneSendDrawAccept() {
+  return _onevsoneEnqueueWs({ type: "draw_accept" });
+}
+
+function _onevsoneSendDrawDecline() {
+  return _onevsoneEnqueueWs({ type: "draw_decline" });
+}
+
+// ---------- Premoves (1 vs 1) ----------
+
+// Returns a chess.js instance reflecting the current real 1v1
+// position plus every queued premove, with side-to-move forced to
+// the player so chess.js will validate a new premove even while it's
+// the opponent's turn. After each applied premove the side is
+// flipped back to the player so premoves can chain.
+function _onevsonePremoveSpeculativeChess() {
+  const m = state.onevsone.match;
+  if (!m || !m.you || !state.onevsone.chess) return null;
+  const youColor = m.you.color;
+  let c;
+  try { c = new Chess(_fenWithSide(state.onevsone.chess.fen(), youColor)); }
+  catch (_) { return null; }
+  if (!c) return null;
+  const queue = state.onevsone.premoves || [];
+  for (const pm of queue) {
+    if (!_applyPremoveToSpecChess(c, pm, youColor)) return null;
+  }
+  return c;
+}
+
+// Queue a player move as a 1v1 premove. Returns true if the move was
+// pseudo-legal in the speculative position and got queued.
+function _onevsoneQueuePremove(from, to) {
+  const c = _onevsonePremoveSpeculativeChess();
+  if (!c) return false;
+  const m = state.onevsone.match;
+  if (!m || !m.you) return false;
+  if (c.turn() !== m.you.color) return false;
+  if (!_applyPremoveToSpecChess(c, { from, to, promotion: "q" }, m.you.color)) {
+    return false;
+  }
+  state.onevsone.premoves = state.onevsone.premoves || [];
+  state.onevsone.premoves.push({ from, to, promotion: "q" });
+  state.onevsone.premoveChess = c;
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  renderBoard();
+  return true;
+}
+
+// Clear the entire 1v1 premove queue and refresh the board.
+function _onevsoneClearPremoves(opts) {
+  if (!state.onevsone) return;
+  const had = state.onevsone.premoves && state.onevsone.premoves.length;
+  state.onevsone.premoves = [];
+  state.onevsone.premoveChess = null;
+  if (had && opts && opts.illegal) {
+    try { _playWav("illegal"); } catch (_) { /* ignore */ }
+    setStatus("Премув нелегален. Очередь сброшена.", "error");
+  }
+  state.selectedSquare = null;
+  state.legalTargets = [];
+  if (had) renderBoard();
+}
+
+// After the opponent replies (WS "move" event) and our local
+// chess.js mirror is synced to the new real position, attempt to
+// apply the next queued premove. Plays the same illegal-move
+// feedback as Play-vs-Stockfish on the first illegal premove.
+function _onevsoneDrainPremoves() {
+  const m = state.onevsone.match;
+  if (!m || m.finished) return;
+  const you = m.you;
+  if (!you) return;
+  const queue = state.onevsone.premoves || [];
+  if (!queue.length) {
+    state.onevsone.premoveChess = null;
+    return;
+  }
+  if (m.turn !== you.color) return;
+  const c = state.onevsone.chess;
+  if (!c) return;
+  if (c.turn() !== you.color) return;
+  const pm = queue.shift();
+  let mv;
+  try { mv = c.move({ from: pm.from, to: pm.to, promotion: pm.promotion || "q" }); }
+  catch (_) { mv = null; }
+  if (!mv) {
+    _onevsoneClearPremoves({ illegal: true });
+    return;
+  }
+  // Sync local match snapshot + replay the same optimistic-apply
+  // logic tryOneVsOneMove() uses so the UI stays consistent.
+  m.fen = c.fen();
+  m.turn = m.turn === "w" ? "b" : "w";
+  m.history = m.history || [];
+  m.history.push({
+    uci: mv.from + mv.to + (mv.promotion || ""),
+    san: mv.san,
+    from: mv.from,
+    to: mv.to,
+    by: you.color,
+    capture: mv.flags && mv.flags.includes("c"),
+    fen_after: m.fen,
+  });
+  try { loadFen(m.fen); } catch (_) { /* ignore */ }
+  state.lastMove = { from: mv.from, to: mv.to };
+  renderBoard();
+  try { _playWav(mv.flags && mv.flags.includes("c") ? "capture" : "move-self"); } catch (_) { /* ignore */ }
+  try {
+    _partyReportPosition(m.fen, {
+      lastMove: { from: mv.from, to: mv.to },
+      mode: "onevsone",
+    });
+  } catch (_) { /* ignore */ }
+  _onevsoneSendMove(mv.from + mv.to + (mv.promotion || ""));
+  _renderOnevsoneMatchUi();
 }
 
 // Public hook used by the board click/drag handlers when state.view
@@ -10408,8 +12528,13 @@ function tryOneVsOneMove(from, to) {
   if (!m || m.finished) return false;
   const you = m.you;
   if (!you) return false;
+  // Opponent's turn → queue as a premove (chess.com-style). The
+  // queue is drained after the opponent's "move" WS event arrives
+  // and our local chess.js mirror has been synced.
   if (m.turn !== you.color) {
-    setStatus("Сейчас ход соперника.", "info");
+    if (!_onevsoneQueuePremove(from, to)) {
+      _onevsoneClearPremoves({ illegal: true });
+    }
     return false;
   }
   const c = state.onevsone.chess;
@@ -10438,7 +12563,24 @@ function tryOneVsOneMove(from, to) {
   state.lastMove = { from: move.from, to: move.to };
   renderBoard();
   try { _playWav(move.flags && move.flags.includes("c") ? "capture" : "move-self"); } catch (_) { /* ignore */ }
-  _onevsoneSendMove(move.from + move.to + (move.promotion || "q"));
+  // Spectator mirror so anyone watching from /api/presence sees our
+  // move on their mini-board instantly (the server-side relay only
+  // covers party WS — 1 vs 1 needs an explicit position push).
+  try {
+    _partyReportPosition(m.fen, {
+      lastMove: { from: move.from, to: move.to },
+      mode: "onevsone",
+    });
+  } catch (_) { /* ignore */ }
+  // UCI suffix is ONLY for actual promotions — always appending
+  // "q" turns plain pawn-pushes like e2e4 into the literal UCI
+  // "e2e4q" which python-chess parses as "push to e4, promote to
+  // queen" — obviously illegal on rank 4 and the server replies
+  // {type:"error",code:"illegal"}, after which the error handler
+  // re-fetches the authoritative match (still pre-move) and the
+  // local optimistic move "teleports back". Send promotion suffix
+  // only when chess.js actually flagged the move as a promotion.
+  _onevsoneSendMove(move.from + move.to + (move.promotion || ""));
   _renderOnevsoneMatchUi();
   return true;
 }
@@ -10448,8 +12590,16 @@ function _renderOnevsoneMatchUi() {
   if (!host) return;
   const m = state.onevsone.match;
   if (!m) { _renderOnevsoneLobby(); return; }
-  if (!state.onevsone.chess && typeof window.Chess === "function") {
-    try { state.onevsone.chess = new window.Chess(m.fen); } catch (_) { state.onevsone.chess = null; }
+  // Use the module-scope Chess import — `window.Chess` is undefined
+  // because chess.js is loaded as an ES module, so the previous
+  // `typeof window.Chess === "function"` guard never created the
+  // local instance and click/drag handlers silently bailed out at
+  // `if (!c) return;`. Without a chess.js instance both players see
+  // an unresponsive board (no selection, no legal-move highlights,
+  // no moves accepted) — the symptom the player describes as
+  // "режим 1 vs 1 фул сырой, никто ходить не может".
+  if (!state.onevsone.chess && typeof Chess === "function") {
+    try { state.onevsone.chess = new Chess(m.fen); } catch (_) { state.onevsone.chess = null; }
   } else if (state.onevsone.chess) {
     try { state.onevsone.chess.load(m.fen); } catch (_) { /* ignore */ }
   }
@@ -10468,6 +12618,20 @@ function _renderOnevsoneMatchUi() {
   const oppClock = opp.clock_remaining != null ? opp.clock_remaining : (m.time_seconds || 0);
   const turnYou = m.turn === (you.color || "w");
   const finished = !!m.finished;
+  // Live eval bar: reflects the *current* position (m.fen) from
+  // white's POV. When the match ends (or just landed in the lobby)
+  // _refreshEvalBarVisibility() hides the bar; while the match is
+  // running we kick a 250ms Stockfish ping per move. (Must run
+  // AFTER `finished` is initialised — earlier versions referenced
+  // `finished` in the TDZ which threw and the try/catch ate the
+  // error, leaving the bar frozen in 1v1.)
+  try {
+    _refreshEvalBarVisibility();
+    if (!finished) {
+      const stmFen = (m.fen.split(/\s+/)[1] || "w") === "w" ? "w" : "b";
+      _scheduleLiveEvalBarUpdate(m.fen, stmFen);
+    }
+  } catch (_) { /* ignore */ }
   let finishedHtml = "";
   if (finished) {
     let txt = "Партия завершена";
@@ -10485,8 +12649,56 @@ function _renderOnevsoneMatchUi() {
       txt = "Правило 50 ходов — ничья";
     } else if (m.finish_reason === "time") {
       txt = m.winner === (you.color || "w") ? "Время вышло у соперника — победа" : "Ваше время вышло";
+    } else if (m.finish_reason === "agreed_draw") {
+      txt = "Ничья по согласию";
     }
     finishedHtml = `<div class="onevsone-empty"><b>${escapeHtml(txt)}</b></div>`;
+  }
+  // Draw-offer banner: chess.com-style accept/decline strip when the
+  // opponent has an outstanding draw offer; "вы предложили" hint when
+  // it's our offer waiting to be answered.
+  const youCid = (you && you.client_id) || "";
+  const drawOfferBy = m.draw_offer_by || "";
+  const drawOfferIncoming = !!finished ? false : !!drawOfferBy && drawOfferBy !== youCid;
+  const drawOfferOutgoing = !!finished ? false : !!drawOfferBy && drawOfferBy === youCid;
+  let drawOfferHtml = "";
+  if (drawOfferIncoming) {
+    drawOfferHtml = `
+      <div class="ov-draw-offer is-incoming">
+        <span>Соперник предлагает ничью</span>
+        <button type="button" class="primary" id="btn-onevsone-draw-accept">Принять</button>
+        <button type="button" id="btn-onevsone-draw-decline">Отклонить</button>
+      </div>
+    `;
+  } else if (drawOfferOutgoing) {
+    drawOfferHtml = `<div class="ov-draw-offer is-outgoing">Вы предложили ничью — ожидаем ответа…</div>`;
+  }
+  // Action row layout:
+  //   • finished match     → only "Leave"
+  //   • outgoing draw     → only Resign (we already offered draw,
+  //                         hide the "offer" button to avoid spam)
+  //   • normal           → Resign + "Offer draw"
+  let actionsHtml;
+  if (finished) {
+    // Post-mortem actions: "Скачать PGN" pulls the standards-
+    // compliant transcript from the backend so the user can paste
+    // it into Analysis/lichess/chess.com; "Разобрать партию"
+    // primes the in-app Analysis view with the same PGN and runs
+    // engine review in the background.
+    actionsHtml = `
+      <button type="button" class="primary" id="btn-onevsone-leave">Выйти</button>
+      <button type="button" id="btn-onevsone-pgn">Скачать PGN</button>
+      <button type="button" id="btn-onevsone-analyze">Разобрать партию</button>
+    `;
+  } else if (drawOfferIncoming) {
+    actionsHtml = `<button type="button" id="btn-onevsone-resign">Сдаться</button>`;
+  } else if (drawOfferOutgoing) {
+    actionsHtml = `<button type="button" id="btn-onevsone-resign">Сдаться</button>`;
+  } else {
+    actionsHtml = `
+      <button type="button" id="btn-onevsone-resign">Сдаться</button>
+      <button type="button" id="btn-onevsone-draw">Предложить ничью</button>
+    `;
   }
   host.innerHTML = `
     <div class="onevsone-header">
@@ -10504,8 +12716,9 @@ function _renderOnevsoneMatchUi() {
       <span class="ov-status">⏱ ${_fmtMmSs((youClock || 0) * 1000)}</span>
     </div>
     ${finishedHtml}
+    ${drawOfferHtml}
     <div class="ov-actions">
-      ${finished ? `<button type="button" class="primary" id="btn-onevsone-leave">Выйти</button>` : `<button type="button" id="btn-onevsone-resign">Сдаться</button>`}
+      ${actionsHtml}
     </div>
     <div id="onevsone-history" class="puzzle-history"></div>
   `;
@@ -10524,6 +12737,30 @@ function _renderOnevsoneMatchUi() {
       _onevsoneSendResign();
     };
   }
+  const btnDraw = document.getElementById("btn-onevsone-draw");
+  if (btnDraw) {
+    btnDraw.onclick = () => {
+      if (!_onevsoneSendDrawOffer()) {
+        setStatus("Не удалось отправить предложение ничьи. Соединение потеряно?", "error");
+      }
+    };
+  }
+  const btnDrawAccept = document.getElementById("btn-onevsone-draw-accept");
+  if (btnDrawAccept) {
+    btnDrawAccept.onclick = () => {
+      if (!_onevsoneSendDrawAccept()) {
+        setStatus("Не удалось принять ничью.", "error");
+      }
+    };
+  }
+  const btnDrawDecline = document.getElementById("btn-onevsone-draw-decline");
+  if (btnDrawDecline) {
+    btnDrawDecline.onclick = () => {
+      if (!_onevsoneSendDrawDecline()) {
+        setStatus("Не удалось отклонить ничью.", "error");
+      }
+    };
+  }
   const btnLeave = document.getElementById("btn-onevsone-leave");
   if (btnLeave) {
     btnLeave.onclick = () => {
@@ -10531,8 +12768,55 @@ function _renderOnevsoneMatchUi() {
       state.onevsone.ws = null;
       state.onevsone.match = null;
       state.onevsone.chess = null;
+      try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
       _renderOnevsoneLobby();
       _refreshOnevsoneOnline(true);
+    };
+  }
+  const btnPgn = document.getElementById("btn-onevsone-pgn");
+  if (btnPgn) {
+    btnPgn.onclick = () => {
+      // Anchor-click trick instead of fetch+blob: lets the browser
+      // honour the Content-Disposition header the backend sets and
+      // shows the usual "Save as…" dialog with a sensible filename.
+      const cid = encodeURIComponent(state.user.client_id || "");
+      const mid = encodeURIComponent(m.id || "");
+      const a = document.createElement("a");
+      a.href = `/api/onevsone/match/${mid}/pgn?client_id=${cid}&download=1`;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    };
+  }
+  const btnAnalyze = document.getElementById("btn-onevsone-analyze");
+  if (btnAnalyze) {
+    btnAnalyze.onclick = async () => {
+      btnAnalyze.disabled = true;
+      const oldText = btnAnalyze.textContent;
+      btnAnalyze.textContent = "Загружаю…";
+      try {
+        const cid = encodeURIComponent(state.user.client_id || "");
+        const mid = encodeURIComponent(m.id || "");
+        const r = await fetch(`/api/onevsone/match/${mid}/pgn?client_id=${cid}&download=0`, { credentials: "same-origin" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const pgnText = await r.text();
+        // Hand the PGN off to Analysis. The wrapper exposed on
+        // window.app (see bottom of this file) does the heavy
+        // lifting: import -> switch view -> kick off engine review.
+        if (typeof window.app === "object" && typeof window.app.openPgnInAnalysis === "function") {
+          await window.app.openPgnInAnalysis(pgnText);
+        } else {
+          // Fallback: dump it into a textarea so the user can copy.
+          await navigator.clipboard.writeText(pgnText);
+          setStatus("PGN скопирован в буфер обмена", "ok");
+        }
+      } catch (e) {
+        setStatus("Не удалось загрузить PGN: " + (e && e.message || e), "error");
+      } finally {
+        btnAnalyze.disabled = false;
+        btnAnalyze.textContent = oldText;
+      }
     };
   }
   renderGlobalLeaderboard();
@@ -10619,6 +12903,12 @@ async function enterBattleView() {
     }
     return;
   }
+  // Open the solo-presence relay so anyone watching this player from
+  // /api/presence will see Battle activity (lobby / scoreboard / live
+  // puzzle attempts). When the player joins an actual party the
+  // party WS supersedes presence; presenceConnect bails out cleanly
+  // because party.active = true.
+  try { presenceConnect(); } catch (_) { /* ignore */ }
   if (state.party.active && state.party.status === "lobby") {
     renderPartyLobby();
     return;
@@ -10641,6 +12931,12 @@ function leaveBattleView() {
   // Hide the legacy modal in case some legacy code path opened it.
   const m = document.getElementById("party-modal");
   if (m) m.hidden = true;
+  // Drop the solo-presence socket if the player is leaving Battle
+  // without entering a party (otherwise the party WS owns the
+  // relay and we shouldn't kill it).
+  if (!state.party.active) {
+    try { presenceDisconnect(); } catch (_) { /* ignore */ }
+  }
 }
 
 async function enterOpeningView() {
@@ -10721,7 +13017,13 @@ function startOpeningPractice() {
   state.opening.active = true;
   try { loadFen(state.opening.chess.fen()); } catch (_) { /* ignore */ }
   state.lastMove = null;
+  state.reviewBadge = null;
   renderBoard();
+  // Sync spectators to the fresh opening start position.
+  _partyReportPosition(state.opening.chess.fen(), {
+    lastMove: null,
+    reviewBadge: { square: "", classification: "" },
+  });
   // If the line starts with the opponent's move, play it for them.
   const op = _selectedOpening();
   if (op && op.color === "black") {
@@ -10748,6 +13050,11 @@ function _playOpeningOpponentMove() {
   state.lastMove = { from: move.from, to: move.to };
   renderBoard();
   playMoveSoundFor(move, { isOwn: false, inCheck: c.isCheck() });
+  // Mirror the opponent's reply to spectators.
+  _partyReportPosition(c.fen(), {
+    lastMove: { from: move.from, to: move.to },
+    reviewBadge: { square: "", classification: "" },
+  });
   state.opening.moveIdx += 1;
   state.opening.coachMsg = `Соперник: ${move.san}. Твой ход.`;
   if (state.opening.moveIdx >= line.moves.length) {
@@ -10767,6 +13074,7 @@ function tryOpeningMove(from, to) {
   try { move = c.move({ from, to: moveTo, promotion: "q" }); } catch { move = null; }
   if (!move) {
     setStatus("Нелегальный ход.", "error");
+    try { _playWav("incorrect"); } catch (_) { /* ignore */ }
     state.selectedSquare = null;
     state.legalTargets = [];
     renderBoard();
@@ -10799,6 +13107,13 @@ function tryOpeningMove(from, to) {
     state.reviewBadge = { square: move.to, classification: "miss" };
     state.lastMove = { from: move.from, to: move.to };
     renderBoard();
+    try { playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() }); } catch (_) { /* ignore */ }
+    // Spectator mirror so the watcher sees the same red ✕ + pink
+    // from→to instead of a piece teleport when the visual reverts.
+    _partyReportPosition(c.fen(), {
+      reviewBadge: { square: move.to, classification: "miss" },
+      lastMove: { from: move.from, to: move.to },
+    });
     _flashSquare(move.to, "puzzle-flash-bad");
     try { c.undo(); } catch (_) { /* ignore */ }
     _reportOpeningAttempt(false, false);
@@ -10811,6 +13126,11 @@ function tryOpeningMove(from, to) {
       state.reviewBadge = null;
       state.lastMove = null;
       renderBoard();
+      // Mirror the revert to spectators.
+      _partyReportPosition(prevFen, {
+        reviewBadge: { square: "", classification: "" },
+        lastMove: null,
+      });
     }, 800);
     return;
   }
@@ -10821,6 +13141,11 @@ function tryOpeningMove(from, to) {
   renderBoard();
   playMoveSoundFor(move, { isOwn: true, inCheck: c.isCheck() });
   _flashSquare(move.to, "puzzle-flash-ok");
+  // Mirror correct opening move to spectators with green ✓ + green from→to.
+  _partyReportPosition(c.fen(), {
+    reviewBadge: { square: move.to, classification: "good" },
+    lastMove: { from: move.from, to: move.to },
+  });
   state.opening.moveIdx += 1;
   state.opening.feedback = "correct";
   state.opening.coachMsg = `Верно: ${move.san}.`;
@@ -11290,9 +13615,15 @@ function _notificationsConnect() {
   };
   es.onerror = () => {
     // Browser auto-reconnects on most failures; if it really dies,
-    // schedule a manual reopen.
+    // schedule a manual reopen with exponential backoff (1s → 2s →
+    // 4s … capped at 30s + ±20% jitter so a thundering herd of
+    // concurrent tabs doesn't sync up after a server restart).
     if (es.readyState === EventSource.CLOSED) {
-      state.notifications.reconnectTimer = setTimeout(_notificationsConnect, 4000);
+      const attempt = state.notifications.reconnectAttempts || 0;
+      const base = Math.min(30000, 1000 * Math.pow(2, attempt));
+      const jitter = base * (0.8 + Math.random() * 0.4);
+      state.notifications.reconnectAttempts = attempt + 1;
+      state.notifications.reconnectTimer = setTimeout(_notificationsConnect, jitter);
     }
   };
 }
@@ -11301,9 +13632,28 @@ function handleNotificationEvent(msg) {
   if (!msg || typeof msg !== "object") return;
   switch (msg.type) {
     case "hello":
-      // Snapshot of pending invitations on (re)connect.
+      // Snapshot of pending invitations on (re)connect. The server
+      // is back online → clear the backoff counter so the next blip
+      // restarts at 1s, not at whatever we'd grown to.
+      state.notifications.reconnectAttempts = 0;
       (msg.invitations || []).forEach((inv) => _showInvitationToast(inv));
       (msg.onevsone_challenges || []).forEach((ch) => _onevsoneShowChallengeToast(ch));
+      // Engine state piggy-backs on the hello frame so the engine
+      // panel inputs reflect the host's pool settings the moment we
+      // open the page (instead of zeros until the next reconfigure).
+      if (msg.engine) {
+        try { _applyEngineState(msg.engine); } catch (_) { /* ignore */ }
+      }
+      break;
+    case "engine_state":
+      // Host changed Stockfish settings (threads / hash / skill /
+      // multipv / path) — mirror them into the engine panel so every
+      // tab in the session reflects the new configuration. The
+      // payload shape matches engine.current_state(): see
+      // backend/stockfish_engine.py.
+      if (msg.engine) {
+        try { _applyEngineState(msg.engine); } catch (_) { /* ignore */ }
+      }
       break;
     case "invitation":
       if (msg.invitation) _showInvitationToast(msg.invitation);
@@ -11321,14 +13671,26 @@ function handleNotificationEvent(msg) {
     case "onevsone_challenge":
       if (msg.challenge) _onevsoneShowChallengeToast(msg.challenge);
       break;
+    case "onevsone_match":
     case "onevsone_challenge_accepted":
       // Server pushes the freshly-created match to *both* players when
-      // the target accepts. The challenger transitions into the match
-      // view; the target already navigated locally.
+      // the target accepts (backend payload type is `onevsone_match`,
+      // legacy alias kept for compatibility). The challenger
+      // transitions into the match view here; the target already
+      // navigated locally from the toast Accept handler.
       if (msg.match && msg.match.you && msg.match.you.client_id === state.user.client_id) {
         state.onevsone.match = msg.match;
         state.onevsone.outgoing = null;
+        // Drop any stale chess instance so _renderOnevsoneMatchUi
+        // re-creates one from the fresh starting FEN — otherwise a
+        // chess.js cached from a previous match would refuse the
+        // first move.
+        state.onevsone.chess = null;
+        try { _onevsoneClearPremoves(); } catch (_) { /* ignore */ }
         setView("onevsone");
+        // Force the "Играть" subtab so the player lands on the live
+        // board, not the leaderboard tab they may have last viewed.
+        try { _activatePanelSubtab("onevsone", "play"); } catch (_) { /* ignore */ }
         _renderOnevsoneMatchUi();
         _onevsoneEnsureWs();
       }
@@ -11904,6 +14266,16 @@ function handlePresenceSpectatorMessage(msg) {
         best_streak: Number(msg.best_streak || 0),
         score: Number(msg.streak || 0),
         solved: Number(msg.best_streak || 0),
+        // Mirror the player's local review-badge state (✓ "good" / ✗ "miss")
+        // so the spectator's mini-board renderer paints the same icon and
+        // from→to colour highlight on the same square. Without these the
+        // mini-board renderer falls back to "" and the badge is invisible.
+        review_badge_square: typeof msg.review_badge_square === "string"
+          ? msg.review_badge_square
+          : (prev.review_badge_square || ""),
+        review_badge_kind: typeof msg.review_badge_kind === "string"
+          ? msg.review_badge_kind
+          : (prev.review_badge_kind || ""),
       };
       sp.selectedId = cid;
       _spectatorRender();
@@ -12333,6 +14705,79 @@ renderBoard();
 setBoardMode(true);
 refreshEngineStatus();
 _bootUser();
+_refreshHostMode();
 
-// Expose for debugging.
-window.__chess = { state, buildFen, loadFen };
+// Probe /api/auth/check at boot so we know whether the current
+// visitor is the server operator. The reply also tells us whether
+// the host gated the engine settings (host_token_required) so we
+// can render the panel read-only for everyone else. Re-running this
+// after the SSE engine_state arrives keeps the UI in sync after
+// reload without waiting for the next configure.
+async function _refreshHostMode() {
+  try {
+    const resp = await fetch("/api/auth/check", { credentials: "include" });
+    if (!resp.ok) return;
+    const j = await resp.json();
+    _setHostMode({
+      isHost: !!j.is_host,
+      hostTokenRequired: !!j.host_token_required,
+    });
+  } catch (_) { /* ignore */ }
+}
+
+// Expose for debugging. Includes the dispatchers so end-to-end test
+// harnesses (and humans poking around in DevTools) can simulate clicks
+// and drops without synthesising mouse events.
+window.__chess = {
+  state,
+  buildFen,
+  loadFen,
+  handleSquareClick,
+  tryOneVsOneMove,
+  ensureOnevsoneWs: _onevsoneEnsureWs,
+  renderOnevsoneMatchUi: _renderOnevsoneMatchUi,
+};
+
+// Small public surface for cross-view helpers. Currently only used
+// by the 1v1 finish modal to hand the freshly-built PGN over to the
+// Analysis view + auto-trigger engine review — but having a single
+// namespace lets future glue (e.g. opening trainer -> analysis) live
+// in one place instead of poking DOM ids directly.
+window.app = window.app || {};
+window.app.openPgnInAnalysis = async function (pgnText) {
+  if (typeof pgnText !== "string" || !pgnText.trim()) return;
+  // Switch to Analysis view first so the input + buttons exist in
+  // the DOM; setView is fire-and-forget so we just call it and
+  // expect the elements to be there on the next event-loop tick.
+  // The view key is "analysis" — "review" used to silently fall
+  // back to "main" because it isn't in the allow-list, which is
+  // exactly what made the post-1v1 game review look broken
+  // ("выбираешь сторону и просто перекидывает в вкладку Main").
+  try { setView("analysis"); } catch (_) { /* ignore */ }
+  const src = document.getElementById("review-source");
+  const btnImport = document.getElementById("btn-review-import");
+  if (!src || !btnImport) {
+    // The Analysis view markup was renamed at some point — fall
+    // back to clipboard so the user can paste it manually.
+    try { await navigator.clipboard.writeText(pgnText); } catch (_) {}
+    setStatus("PGN скопирован в буфер обмена", "ok");
+    return;
+  }
+  src.value = pgnText;
+  btnImport.click();
+  // Kick analyse after import; the import handler is async and
+  // disables btn-review-analyse until the side-picker resolves, so
+  // poll briefly. 250ms × 40 = 10s ceiling — comfortably more than
+  // the local import path which is purely a PGN parse.
+  const start = Date.now();
+  const tick = async () => {
+    if (Date.now() - start > 10000) return;
+    const btnAn = document.getElementById("btn-review-analyse");
+    if (btnAn && !btnAn.disabled) {
+      btnAn.click();
+      return;
+    }
+    setTimeout(tick, 250);
+  };
+  setTimeout(tick, 400);
+};

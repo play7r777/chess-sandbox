@@ -65,11 +65,13 @@ button {
 }
 button:hover:not(:disabled) { background: #41454f; border-color: var(--accent); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-input[type="text"], input[type="number"], select {
+input[type="text"], input[type="number"], select, textarea {
   background: var(--bg-elev);
   border: 1px solid #444;
   border-radius: 6px;
   padding: 5px 8px;
+  color: var(--fg);
+  font: inherit;
 }
 input:focus, select:focus, button:focus-visible {
   outline: 2px solid var(--accent);
@@ -1141,37 +1143,44 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .eval-bar {
   position: relative;
   /* Neutral medium-grey frame so the bar reads as a distinct UI element
-     against the page background regardless of how dark the black block
-     becomes. */
+     against the page background regardless of how dark the block becomes. */
   border: 2px solid #5a6070;
   border-radius: 3px;
   overflow: hidden;
-  /* Use the same colour as the black block so any sub-pixel gap from
-     flex rounding doesn't show as a strip of page background. */
+  /* The container itself paints black's share — we overlay only the
+     white block on top of it. This keeps the bar's orientation a single
+     CSS toggle (no flex-direction swap that could leave the bar half-
+     rotated between renders), which is what made the eval bar appear
+     to flip inconsistently when clicking through analysis moves. */
   background: #0d0e10;
-  display: flex;
-  flex-direction: column;
   min-height: 100%;
   /* Subtle outer shadow to lift the bar off the page bg. */
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 .eval-bar[hidden] { display: none; }
-/* When the board is flipped, swap the visual order of the white/black
-   blocks so the white block sits on the same side as the white pieces
-   on the board. The percentage values themselves stay tied to each
-   colour, so a 90% white advantage always shows 90% white-coloured. */
-.eval-bar.flipped { flex-direction: column-reverse; }
+/* .eval-bar-black is no longer drawn (the container paints black's share);
+   keep the element so callers don't break, but make it invisible. */
 .eval-bar-black {
-  flex: 0 0 var(--eval-black, 50%);
-  /* Deeper near-black so the block clearly reads as "black side" and
-     doesn't blend into the surrounding page bg (which is ~#1f2024). */
-  background: #0d0e10;
-  transition: flex-basis 0.18s ease;
+  display: none;
 }
 .eval-bar-white {
-  flex: 0 0 var(--eval-white, 50%);
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--eval-white, 50%);
   background: #f1f2f2;
-  transition: flex-basis 0.18s ease;
+  transition: height 0.18s ease;
+  /* Default board orientation: white pieces at the BOTTOM of the
+     board, so white fills from the bottom of the bar upwards. */
+  bottom: 0;
+  top: auto;
+}
+/* Flipped board (black at the bottom): white fills from the TOP of
+   the bar downwards. Switching anchor side via top/bottom is a single
+   declarative flip that cannot drift mid-transition. */
+.eval-bar.flipped .eval-bar-white {
+  top: 0;
+  bottom: auto;
 }
 .eval-bar-label {
   position: absolute;
@@ -3000,6 +3009,52 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   inset: 0;
   background: rgba(255, 220, 80, 0.42);
   pointer-events: none;
+}
+/* When the spectator broadcast carries a classification (correct =
+   "good" / wrong = "miss" / etc.), the cls-* gradient below paints the
+   chess.com analysis colour for the from+to squares. Without
+   suppressing the yellow ::before overlay above, the watcher sees
+   yellow + pink mixed = orange (the exact bug the user reported). Hide
+   the overlay so the classification colour is rendered cleanly. */
+.mini-board .mb-square.mb-lastmove.last-move-cls::before {
+  display: none;
+}
+
+/* Classification-tinted square (chess.com analysis style) for the
+   spectator mini-board: when the watched player makes a wrong move
+   the from + to squares glow red; on a correct move they glow green.
+   Mirror of .square.last-move-cls.cls-* on the main board. */
+.mini-board .mb-square.last-move-cls.cls-brilliant  { background-image: linear-gradient(rgba( 38, 194, 163, 0.55), rgba( 38, 194, 163, 0.55)); }
+.mini-board .mb-square.last-move-cls.cls-great      { background-image: linear-gradient(rgba(116, 155, 191, 0.55), rgba(116, 155, 191, 0.55)); }
+.mini-board .mb-square.last-move-cls.cls-best       { background-image: linear-gradient(rgba(129, 182,  76, 0.55), rgba(129, 182,  76, 0.55)); }
+.mini-board .mb-square.last-move-cls.cls-excellent  { background-image: linear-gradient(rgba(129, 182,  76, 0.50), rgba(129, 182,  76, 0.50)); }
+.mini-board .mb-square.last-move-cls.cls-good       { background-image: linear-gradient(rgba(149, 183, 118, 0.50), rgba(149, 183, 118, 0.50)); }
+.mini-board .mb-square.last-move-cls.cls-book       { background-image: linear-gradient(rgba(213, 164, 125, 0.50), rgba(213, 164, 125, 0.50)); }
+.mini-board .mb-square.last-move-cls.cls-forced     { background-image: linear-gradient(rgba(150, 175, 139, 0.50), rgba(150, 175, 139, 0.50)); }
+.mini-board .mb-square.last-move-cls.cls-inaccuracy { background-image: linear-gradient(rgba(247, 198,  49, 0.60), rgba(247, 198,  49, 0.60)); }
+.mini-board .mb-square.last-move-cls.cls-mistake    { background-image: linear-gradient(rgba(255, 164,  89, 0.60), rgba(255, 164,  89, 0.60)); }
+.mini-board .mb-square.last-move-cls.cls-blunder    { background-image: linear-gradient(rgba(250,  65,  45, 0.62), rgba(250,  65,  45, 0.62)); }
+.mini-board .mb-square.last-move-cls.cls-miss       { background-image: linear-gradient(rgba(255, 119, 105, 0.60), rgba(255, 119, 105, 0.60)); }
+
+/* Review badge (✓ / ✗ chess.com-style icon) painted in the corner of
+   the destination square on the spectator mini-board. Mirror of
+   `.square .review-badge` on the main board, scaled down a bit so
+   the SVG doesn't dwarf the smaller mini-board squares. */
+.mini-board .mb-square .review-badge {
+  position: absolute;
+  top: -8%; right: -8%;
+  width: 46%; height: 46%;
+  min-width: 14px; min-height: 14px;
+  max-width: 28px; max-height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+  z-index: 6;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+}
+.mini-board .mb-square .review-badge svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 /* Source square of the player's current selection (the piece they
    clicked / are dragging). Same colour the main board uses so the
@@ -4944,6 +4999,87 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   border-color: #5d9948;
 }
 
+/* Action row inside an *active* match panel (resign / offer-draw /
+   leave). Outside the challenge form, `.ov-actions` lives directly
+   under #onevsone-body, so we restyle the bare buttons to match the
+   challenge-form look without leaning on form-scoped selectors. */
+#onevsone-body .ov-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+#onevsone-body .ov-actions button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+#onevsone-body .ov-actions button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+#onevsone-body .ov-actions button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+#onevsone-body .ov-actions #btn-onevsone-resign {
+  background: linear-gradient(180deg, #c0504d 0%, #8c3a37 100%);
+  border-color: #8c3a37;
+}
+#onevsone-body .ov-actions #btn-onevsone-resign:hover {
+  background: linear-gradient(180deg, #d56864 0%, #a04340 100%);
+}
+#onevsone-body .ov-actions #btn-onevsone-draw {
+  background: linear-gradient(180deg, #4a6391 0%, #344e7a 100%);
+  border-color: #344e7a;
+}
+#onevsone-body .ov-actions #btn-onevsone-draw:hover {
+  background: linear-gradient(180deg, #5b78ad 0%, #425e90 100%);
+}
+
+/* Draw-offer banner: shown above .ov-actions while a draw offer is
+   pending. is-incoming = opponent offered, render Accept/Decline.
+   is-outgoing = we offered, render a passive "waiting" hint. */
+#onevsone-body .ov-draw-offer {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.025);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #f5f8fc;
+}
+#onevsone-body .ov-draw-offer.is-incoming {
+  border-color: #5d9948;
+  background: rgba(129, 182, 76, 0.10);
+}
+#onevsone-body .ov-draw-offer.is-incoming span {
+  flex: 1 1 auto;
+}
+#onevsone-body .ov-draw-offer button {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid #2c3950;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f8fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+#onevsone-body .ov-draw-offer button.primary {
+  background: linear-gradient(180deg, #81b64c 0%, #5d9948 100%);
+  border-color: #5d9948;
+}
+#onevsone-body .ov-draw-offer.is-outgoing {
+  font-style: italic;
+  color: #b9c5d6;
+}
+
 /* Bottom-right toast for incoming challenges. */
 .onevsone-toast-host {
   position: fixed;
@@ -5297,4 +5433,628 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   padding: 2px 6px;
   border-radius: 999px;
   margin-left: auto;
+}
+
+/* ===========================================================
+   Puzzle Rush right-menu styling extended to the other puzzle
+   modes (Puzzles / Daily / Battle / Opening Trainer).
+   ---------------------------------------------------------------
+   Wraps each panel in the same chess.com dark gradient gray card
+   as `.cc-section.sidebar-component`, gives the `<h2>` heading
+   the same big bold title look, and tightens the inner card
+   surfaces so they sit on the gray container instead of painting
+   their own backgrounds.
+   =========================================================== */
+#panel-puzzle,
+#panel-daily,
+#panel-battle,
+#panel-opening {
+  --cc-green-200: #b2e068;
+  --cc-green-300: #81b64c;
+  --cc-green-400: #5d9948;
+  --cc-green-500: #45753c;
+  --cc-gray-700: #4b4847;
+  --cc-gray-800: #312e2b;
+  --cc-gray-900: #262421;
+  background: linear-gradient(180deg, #312e2b 0%, #262421 100%);
+  border: 1px solid #1d1b1a;
+  border-radius: 12px;
+  color: #d6d2cb;
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+  margin-bottom: 14px;
+}
+#panel-puzzle > h2,
+#panel-daily > h2,
+#panel-battle > h2,
+#panel-opening > h2 {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.005em;
+  color: #f5f2ec;
+  margin: 0 0 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  line-height: 1.1;
+}
+#panel-puzzle > h2 .puzzle-h-sub,
+#panel-daily > h2 .puzzle-h-sub,
+#panel-battle > h2 .puzzle-h-sub,
+#panel-opening > h2 .puzzle-h-sub {
+  font-size: 12px;
+  font-weight: 600;
+  color: #a09b91;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-left: 6px;
+}
+#panel-puzzle .panel-subtabs,
+#panel-daily .panel-subtabs {
+  margin: 0 0 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+/* Inner cards/buttons in the styled panels drop their own
+   solid surfaces so they sit on top of the gray container
+   without a "card-on-card" look. */
+#panel-puzzle .puzzle-card,
+#panel-daily .puzzle-card,
+#panel-opening .puzzle-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: none;
+  margin-bottom: 0;
+  color: #f5f2ec;
+}
+#panel-puzzle .puzzle-stats-bar,
+#panel-daily .puzzle-stats-bar,
+#panel-opening .puzzle-stats-bar {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 0;
+}
+#panel-puzzle .puzzle-actions,
+#panel-daily .puzzle-actions,
+#panel-opening .puzzle-actions {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 4px 0 0;
+  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+}
+#panel-puzzle .puzzle-history,
+#panel-daily .puzzle-history,
+#panel-opening .puzzle-history {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin-top: 4px;
+}
+/* Battle's body host (`#battle-body`) holds the entire match UI
+   (lobby tabs, scoreboard, in-game tiles). It already paints its
+   own surfaces, but the wrapping panel now provides the dark
+   gradient frame so things line up with rush visually. */
+#panel-battle #battle-body {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+/* Inline Play CTA: when the rush Play button sits inside the
+   sidebar's mode-cards container (instead of the separate
+   `#rush-actions` slot below) we don't need the outer block
+   margins — the surrounding `.sidebar-start-content` already
+   spaces it from the modes. */
+.cc-section.sidebar-component .cc-rush-cta-inline {
+  margin: 6px 0 0;
+}
+
+/* Clickable battle-results attempt rows — affordance for the
+   "click to replay this puzzle (no save)" gesture. */
+.party-results-attempt-row { cursor: pointer; }
+.party-results-attempt-row:hover {
+  background: rgba(129, 182, 76, 0.10);
+  outline: 1px solid rgba(129, 182, 76, 0.35);
+}
+.party-results-attempt-row:focus-visible {
+  outline: 2px solid #81b64c;
+  outline-offset: -2px;
+}
+
+/* ===========================================================
+   C8: Puzzle loading skeleton. Replaces the "Загружаем пазл #…"
+   text-only placeholder with a chess.com-style shimmer block so
+   users get an immediate "something is loading" cue (the puzzle
+   fetch can take >300ms on slow networks).
+   =========================================================== */
+.puzzle-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  min-height: 160px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.puzzle-skeleton-row {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.05) 0%,
+    rgba(255, 255, 255, 0.12) 50%,
+    rgba(255, 255, 255, 0.05) 100%
+  );
+  background-size: 200% 100%;
+  animation: puzzle-skel-shimmer 1.4s ease-in-out infinite;
+}
+.puzzle-skeleton-row.puzzle-skeleton-title { height: 22px; width: 60%; }
+.puzzle-skeleton-row.puzzle-skeleton-meta  { height: 12px; width: 80%; }
+.puzzle-skeleton-row.puzzle-skeleton-meta.short { width: 45%; }
+.puzzle-skeleton-hint {
+  margin-top: 4px;
+  font-size: 13px;
+}
+@keyframes puzzle-skel-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ===========================================================
+   Battle Puzzle Party Mode UI — team A / team B columns,
+   shared puzzle pool split per teammate, summed scores.
+   The host picks "solo" or "party" in the lobby modal; party
+   mode swaps the single scoreboard for a side-by-side team
+   layout. Each team's row shows summed score with a per-member
+   breakdown underneath.
+   =========================================================== */
+.party-mode-picker {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+.party-mode-pill {
+  flex: 1 1 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d6d2cb;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  text-align: center;
+}
+.party-mode-pill.is-selected {
+  background: rgba(129, 182, 76, 0.16);
+  border-color: #81b64c;
+  color: #f5f2ec;
+}
+.party-mode-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.party-team-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.party-team-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.party-team-card.team-A { border-left: 3px solid #4f9dde; }
+.party-team-card.team-B { border-left: 3px solid #e07b56; }
+.party-team-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-weight: 700;
+  font-size: 15px;
+}
+.party-team-card-score {
+  font-size: 18px;
+  color: #f5f2ec;
+}
+.party-team-card-members {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: #b8b3a9;
+}
+.party-team-member-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  align-items: center;
+}
+.party-team-member-row.is-self { color: #f5f2ec; font-weight: 600; }
+.party-team-member-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.party-team-member-score {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.party-team-pool-hint {
+  font-size: 11px;
+  color: #8c8779;
+  margin-top: 2px;
+}
+.party-team-picker {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 0;
+  flex-wrap: wrap;
+}
+.party-team-picker-btn {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d6d2cb;
+  font-size: 12px;
+  cursor: pointer;
+}
+.party-team-picker-btn.is-current {
+  background: rgba(129, 182, 76, 0.16);
+  border-color: #81b64c;
+  color: #f5f2ec;
+}
+
+/* -----------------------------------------------------------
+   Party Mode — additional lobby/scoreboard/results bits added
+   when the host enables "Команды (A vs B)". The base
+   .party-team-grid / .party-team-card rules above handle the
+   two-column layout; the rules below add the header strip
+   (team badge + name + member count + summed score) and the
+   per-row inline "→ A" / "→ B" team-move buttons.
+   ----------------------------------------------------------- */
+.party-kind-section { margin-top: 14px; }
+.party-kind-section-readonly { opacity: 0.92; }
+.party-team-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.party-team-hint { font-size: 12px; }
+.party-team-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 14px;
+  color: #e6e2d8;
+}
+.party-team-badge {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 13px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.party-team-card.team-A .party-team-badge { background: rgba(79, 157, 222, 0.20); color: #aed5f6; }
+.party-team-card.team-B .party-team-badge { background: rgba(224, 123, 86, 0.20); color: #f5c0a8; }
+.party-team-count {
+  font-size: 12px;
+  color: #94a4be;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.party-team-total {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 700;
+  color: #f1e7c8;
+  font-variant-numeric: tabular-nums;
+}
+.party-team-card.party-team-unassigned {
+  border-left: 3px solid #6f6f6f;
+  margin-top: 10px;
+}
+.party-members-team {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.party-member-team {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.party-member-team.team-A { border-left: 2px solid #4f9dde; }
+.party-member-team.team-B { border-left: 2px solid #e07b56; }
+.party-team-switch { margin-left: auto; display: inline-flex; gap: 4px; }
+.party-team-mini {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d6d2cb;
+  font-size: 11px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.party-team-mini:hover { background: rgba(129, 182, 76, 0.16); color: #f5f2ec; }
+
+/* Scoreboard during match — team blocks group rows under a sum
+   header so the spectator / players immediately see which team
+   is ahead without having to add scores in their head. */
+.party-team-block {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+.party-team-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.party-team-block-A .party-team-block-head { box-shadow: inset 3px 0 0 #4f9dde; }
+.party-team-block-B .party-team-block-head { box-shadow: inset 3px 0 0 #e07b56; }
+.party-team-block-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.battle-row.team-row-A { box-shadow: inset 2px 0 0 #4f9dde; }
+.battle-row.team-row-B { box-shadow: inset 2px 0 0 #e07b56; }
+
+/* Post-match team winner banner — pinned above the per-player
+   results table when the match was Party-kind. */
+.party-results-team-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(129, 182, 76, 0.08);
+  border: 1px solid rgba(129, 182, 76, 0.30);
+  margin-bottom: 14px;
+}
+.party-results-team-headline {
+  font-size: 17px;
+  font-weight: 800;
+  color: #f5f2ec;
+}
+.party-results-team-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.party-results-team-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.party-results-team-card.team-A { border-left: 3px solid #4f9dde; }
+.party-results-team-card.team-B { border-left: 3px solid #e07b56; }
+.party-results-team-card.is-winner {
+  background: rgba(129, 182, 76, 0.14);
+  border-color: #81b64c;
+}
+.party-results-team-card > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
+.party-team-total-big {
+  font-size: 22px;
+  font-weight: 800;
+  color: #f5f2ec;
+  font-variant-numeric: tabular-nums;
+}
+.party-team-trophy { margin-left: auto; font-size: 20px; }
+
+/* ========================================================================
+   Invite-via-link UI (Battle Puzzle lobby + 1v1 lobby)
+   ------------------------------------------------------------------------
+   Two flavours share the same visual language: a chunky "copy link"
+   button, a small hint that displays the freshly-generated URL after
+   click, and a result line that auto-hides after a few seconds. The
+   parent containers (.party-header, .onevsone-invite-card) set the
+   colour palette; the button itself uses .puzzle-ghost / .primary so
+   it inherits the existing focus / hover styles for free.
+   ======================================================================== */
+.party-invite-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.party-invite-link-btn {
+  font-size: 13px;
+  padding: 6px 12px;
+}
+.party-invite-link-hint {
+  font-size: 12px;
+  word-break: break-all;
+  background: rgba(110, 167, 255, 0.07);
+  border: 1px solid #2c3950;
+  padding: 5px 8px;
+  border-radius: 6px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.onevsone-invite-link { margin-bottom: 12px; }
+.onevsone-invite-card {
+  background: linear-gradient(180deg, #1a2538, #15202f);
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.onevsone-invite-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: #ffd75e;
+}
+.onevsone-invite-hint {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.onevsone-invite-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.onevsone-invite-actions .onevsone-invite-make {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.onevsone-invite-result {
+  font-size: 12px;
+  word-break: break-all;
+  background: rgba(110, 167, 255, 0.07);
+  border: 1px solid #2c3950;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.onevsone-challenge-form .ov-link {
+  background: #2a3140;
+  border: 1px solid #3a4258;
+  color: #e7eef9;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.onevsone-challenge-form .ov-link:hover { background: #354158; }
+.onevsone-challenge-form .ov-link-hint {
+  font-size: 12px;
+  word-break: break-all;
+  margin-top: 4px;
+}
+
+/* ========================================================================
+   Responsive polish — phones (≤ 540px)
+   ------------------------------------------------------------------------
+   Targets that need extra love on the narrowest portraits: the new
+   invite-link UI, the 1v1 challenge form, the eval bar, and any flex
+   row that previously left controls hanging off the side of the
+   viewport. The existing @media (max-width: 768px) block handles the
+   broad reflow; this is a finishing pass for the smallest screens.
+   ======================================================================== */
+@media (max-width: 540px) {
+  .party-header h2 { font-size: 16px; }
+  .party-invite-link-row {
+    gap: 6px;
+  }
+  .party-invite-link-btn { width: 100%; }
+  .party-invite-link-hint { font-size: 11px; flex: 1 1 100%; }
+
+  .onevsone-invite-card { padding: 10px; }
+  .onevsone-invite-card .ov-times,
+  .onevsone-invite-card .ov-colors {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .onevsone-invite-card .ov-times button,
+  .onevsone-invite-card .ov-colors button {
+    flex: 1 1 calc(33.333% - 4px);
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+  .onevsone-invite-actions .onevsone-invite-make { width: 100%; }
+
+  .onevsone-challenge-form .ov-actions {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .onevsone-challenge-form .ov-actions button { flex: 1 1 calc(50% - 2px); }
+  .onevsone-challenge-form .ov-actions .primary { flex: 1 1 100%; }
+
+  /* Eval bar — keep it visible but narrower so the board next to it
+     gets more real estate on tiny phones. */
+  .eval-bar { width: 14px; }
+  .eval-bar-label { font-size: 9px; padding: 1px 3px; }
+
+  /* Topbar: stack mode tabs onto their own row + drop the brand glyph
+     so the burger / sound / settings icons get room to breathe. */
+  .topbar { padding: 6px 8px; }
+  .topbar-actions { width: 100%; justify-content: space-between; }
+  .view-tabs {
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .view-tabs::-webkit-scrollbar { display: none; }
+  .view-tab { flex: 0 0 auto; }
+  .view-tab span { display: none; }
+  .view-tab-svg { width: 24px; height: 24px; }
+
+  /* 1 vs 1 online list — pack rows tighter so 3-4 fit above the fold. */
+  .onevsone-online-list { gap: 4px; }
+  .onevsone-online-row { padding: 6px 8px; }
+  .ov-nick-line { font-size: 13px; }
+  .ov-meta { font-size: 11px; }
+
+  /* Battle scoreboard — sit it under the board, not next to it. */
+  .party-side-panel {
+    position: static;
+    width: 100%;
+    max-height: none;
+    margin-top: 12px;
+  }
+}
+
+/* Improve tap-target hit-area on touch devices without bloating the
+   buttons on desktop. Anything inside an interactive control gets
+   manipulation hint so the browser drops the 300ms click delay. */
+@media (hover: none) and (pointer: coarse) {
+  button, .puzzle-primary, .puzzle-ghost, .view-tab, .mode-btn,
+  .onevsone-online-row, .party-member,
+  .onevsone-invite-make, .party-invite-link-btn {
+    touch-action: manipulation;
+  }
 }

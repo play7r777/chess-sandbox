@@ -49,8 +49,43 @@ fi
 export CHESS_HOST=0.0.0.0
 export CHESS_PORT="$PORT"
 
+# Auto-generate CHESS_AUTH_TOKEN unless the user already exported one
+# or explicitly opted into the insecure path. The backend now refuses
+# to bind to a non-loopback host without a token because anyone with
+# the public URL could otherwise forge client_id and clobber another
+# player's profile.
+if [[ "${CHESS_ALLOW_INSECURE_PUBLIC:-0}" != "1" && -z "${CHESS_AUTH_TOKEN:-}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        CHESS_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+    else
+        CHESS_AUTH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    export CHESS_AUTH_TOKEN
+    echo "→ Сгенерирован CHESS_AUTH_TOKEN=$CHESS_AUTH_TOKEN"
+fi
+
+# Auto-generate CHESS_HOST_TOKEN. Only the operator's URL gets this
+# baked in (printed below as the "host URL"); the URL shared with
+# friends keeps CHESS_AUTH_TOKEN only, so they can play but can't
+# touch the shared Stockfish settings.
+if [[ -z "${CHESS_HOST_TOKEN:-}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        CHESS_HOST_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+    else
+        CHESS_HOST_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    export CHESS_HOST_TOKEN
+    echo "→ Сгенерирован CHESS_HOST_TOKEN=$CHESS_HOST_TOKEN (только для тебя)"
+fi
+
 echo "→ Старт сервера на 0.0.0.0:$PORT ..."
-"$PY" -m uvicorn backend.main:app --host 0.0.0.0 --port "$PORT" &
+# Tighter WebSocket ping window so a phone that silently dropped the
+# connection (NAT timeout / backgrounded tab) is detected within ~15
+# seconds instead of the default ~40s + OS TCP keepalive. Battle
+# Puzzle / 1v1 clients reconnect automatically once the close lands.
+"$PY" -m uvicorn backend.main:app \
+    --host 0.0.0.0 --port "$PORT" \
+    --ws-ping-interval 15 --ws-ping-timeout 15 &
 SERVER_PID=$!
 
 cleanup() {
@@ -83,7 +118,18 @@ case "$TUNNEL" in
         if [[ -n "$URL" ]]; then
             echo
             echo "✓ Публичный URL: $URL"
-            echo "  Скинь кентам — они открывают в браузере и играют."
+            if [[ -n "${CHESS_AUTH_TOKEN:-}" ]]; then
+                echo "  Скинь кентам: $URL/?token=$CHESS_AUTH_TOKEN"
+            else
+                echo "  Скинь кентам — они открывают в браузере и играют."
+            fi
+            if [[ -n "${CHESS_HOST_TOKEN:-}" ]]; then
+                if [[ -n "${CHESS_AUTH_TOKEN:-}" ]]; then
+                    echo "  Твой host URL: $URL/?token=$CHESS_AUTH_TOKEN&host_token=$CHESS_HOST_TOKEN"
+                else
+                    echo "  Твой host URL: $URL/?host_token=$CHESS_HOST_TOKEN"
+                fi
+            fi
             echo
         else
             echo "Не смог достучаться до ngrok API (http://127.0.0.1:4040)."

@@ -28,6 +28,13 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA query_only=ON")
+    # 64 MiB page cache + 1 GiB mmap window so warm queries hit RAM
+    # instead of disk. The puzzle bank is read-only at runtime, so a
+    # large cache is purely a win — first cold lookup populates it,
+    # everything after is a memcpy-speed seek.
+    conn.execute("PRAGMA cache_size = -65536")
+    conn.execute("PRAGMA mmap_size = 1073741824")
+    conn.execute("PRAGMA temp_store = MEMORY")
     return conn
 
 
@@ -164,8 +171,85 @@ def get_by_id(puzzle_id: str) -> dict[str, Any] | None:
 
 def sample_puzzles(n: int) -> list[dict[str, Any]]:
     """Return *n* random puzzles — used by party rooms to build a queue."""
-    rows = _conn().execute("SELECT * FROM puzzles ORDER BY RANDOM() LIMIT ?", (n,)).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    if n <= 0:
+        return []
+    return sample_in_range(min_rating=None, max_rating=None, n=n)
+
+
+def sample_in_range(
+    *,
+    min_rating: int | None,
+    max_rating: int | None,
+    n: int,
+    exclude_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return up to ``n`` random puzzles inside ``[min_rating, max_rating]``.
+
+    Uses rowid rejection sampling (one B-tree seek per probe), so it
+    runs in roughly O(n) regardless of how wide the rating window is —
+    the previous ``filter_puzzles`` path materialised every matching
+    row (often tens of thousands) before slicing, which was the main
+    reason Puzzle Rush "lost" 1.5 minutes of its 3-minute timer
+    waiting for the queue to build.
+    """
+    if n <= 0:
+        return []
+    conn = _conn()
+    lo, hi = _rowid_bounds()
+    if hi < lo or hi <= 0:
+        return []
+    rating_clauses: list[str] = []
+    rating_params: list[Any] = []
+    if min_rating is not None:
+        rating_clauses.append("rating >= ?")
+        rating_params.append(int(min_rating))
+    if max_rating is not None:
+        rating_clauses.append("rating <= ?")
+        rating_params.append(int(max_rating))
+    extra_where = (" AND " + " AND ".join(rating_clauses)) if rating_clauses else ""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set(exclude_ids or [])
+    # Probe in batches of ~max(n*3, 64); typically 1–2 batches fill the
+    # quota even when the rating window only matches ~10 % of the bank.
+    batch = max(n * 3, 64)
+    for _ in range(8):
+        if len(out) >= n:
+            break
+        rowids = [random.randint(lo, hi) for _ in range(batch)]
+        placeholders = ",".join("?" for _ in rowids)
+        sql = (
+            f"SELECT * FROM puzzles WHERE rowid IN ({placeholders})"
+            + extra_where
+        )
+        rows = conn.execute(sql, rowids + rating_params).fetchall()
+        for r in rows:
+            pid = str(r["id"])
+            if pid in seen:
+                continue
+            seen.add(pid)
+            out.append(_row_to_dict(r))
+            if len(out) >= n:
+                break
+    # Final fallback: if rejection sampling kept missing (very narrow
+    # band on a dense bank), fall back to one bounded ORDER BY RANDOM
+    # query that the rating index can still use.
+    if len(out) < n and rating_clauses:
+        deficit = n - len(out)
+        seen_placeholders = ",".join("?" for _ in seen) if seen else ""
+        not_in_clause = (
+            f" AND id NOT IN ({seen_placeholders})" if seen_placeholders else ""
+        )
+        sql = (
+            "SELECT * FROM puzzles WHERE "
+            + " AND ".join(rating_clauses)
+            + not_in_clause
+            + " ORDER BY RANDOM() LIMIT ?"
+        )
+        params = rating_params + sorted(seen) + [deficit]
+        rows = conn.execute(sql, params).fetchall()
+        for r in rows:
+            out.append(_row_to_dict(r))
+    return out[:n]
 
 
 def filter_puzzles(

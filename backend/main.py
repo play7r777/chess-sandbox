@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import time
@@ -11,11 +12,22 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import chess
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import (
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from . import _paths
 from . import daily_puzzle as daily_puzzle_pack
 from . import notifications as notifications_db
 from . import onevsone as onevsone_room
@@ -156,11 +168,31 @@ class OneVsOneChallengeRequest(BaseModel):
     target_id: str = Field(..., min_length=4, max_length=64)
     time_seconds: int = Field(..., ge=10, le=60 * 60)
     increment_seconds: int = Field(default=0, ge=0, le=60)
+    challenger_color: str = Field(default="random", pattern="^(w|b|random)$")
 
 
 class OneVsOneActionRequest(BaseModel):
     """Body for accept/decline/cancel/resign endpoints."""
     client_id: str = Field(..., min_length=4, max_length=64)
+
+
+class OneVsOneOpenChallengeRequest(BaseModel):
+    """Body for ``POST /api/onevsone/open`` — link-shareable challenge
+    with no specific target. The challenger only picks time + side; the
+    response carries the challenge id used to build the invite URL.
+    """
+    client_id: str = Field(..., min_length=4, max_length=64)
+    time_seconds: int = Field(..., ge=10, le=60 * 60)
+    increment_seconds: int = Field(default=0, ge=0, le=60)
+    challenger_color: str = Field(default="random", pattern="^(w|b|random)$")
+
+
+class OneVsOneOpenAcceptRequest(BaseModel):
+    """Body for ``POST /api/onevsone/open/{id}/accept`` — first visitor
+    with the link becomes the opponent and the match starts."""
+    client_id: str = Field(..., min_length=4, max_length=64)
+    nickname: str = Field(default="Гость", max_length=32)
+    avatar: str = Field(default="♟", max_length=256)
 
 
 def _print_puzzle_banner() -> None:
@@ -184,11 +216,74 @@ def _print_puzzle_banner() -> None:
             f"[chess-sandbox] Пазлы: {count:,} (источник: {source} — встроенный набор). "
             f"Запусти `python -m backend.import_puzzles --all` для полной базы Lichess."
         )
+        # Flag the most common cause of "I imported the puzzles but the
+        # server still says 90": a stale ``pip install -e`` from a
+        # sibling checkout makes the importer and the server resolve
+        # ``backend/data/`` to different folders.
+        warning = _paths.stale_install_warning()
+        if warning:
+            print(f"[chess-sandbox] ⚠  {warning}")
+
+
+def _print_bind_banner() -> None:
+    """Warn loudly when the server is exposed publicly without an auth token.
+
+    When ``CHESS_HOST`` resolves to a non-loopback IP (e.g. ``0.0.0.0`` for
+    ngrok/playit tunnels), every API endpoint that takes a ``client_id``
+    from the body — profile upsert, party/1v1 challenge, WS attach — is
+    trustingly assigning that id to the caller. Without
+    ``CHESS_AUTH_TOKEN`` set, anyone with the tunnel URL can spoof another
+    player's id and overwrite their profile / hijack their match. We
+    refuse to silently keep going in that mode; the operator must either
+    set ``CHESS_AUTH_TOKEN=<some-shared-secret>`` or accept the risk by
+    setting ``CHESS_ALLOW_INSECURE_PUBLIC=1``.
+    """
+    if settings.host_is_loopback():
+        if settings.host_token:
+            base = f"http://{settings.host}:{settings.port}"
+            qs = f"host_token={settings.host_token}"
+            if settings.auth_token:
+                qs = f"token={settings.auth_token}&{qs}"
+            print(
+                "[chess-sandbox] CHESS_HOST_TOKEN включён — настройки "
+                "Stockfish (Threads / Hash / Skill) доступны только тебе."
+            )
+            print(f"[chess-sandbox] Host URL: {base}/?{qs}")
+        return
+    if settings.auth_token:
+        print(
+            f"[chess-sandbox] Сервер слушает {settings.host}:{settings.port}. "
+            f"CHESS_AUTH_TOKEN включён — клиенты должны открывать URL с "
+            f"?token=<секрет>."
+        )
+        if settings.host_token:
+            print(
+                "[chess-sandbox] CHESS_HOST_TOKEN включён — параметры "
+                "движка может менять только владелец сервера, "
+                "открывший URL с ?host_token=<секрет>."
+            )
+        return
+    import os
+    if os.environ.get("CHESS_ALLOW_INSECURE_PUBLIC") == "1":
+        print(
+            f"[chess-sandbox] ВНИМАНИЕ: сервер слушает {settings.host}:{settings.port} "
+            f"без CHESS_AUTH_TOKEN. Любой с URL может подменить чужой "
+            f"client_id. CHESS_ALLOW_INSECURE_PUBLIC=1 — запускаемся."
+        )
+        return
+    print(
+        f"[chess-sandbox] ОШИБКА: CHESS_HOST={settings.host} не loopback, "
+        f"но CHESS_AUTH_TOKEN пуст. Любой с URL подменит client_id и "
+        f"перепишет чужой профиль. Установи CHESS_AUTH_TOKEN или явно "
+        f"CHESS_ALLOW_INSECURE_PUBLIC=1, либо верни CHESS_HOST=127.0.0.1."
+    )
+    raise SystemExit(2)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _print_puzzle_banner()
+    _print_bind_banner()
     # Try to auto-start the engine if a binary is configured / discoverable.
     path = settings.resolve_stockfish_path()
     if path:
@@ -206,6 +301,13 @@ async def lifespan(app: FastAPI):
             logger.warning("Failed to auto-start Stockfish at %s: %s", path, exc)
     else:
         logger.info("No Stockfish binary configured; configure via /api/engine/configure.")
+    # Rehydrate persisted 1v1 matches so a backend restart doesn't lose
+    # in-flight games. Players still need to refresh + reattach the WS,
+    # which the SSE re-emit on `onevsone.persist_load` handles.
+    try:
+        await onevsone_room.load_persisted()
+    except Exception as exc:
+        logger.warning("onevsone.load_persisted failed: %s", exc)
     try:
         yield
     finally:
@@ -218,6 +320,220 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+# ---- Auth gate (optional shared token for non-loopback deployments) ----
+#
+# When ``CHESS_AUTH_TOKEN`` is set, every HTTP request and WebSocket
+# handshake must include it. The token can travel three ways:
+#
+#   1. ``?token=<secret>`` query parameter — used for the first hit so
+#      the operator only has to share a single URL with friends.
+#   2. ``X-Chess-Token`` header — used by AJAX after the cookie is set.
+#   3. ``chess_auth`` cookie — auto-issued the moment a request with a
+#      valid query token (or header) arrives, so subsequent navigations
+#      / WS opens work without the URL parameter.
+#
+# Endpoints that must run anonymously (so the entry page itself can
+# load before the cookie is set) are listed in ``_AUTH_EXEMPT_PATHS``.
+
+# Public paths that bypass the token check. Everything else (including
+# ``/`` and WS) demands a valid token when one is configured.
+_AUTH_EXEMPT_PATHS: frozenset[str] = frozenset({
+    "/api/health",
+    "/api/auth/check",
+})
+
+_AUTH_COOKIE_NAME = "chess_auth"
+_HOST_COOKIE_NAME = "chess_host"
+
+
+def _auth_token_from_request(request: Request) -> str | None:
+    """Pull the bearer token from header / query / cookie, in priority order."""
+    header = request.headers.get("x-chess-token")
+    if header:
+        return header
+    qs = request.query_params.get("token")
+    if qs:
+        return qs
+    cookie = request.cookies.get(_AUTH_COOKIE_NAME)
+    if cookie:
+        return cookie
+    return None
+
+
+def _host_token_from_request(request: Request) -> str | None:
+    """Pull the host bearer token from header / query / cookie."""
+    header = request.headers.get("x-chess-host-token")
+    if header:
+        return header
+    qs = request.query_params.get("host_token")
+    if qs:
+        return qs
+    cookie = request.cookies.get(_HOST_COOKIE_NAME)
+    if cookie:
+        return cookie
+    return None
+
+
+def _is_host_request(request: Request) -> bool:
+    """Decide whether the caller is the operator who launched the server.
+
+    Host privileges require ``settings.host_token`` and the request
+    presenting that same value via header / query / cookie. The
+    backend auto-generates a token at startup if none was provided
+    (see ``Settings.__init__``) and the launcher scripts print a
+    "host URL" with ``?host_token=...`` baked in. Loopback no longer
+    grants host privileges by itself — the previous "anyone on
+    127.0.0.1 owns the box" fallback let any tab on the same machine
+    reconfigure the shared Stockfish pool, which is the exact issue
+    the host-token gate is meant to prevent.
+    """
+    expected = settings.host_token
+    if not expected:
+        return False
+    token = _host_token_from_request(request)
+    return token is not None and hmac.compare_digest(token, expected)
+
+
+def ipaddress_is_loopback(host: str) -> bool:
+    import ipaddress
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.strip().lower() in {"localhost", "ip6-localhost"}
+
+
+def _is_static_asset_path(path: str) -> bool:
+    """The SPA shell + static files must load anonymously so that the
+    auth-required HTML page can render and POST to ``/api/auth/check``."""
+    if path == "/" or path == "":
+        return True
+    if path.startswith("/static/"):
+        return True
+    if path.startswith("/api/avatars/"):
+        return False  # protected — avatars expose client_ids
+    if path in ("/favicon.ico", "/robots.txt"):
+        return True
+    return False
+
+
+class AuthTokenMiddleware(BaseHTTPMiddleware):
+    """Reject requests that don't carry a valid ``CHESS_AUTH_TOKEN``.
+
+    The check is a constant-time string compare to dodge timing-based
+    leaks of the configured token. A successful query/header token also
+    sets an HttpOnly ``chess_auth`` cookie so the browser remembers it
+    without ever exposing the value to JS (and ``location.href`` doesn't
+    keep the secret in URL bar history).
+    """
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        # Host-token cookie pinning runs regardless of whether the
+        # auth-token gate is active: a tunnel launcher can bake a
+        # ``?host_token=...`` into its own copy of the URL while still
+        # leaving CHESS_AUTH_TOKEN empty (or set to a separate value
+        # shared with friends). Picking the cookie up here means the
+        # host's first visit upgrades them in one round-trip and every
+        # subsequent request, including WebSocket handshakes, carries
+        # the cookie without keeping the secret in the URL bar.
+        host_expected = settings.host_token
+        host_token = _host_token_from_request(request) if host_expected else None
+        host_token_valid = (
+            host_token is not None
+            and host_expected != ""
+            and hmac.compare_digest(host_token, host_expected)
+        )
+
+        def _stamp_host_cookie(resp):
+            if host_token_valid and request.cookies.get(_HOST_COOKIE_NAME) != host_expected:
+                resp.set_cookie(
+                    _HOST_COOKIE_NAME,
+                    host_expected,
+                    max_age=60 * 60 * 24 * 30,  # 30 days — host rarely rotates
+                    httponly=True,
+                    samesite="lax",
+                )
+            return resp
+
+        expected = settings.auth_token
+        if not expected:
+            return _stamp_host_cookie(await call_next(request))
+        path = request.url.path
+        is_exempt = path in _AUTH_EXEMPT_PATHS or _is_static_asset_path(path)
+        token = _auth_token_from_request(request)
+        token_valid = (
+            token is not None and hmac.compare_digest(token, expected)
+        )
+        if is_exempt:
+            # Static-asset & SPA-shell paths bypass the gate so the
+            # auth-required HTML can render. We still want to harvest a
+            # valid ``?token=`` from the *first* hit on ``/`` (or any
+            # exempt URL) and bake it into the ``chess_auth`` cookie so
+            # subsequent same-origin requests (heartbeat, /api/users,
+            # /api/notifications/stream, …) are authed automatically.
+            # Without this the SPA reloads itself trying to chase an
+            # auth cookie that the middleware kept silently dropping
+            # whenever the user landed on the SPA shell first.
+            response = await call_next(request)
+            if token_valid and request.cookies.get(_AUTH_COOKIE_NAME) != expected:
+                response.set_cookie(
+                    _AUTH_COOKIE_NAME,
+                    expected,
+                    max_age=60 * 60 * 24,
+                    httponly=True,
+                    samesite="lax",
+                )
+            return _stamp_host_cookie(response)
+        if not token_valid:
+            # The SPA polls /api/auth/check to detect this state and
+            # show the "enter token" view, so we return JSON rather than
+            # a redirect.
+            return JSONResponse(
+                {"detail": "auth required", "code": "auth_required"},
+                status_code=401,
+            )
+        response = await call_next(request)
+        # Refresh the cookie on every successful authed request — same
+        # max-age each time so an idle tab stays authed for the cookie
+        # lifetime (24h) rather than the initial-token-issuance window.
+        if request.cookies.get(_AUTH_COOKIE_NAME) != expected:
+            response.set_cookie(
+                _AUTH_COOKIE_NAME,
+                expected,
+                max_age=60 * 60 * 24,
+                httponly=True,
+                samesite="lax",
+            )
+        return _stamp_host_cookie(response)
+
+
+app.add_middleware(AuthTokenMiddleware)
+
+
+@app.get("/api/auth/check")
+async def auth_check(request: Request) -> dict[str, Any]:
+    """Lightweight probe used by the frontend to know whether the
+    backend is in token mode and whether the current visitor already
+    holds a valid one. Always responds 200 — the body says whether
+    the SPA needs to prompt for a token."""
+    expected = settings.auth_token
+    is_host = _is_host_request(request)
+    if not expected:
+        return {
+            "auth_required": False,
+            "authenticated": True,
+            "is_host": is_host,
+            "host_token_required": bool(settings.host_token),
+        }
+    token = _auth_token_from_request(request)
+    ok = token is not None and hmac.compare_digest(token, expected)
+    return {
+        "auth_required": True,
+        "authenticated": ok,
+        "is_host": is_host,
+        "host_token_required": bool(settings.host_token),
+    }
 
 
 @app.get("/api/health")
@@ -234,8 +550,37 @@ async def health() -> dict[str, Any]:
     }
 
 
+def _broadcast_engine_state() -> asyncio.Task:
+    """Fire-and-forget SSE broadcast of the current engine state.
+
+    Returns the task so callers can await it explicitly when the test
+    suite needs determinism; production code drops the reference.
+    """
+    return asyncio.create_task(
+        notifications_db.broadcast(
+            {"type": "engine_state", "engine": engine.current_state()}
+        )
+    )
+
+
+@app.get("/api/engine/state")
+async def engine_state() -> dict[str, Any]:
+    """Current engine configuration. Readable by every authed client
+    so a non-host's UI can mirror the host's threads/hash/skill."""
+    return {"engine": engine.current_state()}
+
+
 @app.post("/api/engine/configure")
-async def engine_configure(req: EngineConfigRequest) -> dict[str, Any]:
+async def engine_configure(req: EngineConfigRequest, request: Request) -> dict[str, Any]:
+    if not _is_host_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only the server host can change Stockfish settings. "
+                "The host token is set by start-public.{sh,ps1} and "
+                "baked into the host's URL."
+            ),
+        )
     path = req.path or settings.resolve_stockfish_path()
     if not path:
         raise HTTPException(
@@ -256,6 +601,7 @@ async def engine_configure(req: EngineConfigRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Binary not found: {exc}") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Engine init failed: {exc}") from exc
+    _broadcast_engine_state()
     return {"ok": True, "engine": info}
 
 
@@ -307,8 +653,14 @@ async def engine_analyse(req: AnalyseRequest) -> dict[str, Any]:
 
 
 @app.post("/api/engine/stop")
-async def engine_stop() -> dict[str, Any]:
+async def engine_stop(request: Request) -> dict[str, Any]:
+    if not _is_host_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the server host can stop the shared Stockfish engine.",
+        )
     await engine.stop()
+    _broadcast_engine_state()
     return {"ok": True}
 
 
@@ -919,12 +1271,21 @@ class PartyCreateRequest(BaseModel):
     mode: str = Field(default="standard", max_length=16)
     rating_min: int = Field(default=0, ge=0, le=4000)
     rating_max: int = Field(default=0, ge=0, le=4000)
+    # Match kind picked by the host: "solo" (legacy free-for-all) or
+    # "party" (team A vs team B, score-sum). Defaults to "solo" so
+    # existing clients keep working without any payload changes.
+    kind: str = Field(default="solo", max_length=16)
 
 
 @app.post("/api/party/create")
 async def party_create(req: PartyCreateRequest) -> dict[str, Any]:
     party_room.reap_idle()
-    p = await party_room.create_party(req.client_id, req.nickname, req.avatar)
+    p = await party_room.create_party(
+        req.client_id,
+        req.nickname,
+        req.avatar,
+        kind=req.kind,
+    )
     # Persist the host-picked mode + rating window onto the freshly
     # created Party. We do it *outside* `create_party()` so the helper
     # signature stays generic for tests; the mode round-trips through
@@ -1034,6 +1395,7 @@ async def notifications_stream(
             hello = {
                 "type": "hello",
                 "invitations": notifications_db.pending_invitations_for(client_id),
+                "engine": engine.current_state(),
             }
             yield f"data: {json.dumps(hello)}\n\n"
             while True:
@@ -1144,12 +1506,22 @@ async def _party_ws_player(
             elif mtype == "position":
                 # Mid-puzzle FEN update for spectators. The player also
                 # forwards their current orientation + last applied move
-                # so watchers see the same board the player sees.
+                # so watchers see the same board the player sees. The
+                # review-badge fields mirror the ✓/✗ icon and from→to
+                # colour tint the solver paints locally — without these
+                # Battle spectators saw an FEN update with no badge or
+                # colour, so wrong moves looked the same as right ones.
                 await party.update_position(
                     client_id,
                     str(msg.get("fen") or ""),
                     flipped=bool(msg.get("flipped")) if "flipped" in msg else None,
                     last_move=str(msg.get("last_move") or "") if "last_move" in msg else None,
+                    review_badge_square=str(
+                        msg.get("review_badge_square") or "",
+                    ) if "review_badge_square" in msg else None,
+                    review_badge_kind=str(
+                        msg.get("review_badge_kind") or "",
+                    ) if "review_badge_kind" in msg else None,
                 )
             elif mtype == "cursor":
                 # Pointer / drag relay for spectators.
@@ -1175,6 +1547,55 @@ async def _party_ws_player(
                     legal_captures=msg.get("legal_captures"),
                     legal_color=msg.get("legal_color"),
                 )
+            elif mtype == "chat":
+                # Player-authored chat. ``party.chat`` rate-limits and
+                # sanitises; it returns ``None`` for rejected lines and
+                # we silently drop those (no error reply — a stuck UI
+                # button would otherwise see a feedback storm).
+                entry = await party.chat(client_id, str(msg.get("text") or ""))
+                if entry is not None:
+                    await party.broadcast(entry)
+            elif mtype == "reaction":
+                entry = await party.react(client_id, str(msg.get("code") or ""))
+                if entry is not None:
+                    await party.broadcast(entry)
+            elif mtype == "set_kind":
+                # Party Mode: host toggles between solo (free-for-all)
+                # and party (team A vs team B). The new kind is
+                # broadcast as a fresh ``lobby`` event so every
+                # connected client repaints the picker + team grid.
+                try:
+                    party.set_kind(client_id, str(msg.get("kind") or ""))
+                    await party.broadcast({"type": "lobby", **party.public_state()})
+                except party_room.PartyError as e:
+                    await ws.send_json({"type": "error", "code": e.code, "message": e.message})
+            elif mtype == "set_team":
+                # Party Mode: members move themselves to A/B/None; the
+                # host can move anybody. Side-effect: re-broadcast the
+                # full lobby state so the team-grid totals + the per-
+                # team capacity warnings stay in sync everywhere.
+                target = str(msg.get("client_id") or client_id)
+                team_raw = msg.get("team")
+                team_val: str | None
+                if team_raw is None or team_raw == "":
+                    team_val = None
+                else:
+                    team_val = str(team_raw)
+                try:
+                    party.set_team(client_id, target, team_val)
+                    await party.broadcast({"type": "lobby", **party.public_state()})
+                except party_room.PartyError as e:
+                    await ws.send_json({"type": "error", "code": e.code, "message": e.message})
+            elif mtype == "balance_teams":
+                # Host-only: re-shuffle members round-robin across A/B
+                # so a lobby that organically ended up 6-vs-2 becomes
+                # 4-vs-4 instantly. The host clicks "Auto-balance" and
+                # then everyone repaints from the broadcast.
+                try:
+                    party.balance_teams(client_id)
+                    await party.broadcast({"type": "lobby", **party.public_state()})
+                except party_room.PartyError as e:
+                    await ws.send_json({"type": "error", "code": e.code, "message": e.message})
             elif mtype == "ping":
                 await ws.send_json({"type": "pong"})
             elif mtype == "leave":
@@ -1425,6 +1846,7 @@ async def onevsone_challenge(payload: OneVsOneChallengeRequest) -> dict[str, Any
             target_nickname=str(target.get("nickname") or ""),
             time_seconds=payload.time_seconds,
             increment_seconds=payload.increment_seconds,
+            challenger_color=payload.challenger_color,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -1479,6 +1901,73 @@ async def onevsone_challenge_cancel(
     return {"challenge": ch.public()}
 
 
+@app.post("/api/onevsone/open")
+async def onevsone_open_challenge_create(
+    payload: OneVsOneOpenChallengeRequest,
+) -> dict[str, Any]:
+    """Create a link-shareable 1v1 challenge. The challenger picks time
+    and side; the response carries the challenge id used to build the
+    invite URL (e.g. ``<base>/?join_1v1=<id>``).
+    """
+    challenger = users_db.get_user(payload.client_id)
+    if challenger is None:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    try:
+        ch = await onevsone_room.create_open_challenge(
+            challenger_id=str(challenger.get("client_id") or payload.client_id),
+            challenger_nickname=str(challenger.get("nickname") or ""),
+            challenger_avatar=str(challenger.get("avatar") or ""),
+            time_seconds=payload.time_seconds,
+            increment_seconds=payload.increment_seconds,
+            challenger_color=payload.challenger_color,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"challenge": ch.public()}
+
+
+@app.get("/api/onevsone/open/{challenge_id}")
+async def onevsone_open_challenge_view(challenge_id: str) -> dict[str, Any]:
+    """Fetch metadata for a link-shareable challenge — used by the
+    recipient's frontend to show ``Sergey wants to play 5 min as White``
+    before they commit to accept.
+    """
+    ch = onevsone_room.get_challenge(challenge_id)
+    if ch is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found")
+    # Reject targeted challenges so the open-link UI never confuses
+    # them with a regular invite.
+    if ch.target_id != "":
+        raise HTTPException(status_code=404, detail="challenge_not_open")
+    return {"challenge": ch.public()}
+
+
+@app.post("/api/onevsone/open/{challenge_id}/accept")
+async def onevsone_open_challenge_accept(
+    challenge_id: str, payload: OneVsOneOpenAcceptRequest,
+) -> dict[str, Any]:
+    """Accept a link-shareable 1v1 challenge. The first visitor with the
+    link becomes the opponent — server-side pairing creates the Match
+    and fires ``onevsone_match`` to both peers via SSE.
+    """
+    user = users_db.get_user(payload.client_id)
+    nickname = payload.nickname
+    avatar = payload.avatar
+    if user is not None:
+        nickname = str(user.get("nickname") or nickname)
+        avatar = str(user.get("avatar") or avatar)
+    user_cid = str(
+        (user or {}).get("client_id") or payload.client_id,
+    )
+    result = await onevsone_room.accept_open_challenge(
+        challenge_id, user_cid, nickname, avatar,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
+    ch, match = result
+    return {"challenge": ch.public(), "match": match.public(user_cid)}
+
+
 @app.get("/api/onevsone/match/{match_id}")
 async def onevsone_match_state(
     match_id: str,
@@ -1490,6 +1979,71 @@ async def onevsone_match_state(
     if m.player_for(client_id) is None:
         raise HTTPException(status_code=403, detail="not_a_player")
     return {"match": m.public(client_id)}
+
+
+@app.get("/api/onevsone/active")
+async def onevsone_active_match(
+    client_id: str = Query(..., min_length=4, max_length=64),
+) -> dict[str, Any]:
+    """Return the caller's currently active match (if any) so a player
+    whose page reloaded mid-game — or who never received the
+    ``onevsone_match`` notification because their SSE stream hiccupped
+    — can re-enter their live match instead of being stuck in the
+    lobby."""
+    m = onevsone_room.find_active_match(client_id)
+    if m is None:
+        return {"match": None}
+    return {"match": m.public(client_id)}
+
+
+@app.post("/api/onevsone/match/{match_id}/draw_offer")
+async def onevsone_match_draw_offer(
+    match_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    result = await onevsone_room.offer_draw(match_id, payload.client_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="match_not_found_or_finished")
+    m = onevsone_room.get_match(match_id)
+    if m is not None and not result.get("already"):
+        await _onevsone_broadcast(m, {
+            "type": "draw_offer",
+            "by": payload.client_id,
+        })
+    return result
+
+
+@app.post("/api/onevsone/match/{match_id}/draw_accept")
+async def onevsone_match_draw_accept(
+    match_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    result = await onevsone_room.accept_draw(match_id, payload.client_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="no_pending_draw_offer")
+    m = onevsone_room.get_match(match_id)
+    if m is not None:
+        await _onevsone_broadcast(m, {
+            "type": "draw_accepted",
+            "by": payload.client_id,
+            "winner": "draw",
+            "finish_reason": "agreed_draw",
+        })
+    return result
+
+
+@app.post("/api/onevsone/match/{match_id}/draw_decline")
+async def onevsone_match_draw_decline(
+    match_id: str, payload: OneVsOneActionRequest,
+) -> dict[str, Any]:
+    result = await onevsone_room.decline_draw(match_id, payload.client_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="no_pending_draw_offer")
+    m = onevsone_room.get_match(match_id)
+    if m is not None:
+        await _onevsone_broadcast(m, {
+            "type": "draw_declined",
+            "by": payload.client_id,
+        })
+    return result
 
 
 @app.post("/api/onevsone/match/{match_id}/resign")
@@ -1511,6 +2065,125 @@ async def onevsone_match_resign(
     return result
 
 
+def _onevsone_build_pgn(m: onevsone_room.Match) -> str:
+    """Render the match as a standards-compliant PGN.
+
+    Uses python-chess's PGN writer so SAN notation, result tags and
+    headers come out in the same shape chess.com / lichess produce —
+    important because the user may want to paste this into Analysis
+    view, or feed it into a third-party tool that imports PGN.
+    """
+    import chess.pgn  # local import: pgn module is rarely used and ~200KB
+
+    pgn = chess.pgn.Game()
+    pgn.headers["Event"] = "Chess Sandbox 1v1"
+    pgn.headers["Site"] = "chess-sandbox"
+    pgn.headers["Date"] = time.strftime("%Y.%m.%d", time.gmtime(m.created_at))
+    pgn.headers["Round"] = "-"
+    pgn.headers["White"] = m.white.nickname or "White"
+    pgn.headers["Black"] = m.black.nickname or "Black"
+    tc = f"{m.time_seconds}"
+    if m.increment_seconds:
+        tc += f"+{m.increment_seconds}"
+    pgn.headers["TimeControl"] = tc
+    if m.finished:
+        if m.winner == "w":
+            pgn.headers["Result"] = "1-0"
+        elif m.winner == "b":
+            pgn.headers["Result"] = "0-1"
+        elif m.winner == "draw":
+            pgn.headers["Result"] = "1/2-1/2"
+        else:
+            pgn.headers["Result"] = "*"
+        if m.finish_reason:
+            pgn.headers["Termination"] = m.finish_reason
+    else:
+        pgn.headers["Result"] = "*"
+    # Reconstruct the game from the move list (FEN-after-each-move isn't
+    # enough for python-chess; it wants Moves on a Board so it can emit
+    # SAN with full check / mate annotations).
+    board = chess.Board()
+    node: chess.pgn.GameNode = pgn
+    for entry in m.move_history:
+        uci = str(entry.get("uci") or "")
+        if not uci:
+            continue
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError:
+            continue
+        if move not in board.legal_moves:
+            # Defensive — if the persisted history is somehow out of
+            # sync with the board state, stop rather than emit garbage.
+            break
+        node = node.add_variation(move)
+        board.push(move)
+    return str(pgn)
+
+
+@app.get("/api/onevsone/match/{match_id}/pgn")
+async def onevsone_match_pgn(
+    match_id: str,
+    client_id: str = Query(..., min_length=4, max_length=64),
+    download: int = Query(default=1, ge=0, le=1),
+) -> Response:
+    """Return the match transcript as PGN.
+
+    Only the two players can pull this — match IDs are unguessable but
+    a player nickname could leak via a careless URL share, so we still
+    require the caller's ``client_id`` to be one of the seats.
+    ``?download=1`` (default) sets a Content-Disposition so the browser
+    saves the file; ``?download=0`` returns it inline so the Analysis
+    view can fetch it for the engine review pipeline."""
+    m = onevsone_room.get_match(match_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="match_not_found")
+    if m.player_for(client_id) is None:
+        raise HTTPException(status_code=403, detail="not_a_player")
+    try:
+        pgn_text = _onevsone_build_pgn(m)
+    except Exception:
+        logger.exception("onevsone: PGN build failed for match %s", match_id)
+        raise HTTPException(status_code=500, detail="pgn_build_failed") from None
+    headers: dict[str, str] = {}
+    if download:
+        # Build the filename in two layers so Cyrillic / emoji nicknames
+        # don't blow up Starlette's latin-1 header encoder (the previous
+        # version raised UnicodeEncodeError → 500 the moment somebody
+        # with a non-ASCII nick clicked "Скачать PGN").
+        #
+        # - ``filename=`` is the legacy fallback. It MUST be latin-1
+        #   safe, so we keep ASCII letters/digits/-/_ only and replace
+        #   everything else with a placeholder.
+        # - ``filename*=UTF-8''…`` is the RFC 5987 form. Browsers
+        #   that understand it (every modern one) show the original
+        #   Cyrillic name; older clients fall back to the ASCII one.
+        from urllib.parse import quote
+        def _ascii_slug(s: str) -> str:
+            keep = [c for c in s if c.isascii() and (c.isalnum() or c in ("-", "_"))]
+            return ("".join(keep) or "anon")[:24]
+        def _unicode_slug(s: str) -> str:
+            keep = [c for c in s if c.isalnum() or c in ("-", "_")]
+            return ("".join(keep) or "anon")[:24]
+        ascii_name = (
+            f"sandbox_{_ascii_slug(m.white.nickname)}"
+            f"_vs_{_ascii_slug(m.black.nickname)}_{match_id}.pgn"
+        )
+        utf8_name = (
+            f"sandbox_{_unicode_slug(m.white.nickname)}"
+            f"_vs_{_unicode_slug(m.black.nickname)}_{match_id}.pgn"
+        )
+        headers["Content-Disposition"] = (
+            f'attachment; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{quote(utf8_name)}"
+        )
+    return Response(
+        content=pgn_text,
+        media_type="application/x-chess-pgn; charset=utf-8",
+        headers=headers,
+    )
+
+
 @app.get("/api/onevsone/online")
 async def onevsone_online_users(
     client_id: str = Query(..., min_length=4, max_length=64),
@@ -1523,14 +2196,31 @@ async def onevsone_online_users(
 
 
 async def _onevsone_broadcast(match: onevsone_room.Match, payload: dict[str, Any]) -> None:
-    """Fan-out a payload to both peers' live WebSockets, ignoring closed sockets."""
-    for cid, sock in list(match.sockets.items()):
-        if sock is None:
-            continue
+    """Fan-out a payload to both peers' live WebSockets, ignoring closed sockets.
+
+    Each ``send_json`` runs concurrently with a 5-second hard timeout so a
+    hung mobile peer (NAT drop / backgrounded tab) can't block the move
+    relay for the other side. Sockets that timeout or error are dropped
+    from the match registration; the client will reconnect via the WS
+    onclose handler.
+    """
+    targets = [(cid, sock) for cid, sock in list(match.sockets.items()) if sock is not None]
+    if not targets:
+        return
+
+    async def _send(sock: Any) -> bool:
         try:
-            await sock.send_json(payload)
+            await asyncio.wait_for(sock.send_json(payload), timeout=5.0)
+            return True
         except Exception:
-            # Socket likely closed mid-send; drop the registration.
+            return False
+
+    results = await asyncio.gather(
+        *(_send(sock) for _cid, sock in targets),
+        return_exceptions=True,
+    )
+    for (cid, _sock), ok in zip(targets, results, strict=False):
+        if not ok or isinstance(ok, Exception):
             match.sockets.pop(cid, None)
 
 
@@ -1584,6 +2274,35 @@ async def onevsone_ws(ws: WebSocket) -> None:
                             "winner": result.get("winner"),
                             "finish_reason": "resign",
                         })
+            elif mtype == "draw_offer":
+                result = await onevsone_room.offer_draw(match_id, client_id)
+                if result is not None and not result.get("already"):
+                    m_now = onevsone_room.get_match(match_id)
+                    if m_now is not None:
+                        await _onevsone_broadcast(m_now, {
+                            "type": "draw_offer",
+                            "by": client_id,
+                        })
+            elif mtype == "draw_accept":
+                result = await onevsone_room.accept_draw(match_id, client_id)
+                if result is not None:
+                    m_now = onevsone_room.get_match(match_id)
+                    if m_now is not None:
+                        await _onevsone_broadcast(m_now, {
+                            "type": "draw_accepted",
+                            "by": client_id,
+                            "winner": "draw",
+                            "finish_reason": "agreed_draw",
+                        })
+            elif mtype == "draw_decline":
+                result = await onevsone_room.decline_draw(match_id, client_id)
+                if result is not None:
+                    m_now = onevsone_room.get_match(match_id)
+                    if m_now is not None:
+                        await _onevsone_broadcast(m_now, {
+                            "type": "draw_declined",
+                            "by": client_id,
+                        })
             elif mtype == "ping":
                 await ws.send_json({"type": "pong"})
     except WebSocketDisconnect:
@@ -1608,23 +2327,44 @@ app.mount("/api/avatars", StaticFiles(directory=_AVATAR_DIR), name="avatars")
 
 frontend_dir = settings.frontend_dir
 
+
+def _index_html_with_cache_busters(frontend_root: Path) -> str:
+    """Return ``index.html`` with ``?v=<mtime>`` appended to ``app.js`` and
+    ``style.css`` references so that newly deployed JS/CSS isn't served from
+    the browser HTTP cache after a code update. Without this, users who
+    leave the tab open across deploys keep running the previous bundle and
+    miss bug fixes (e.g. the 1 vs 1 UCI suffix fix that resulted in
+    "piece teleports back" reports until the user did a hard reload)."""
+    html = (frontend_root / "index.html").read_text(encoding="utf-8")
+    for asset in ("app.js", "style.css"):
+        path = frontend_root / asset
+        if not path.exists():
+            continue
+        try:
+            version = str(int(path.stat().st_mtime))
+        except OSError:
+            continue
+        html = html.replace(f'/static/{asset}"', f'/static/{asset}?v={version}"')
+    return html
+
+
 if frontend_dir.exists():
     # Mount all static assets, but keep `/` returning index.html so navigation works.
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
     @app.get("/")
-    async def root() -> FileResponse:
-        return FileResponse(frontend_dir / "index.html")
+    async def root() -> HTMLResponse:
+        return HTMLResponse(_index_html_with_cache_busters(frontend_dir))
 
     _frontend_root = frontend_dir.resolve()
 
-    @app.get("/{path:path}")
-    async def serve_frontend(path: str) -> FileResponse:
+    @app.get("/{path:path}", response_model=None)
+    async def serve_frontend(path: str) -> FileResponse | HTMLResponse:
         candidate = (frontend_dir / path).resolve()
         if candidate.is_file() and candidate.is_relative_to(_frontend_root):
             return FileResponse(candidate)
         # SPA fallback: serve index.html for any non-asset path.
-        return FileResponse(frontend_dir / "index.html")
+        return HTMLResponse(_index_html_with_cache_busters(frontend_dir))
 
 else:
 

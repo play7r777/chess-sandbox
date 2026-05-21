@@ -193,6 +193,29 @@ def get_invitation(invite_id: str) -> Invitation | None:
     return _INVITES.get(invite_id)
 
 
+async def broadcast(payload: dict[str, Any]) -> None:
+    """Fan ``payload`` out to every active SSE subscriber, regardless
+    of client_id. Used for server-wide announcements such as engine
+    configuration changes pushed by the host.
+    """
+    async with _LOCK:
+        subs = [s for lst in _SUBSCRIBERS.values() for s in lst]
+    for sub in subs:
+        try:
+            sub.queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            try:
+                sub.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                sub.queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Best-effort — if the queue is still full after a
+                # forced flush, drop the message for this subscriber.
+                pass
+
+
 async def subscribe(client_id: str) -> _Subscriber:
     """Register a new SSE subscriber. Caller must call :func:`unsubscribe`."""
     sub = _Subscriber(client_id=client_id, queue=asyncio.Queue(maxsize=QUEUE_MAX))
