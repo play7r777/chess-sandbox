@@ -43,6 +43,15 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 chess-sandbox/0.1"
 )
 
+# Strict allow-lists for the two import providers. Using exact host
+# equality (after a single optional ``www.`` prefix) prevents the
+# ``str.endswith("lichess.org")`` bypass where an attacker-controlled
+# host like ``evillichess.org`` or ``attacker.com/lichess.org`` would
+# match. Any host outside the set is rejected before we issue an HTTP
+# request, so the backend can't be tricked into fetching arbitrary URLs.
+_ALLOWED_LICHESS_HOSTS = frozenset({"lichess.org", "www.lichess.org"})
+_ALLOWED_CHESSCOM_HOSTS = frozenset({"chess.com", "www.chess.com"})
+
 _AVATAR_CACHE: dict[str, str | None] = {}
 
 
@@ -206,9 +215,15 @@ def import_game(source: str) -> ImportedGame:
     if _looks_like_pgn(source):
         return _parse_pgn(source)
     url = urlparse(source)
-    if url.netloc.endswith("lichess.org"):
+    if url.scheme not in ("http", "https"):
+        raise ValueError(
+            "Only http/https URLs are supported — paste a PGN, or use a "
+            "chess.com / lichess.org game URL."
+        )
+    host = (url.hostname or "").lower()
+    if host in _ALLOWED_LICHESS_HOSTS:
         return _fetch_lichess(source)
-    if url.netloc.endswith("chess.com"):
+    if host in _ALLOWED_CHESSCOM_HOSTS:
         return _fetch_chesscom(source)
     raise ValueError(
         "Unknown source — paste a PGN, or use a chess.com / lichess.org game URL."
@@ -242,12 +257,25 @@ def _fetch_lichess(url: str) -> ImportedGame:
 
 
 def _fetch_chesscom(url: str) -> ImportedGame:
-    m = re.search(r"chess\.com/game/(live|daily)/(\d+)", url)
-    if not m:
-        raise ValueError(
-            "chess.com URL must look like https://www.chess.com/game/live/<id>"
-        )
-    kind, game_id = m.group(1), m.group(2)
+    # Accept both the canonical /game/<kind>/<id> form and the analysis-page
+    # variant (/analysis/game/<kind>/<id>...), with any ?username=…&move=…
+    # query suffix. The frontend also normalises before submit, this is the
+    # backend belt-and-braces.
+    m = re.search(r"chess\.com/(?:analysis/)?game/(live|daily)/(\d+)", url)
+    if m:
+        kind, game_id = m.group(1), m.group(2)
+    else:
+        # Bare /game/<id> form — auto-default to `live` (the share URL on
+        # chess.com is /game/live/<id>; users who copy the URL without
+        # `/live/` get the same thing). Frontend already normalises but
+        # we mirror it here so direct API callers and pasted bare URLs
+        # also work.
+        bare = re.search(r"chess\.com/(?:analysis/)?game/(\d+)", url)
+        if not bare:
+            raise ValueError(
+                "chess.com URL must look like https://www.chess.com/game/live/<id>"
+            )
+        kind, game_id = "live", bare.group(1)
     cb = requests.get(
         f"https://www.chess.com/callback/{kind}/game/{game_id}",
         headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
@@ -305,6 +333,44 @@ def _fetch_chesscom(url: str) -> ImportedGame:
     )
 
 
+def _normalise_pgn_text(pgn_text: str) -> str:
+    """Make a single-line PGN (or one with missing blank line between
+    headers and moves) parseable by python-chess.
+
+    PGN is whitespace-sensitive: each header must live on its own line
+    and there must be at least one blank line between the headers and
+    the first move number. ``<input type="text">`` strips newlines on
+    ``value =`` assignment, so when the 1v1 finish modal hands the
+    backend-built PGN to the Analysis view via the DOM round-trip the
+    request body that hits ``/api/game/import`` looks like
+    ``[Event "..."][Site "..."]...1. e4 e5 ...``. python-chess parses
+    that as an empty game (zero moves, all-default headers) and the
+    analyse endpoint then 422s on ``moves_uci``'s ``min_length=1``.
+
+    This shim inserts the missing newlines without altering the
+    content: every ``][`` between header tags becomes ``]\n[``, and
+    a blank line is inserted between the last header and the first
+    move token (or result token).
+    """
+    text = (pgn_text or "").strip()
+    if not text:
+        return text
+    # Re-flow header tags onto their own lines: ``][`` -> ``]\n[``.
+    rewritten = re.sub(r"\]\s*\[", "]\n[", text)
+    # If the headers section is followed directly by move text on the
+    # same line (``][White "..."]1. e4 ...``), insert a blank line
+    # between the closing bracket of the last tag and the first move
+    # number. The PGN move-section can also start with a result tag
+    # (``*``, ``1-0``, ``0-1``, ``1/2-1/2``); cover all four.
+    rewritten = re.sub(
+        r"\](\s*)(?=\d+\s*\.|\*|1-0|0-1|1/2-1/2)",
+        "]\n\n",
+        rewritten,
+        count=1,
+    )
+    return rewritten
+
+
 def _parse_pgn(pgn_text: str) -> ImportedGame:
     game = chess.pgn.read_game(io.StringIO(pgn_text))
     if game is None:
@@ -316,6 +382,31 @@ def _parse_pgn(pgn_text: str) -> ImportedGame:
     for move in game.mainline_moves():
         moves_uci.append(move.uci())
         board.push(move)
+    # Tolerate single-line / no-blank-line PGN payloads (see
+    # ``_normalise_pgn_text``). If parsing produced zero moves we
+    # re-flow the text on a best-effort basis and try once more
+    # before giving up. The previous guard only triggered when the
+    # text contained the literal substring ``"]["`` with no
+    # whitespace — but the 1v1 finish modal can hand us
+    # ``"] ["`` (space between tags) and the user can paste
+    # arbitrary single-line PGN where each tag is separated by a
+    # space. Detect any of those by re-running ``read_game`` on the
+    # normalised text whenever the first pass yielded zero moves.
+    if not moves_uci:
+        fixed = _normalise_pgn_text(pgn_text)
+        if fixed != pgn_text:
+            retry = chess.pgn.read_game(io.StringIO(fixed))
+            if retry is not None:
+                retry_moves: list[str] = []
+                retry_board = retry.board()
+                for move in retry.mainline_moves():
+                    retry_moves.append(move.uci())
+                    retry_board.push(move)
+                if retry_moves:
+                    headers = {k: v for k, v in retry.headers.items()}
+                    starting_fen = headers.get("FEN", chess.STARTING_FEN)
+                    moves_uci = retry_moves
+                    pgn_text = fixed
     return ImportedGame(
         pgn=pgn_text.strip(),
         headers=headers,
@@ -1091,13 +1182,14 @@ async def analyse_game(
         if best_move is not None:
             best_san = pre_board.san(best_move)
 
-        # Serialise the engine's top-1 PV (up to 5 plies) for the UI
-        # to draw arrows / show best-line continuation.
+        # Serialise the engine's top-1 PV (up to 24 plies) for the UI
+        # to draw arrows / show best-line continuation. The frontend caps
+        # how many arrows are actually drawn via the user's setting.
         best_pv_uci: list[str] = []
         best_pv_san: list[str] = []
         if best_pv:
             sim = pre_board.copy(stack=False)
-            for pv_move in best_pv[:10]:
+            for pv_move in best_pv[:24]:
                 if pv_move not in sim.legal_moves:
                     break
                 best_pv_uci.append(pv_move.uci())

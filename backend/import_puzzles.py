@@ -1,0 +1,355 @@
+"""Download and import the Lichess puzzle database into a local SQLite file.
+
+Usage::
+
+    python -m backend.import_puzzles              # default 500 000 puzzles
+    python -m backend.import_puzzles --target 100000
+    python -m backend.import_puzzles --all        # import every puzzle (~5.5M)
+
+The script streams ``lichess_db_puzzle.csv.zst`` from
+https://database.lichess.org, decompresses on-the-fly with *zstandard*,
+reservoir-samples the requested number of puzzles, then inserts them into
+``backend/data/puzzles.sqlite``.
+
+The download is cached: if the ``.csv.zst`` already exists in
+``backend/data/`` the local copy is reused (delete it to force a
+re-download).
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import io
+import random
+import sqlite3
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import requests  # type: ignore[import-untyped]
+import zstandard  # type: ignore[import-untyped]
+
+from . import _paths
+
+# ── Constants ───────────────────────────────────────────────────────
+DB_URL = "https://database.lichess.org/lichess_db_puzzle.csv.zst"
+# Resolved against the project root walked up from cwd (not __file__),
+# so the SQLite ends up where backend.main expects it even if the
+# ``backend`` package was ``pip install -e``'d from a stale sibling
+# checkout. See ``backend/_paths.py`` for the full rationale.
+DATA_DIR = _paths.resolve_data_dir()
+ZST_FILENAME = "lichess_db_puzzle.csv.zst"
+ZST_PATH = DATA_DIR / ZST_FILENAME
+DB_PATH = DATA_DIR / "puzzles.sqlite"
+
+# Where we additionally look for an already-downloaded CSV cache so
+# users don't re-pay the ~300 MB download just because the editable
+# install resolved to a different sibling folder last time.
+_FALLBACK_CACHE_DIRS: tuple[Path, ...] = (
+    _paths.module_dir() / "data",
+)
+
+CHUNK_SIZE = 1 << 20  # 1 MiB for download streaming
+
+
+# ── Difficulty band (must match puzzles.py / puzzle_db.py) ──────────
+def _difficulty(rating: int) -> str:
+    if rating < 1100:
+        return "easy"
+    if rating < 1700:
+        return "medium"
+    return "hard"
+
+
+# ── Download ────────────────────────────────────────────────────────
+def _download(url: str, dest: Path) -> None:
+    """Stream-download *url* into *dest* with a progress counter."""
+    print(f"Скачиваю {url} ...")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".zst.part")
+    r = requests.get(url, stream=True, timeout=60)
+    r.raise_for_status()
+    total = int(r.headers.get("content-length", 0))
+    done = 0
+    t0 = time.monotonic()
+    with tmp.open("wb") as f:
+        for chunk in r.iter_content(CHUNK_SIZE):
+            f.write(chunk)
+            done += len(chunk)
+            elapsed = time.monotonic() - t0
+            speed = done / elapsed / 1e6 if elapsed else 0
+            if total:
+                pct = done / total * 100
+                print(f"\r  {done / 1e6:.1f} / {total / 1e6:.1f} MB ({pct:.0f}%) – "
+                      f"{speed:.1f} MB/s", end="", flush=True)
+            else:
+                print(f"\r  {done / 1e6:.1f} MB – {speed:.1f} MB/s",
+                      end="", flush=True)
+    print()
+    tmp.rename(dest)
+    print(f"Сохранено: {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
+
+
+# ── Streaming CSV parse + reservoir sample ──────────────────────────
+def _stream_puzzles(
+    zst_path: Path,
+    target: int | None,
+) -> list[tuple[str, str, str, int, int, int, int, str, str, str]]:
+    """Return up to *target* puzzles (reservoir-sampled if target is set).
+
+    Each row is (id, fen, moves, rating, rating_dev, popularity, plays,
+    themes, url, opening_tags).
+    """
+    dctx = zstandard.ZstdDecompressor()
+    reservoir: list[tuple[str, str, str, int, int, int, int, str, str, str]] = []
+    n = 0
+    t0 = time.monotonic()
+
+    with zst_path.open("rb") as fh:
+        reader_stream = dctx.stream_reader(fh)
+        text_stream = io.TextIOWrapper(reader_stream, encoding="utf-8")
+        csv_reader = csv.reader(text_stream)
+        header = next(csv_reader, None)
+        if not header:
+            print("CSV пустой — прерываю.")
+            return []
+        # Expected columns:
+        # PuzzleId, FEN, Moves, Rating, RatingDeviation, Popularity,
+        # NbPlays, Themes, GameUrl, OpeningTags
+        for row in csv_reader:
+            if len(row) < 8:
+                continue
+            try:
+                rating = int(row[3])
+                rating_dev = int(row[4]) if len(row) > 4 and row[4] else 0
+                popularity = int(row[5]) if len(row) > 5 and row[5] else 0
+                plays = int(row[6]) if len(row) > 6 and row[6] else 0
+            except ValueError:
+                continue
+            entry = (
+                row[0],                          # id
+                row[1],                          # fen
+                row[2],                          # moves (space-separated)
+                rating,
+                rating_dev,
+                popularity,
+                plays,
+                row[7] if len(row) > 7 else "",  # themes
+                row[8] if len(row) > 8 else "",  # url
+                row[9] if len(row) > 9 else "",  # opening_tags
+            )
+
+            if target is None:
+                # Import all — just append.
+                reservoir.append(entry)
+            else:
+                # Reservoir sampling (Algorithm R).
+                if n < target:
+                    reservoir.append(entry)
+                else:
+                    j = random.randint(0, n)
+                    if j < target:
+                        reservoir[j] = entry
+            n += 1
+            if n % 200_000 == 0:
+                elapsed = time.monotonic() - t0
+                kept = len(reservoir)
+                print(f"\r  Прочитано {n:,} строк, выбрано {kept:,} — "
+                      f"{elapsed:.0f} с", end="", flush=True)
+
+    elapsed = time.monotonic() - t0
+    print(f"\r  Итого: {n:,} строк → {len(reservoir):,} пазлов за {elapsed:.0f} с")
+    return reservoir
+
+
+# ── SQLite insertion ────────────────────────────────────────────────
+_CREATE_SQL = """\
+CREATE TABLE IF NOT EXISTS puzzles (
+    id          TEXT PRIMARY KEY,
+    fen         TEXT NOT NULL,
+    moves       TEXT NOT NULL,
+    rating      INTEGER NOT NULL,
+    rating_dev  INTEGER NOT NULL DEFAULT 0,
+    popularity  INTEGER NOT NULL DEFAULT 0,
+    plays       INTEGER NOT NULL DEFAULT 0,
+    themes      TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL DEFAULT '',
+    opening_tags TEXT NOT NULL DEFAULT '',
+    difficulty  TEXT NOT NULL DEFAULT 'medium'
+);
+"""
+
+_INDEX_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_puzzles_rating ON puzzles(rating);",
+    "CREATE INDEX IF NOT EXISTS idx_puzzles_difficulty ON puzzles(difficulty);",
+]
+
+
+def _insert(db_path: Path, rows: list[tuple[Any, ...]]) -> None:
+    """Write ``rows`` directly to ``db_path``.
+
+    Earlier versions wrote to a ``.sqlite.tmp`` file and then atomically
+    swapped, but on Windows the tempfile retains an OS-level write
+    handle (via SQLite's WAL/SHM aux files) for several seconds after
+    ``conn.close()`` returns, which causes ``os.replace`` to fail with
+    ``[WinError 32] used by another process`` even when no other
+    process is touching the destination. Avoid the dance entirely:
+    delete any pre-existing destination, then write straight to it.
+    Use ``journal_mode=DELETE`` so no WAL/SHM files linger.
+    """
+    if db_path.exists():
+        _delete_with_retry(db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA locking_mode=EXCLUSIVE")
+    conn.execute(_CREATE_SQL)
+    for idx_sql in _INDEX_SQL:
+        conn.execute(idx_sql)
+    conn.commit()
+
+    print("Записываю в SQLite ...")
+    t0 = time.monotonic()
+    cur = conn.cursor()
+    batch: list[tuple[Any, ...]] = []
+    for i, r in enumerate(rows):
+        difficulty = _difficulty(int(r[3]))
+        batch.append((*r, difficulty))
+        if len(batch) >= 50_000:
+            cur.executemany(
+                "INSERT OR IGNORE INTO puzzles "
+                "(id, fen, moves, rating, rating_dev, popularity, plays, "
+                "themes, url, opening_tags, difficulty) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                batch,
+            )
+            conn.commit()
+            print(f"\r  {i + 1:,} / {len(rows):,}", end="", flush=True)
+            batch = []
+    if batch:
+        cur.executemany(
+            "INSERT OR IGNORE INTO puzzles "
+            "(id, fen, moves, rating, rating_dev, popularity, plays, "
+            "themes, url, opening_tags, difficulty) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            batch,
+        )
+        conn.commit()
+    conn.close()
+    elapsed = time.monotonic() - t0
+    print(f"\r  Готово: {len(rows):,} строк за {elapsed:.1f} с")
+    print(f"База: {db_path} ({db_path.stat().st_size / 1e6:.1f} MB)")
+
+
+def _delete_with_retry(path: Path) -> None:
+    """Delete ``path`` with Windows-friendly retries.
+
+    Windows holds the file lock for a few moments after the previous
+    holder closes it (AV scan, search indexer, lingering SQLite
+    handle), so ``unlink`` may race. We retry up to 8 times with
+    backoff and surface a clear instruction if all attempts fail.
+    """
+    last_exc: OSError | None = None
+    for attempt in range(8):
+        try:
+            path.unlink()
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            time.sleep(0.5 * (attempt + 1))
+        except FileNotFoundError:
+            return
+    raise RuntimeError(
+        f"Не удалось удалить старый {path}: файл занят другим процессом.\n"
+        f"Закрой все окна с сервером (uvicorn / start-public.ps1) и попробуй снова.\n"
+        f"taskkill /F /IM python.exe /T  /F /IM ngrok.exe /T\n"
+        f"Оригинальная ошибка: {last_exc!r}"
+    ) from last_exc
+
+
+# ── CLI ─────────────────────────────────────────────────────────────
+def _resolve_zst_path(data_dir: Path) -> Path:
+    """Return the existing .csv.zst cache to use, preferring ``data_dir``.
+
+    Falls back to any sibling ``backend/data/`` directory we know about
+    (e.g. the one bundled with the loaded package) so users coming from
+    a stale editable install don't have to re-download 300 MB after
+    every checkout. When nothing exists yet we return the canonical
+    path inside ``data_dir`` so the downloader writes there.
+    """
+    primary = data_dir / ZST_FILENAME
+    if primary.exists():
+        return primary
+    for fallback_dir in _FALLBACK_CACHE_DIRS:
+        candidate = fallback_dir / ZST_FILENAME
+        try:
+            if candidate.resolve() == primary.resolve():
+                continue
+        except OSError:
+            continue
+        if candidate.is_file():
+            print(
+                f"Нашёл кэш в соседней папке: {candidate} — использую его без копирования."
+            )
+            return candidate
+    return primary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Импорт пазлов Lichess → SQLite",
+    )
+    parser.add_argument(
+        "--target", type=int, default=500_000,
+        help="Целевое количество пазлов (по умолчанию 500 000)",
+    )
+    parser.add_argument(
+        "--all", action="store_true",
+        help="Импортировать все пазлы (~5.5M) без семплинга",
+    )
+    parser.add_argument(
+        "--url", default=DB_URL,
+        help="URL .csv.zst (по умолчанию Lichess)",
+    )
+    parser.add_argument(
+        "--data-dir", type=Path, default=None,
+        help=(
+            "Папка для кэша .csv.zst и итогового puzzles.sqlite. "
+            "По умолчанию — backend/data/ в корне этого репозитория (или $CHESS_DATA_DIR)."
+        ),
+    )
+    args = parser.parse_args()
+
+    target: int | None = None if args.all else args.target
+
+    data_dir = (args.data_dir.expanduser().resolve() if args.data_dir else DATA_DIR)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db_path = data_dir / "puzzles.sqlite"
+    zst_path = _resolve_zst_path(data_dir)
+
+    warning = _paths.stale_install_warning()
+    if warning:
+        print(f"[chess-sandbox] ⚠  {warning}")
+    print(f"Папка данных: {data_dir}")
+
+    # Download if missing.
+    if not zst_path.exists():
+        _download(args.url, zst_path)
+    else:
+        print(f"Используем кэш: {zst_path} ({zst_path.stat().st_size / 1e6:.1f} MB)")
+
+    # Parse + sample.
+    rows = _stream_puzzles(zst_path, target)
+    if not rows:
+        print("Нет пазлов — выход.")
+        sys.exit(1)
+
+    # Insert into SQLite.
+    _insert(db_path, rows)
+    print(f"\nГотово! {len(rows):,} пазлов доступны серверу.")
+
+
+if __name__ == "__main__":
+    main()
