@@ -1143,37 +1143,44 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
 .eval-bar {
   position: relative;
   /* Neutral medium-grey frame so the bar reads as a distinct UI element
-     against the page background regardless of how dark the black block
-     becomes. */
+     against the page background regardless of how dark the block becomes. */
   border: 2px solid #5a6070;
   border-radius: 3px;
   overflow: hidden;
-  /* Use the same colour as the black block so any sub-pixel gap from
-     flex rounding doesn't show as a strip of page background. */
+  /* The container itself paints black's share — we overlay only the
+     white block on top of it. This keeps the bar's orientation a single
+     CSS toggle (no flex-direction swap that could leave the bar half-
+     rotated between renders), which is what made the eval bar appear
+     to flip inconsistently when clicking through analysis moves. */
   background: #0d0e10;
-  display: flex;
-  flex-direction: column;
   min-height: 100%;
   /* Subtle outer shadow to lift the bar off the page bg. */
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 .eval-bar[hidden] { display: none; }
-/* When the board is flipped, swap the visual order of the white/black
-   blocks so the white block sits on the same side as the white pieces
-   on the board. The percentage values themselves stay tied to each
-   colour, so a 90% white advantage always shows 90% white-coloured. */
-.eval-bar.flipped { flex-direction: column-reverse; }
+/* .eval-bar-black is no longer drawn (the container paints black's share);
+   keep the element so callers don't break, but make it invisible. */
 .eval-bar-black {
-  flex: 0 0 var(--eval-black, 50%);
-  /* Deeper near-black so the block clearly reads as "black side" and
-     doesn't blend into the surrounding page bg (which is ~#1f2024). */
-  background: #0d0e10;
-  transition: flex-basis 0.18s ease;
+  display: none;
 }
 .eval-bar-white {
-  flex: 0 0 var(--eval-white, 50%);
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--eval-white, 50%);
   background: #f1f2f2;
-  transition: flex-basis 0.18s ease;
+  transition: height 0.18s ease;
+  /* Default board orientation: white pieces at the BOTTOM of the
+     board, so white fills from the bottom of the bar upwards. */
+  bottom: 0;
+  top: auto;
+}
+/* Flipped board (black at the bottom): white fills from the TOP of
+   the bar downwards. Switching anchor side via top/bottom is a single
+   declarative flip that cannot drift mid-transition. */
+.eval-bar.flipped .eval-bar-white {
+  top: 0;
+  bottom: auto;
 }
 .eval-bar-label {
   position: absolute;
@@ -5882,3 +5889,172 @@ body.view-analysis #panel-review::-webkit-scrollbar-thumb:hover {
   font-variant-numeric: tabular-nums;
 }
 .party-team-trophy { margin-left: auto; font-size: 20px; }
+
+/* ========================================================================
+   Invite-via-link UI (Battle Puzzle lobby + 1v1 lobby)
+   ------------------------------------------------------------------------
+   Two flavours share the same visual language: a chunky "copy link"
+   button, a small hint that displays the freshly-generated URL after
+   click, and a result line that auto-hides after a few seconds. The
+   parent containers (.party-header, .onevsone-invite-card) set the
+   colour palette; the button itself uses .puzzle-ghost / .primary so
+   it inherits the existing focus / hover styles for free.
+   ======================================================================== */
+.party-invite-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.party-invite-link-btn {
+  font-size: 13px;
+  padding: 6px 12px;
+}
+.party-invite-link-hint {
+  font-size: 12px;
+  word-break: break-all;
+  background: rgba(110, 167, 255, 0.07);
+  border: 1px solid #2c3950;
+  padding: 5px 8px;
+  border-radius: 6px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.onevsone-invite-link { margin-bottom: 12px; }
+.onevsone-invite-card {
+  background: linear-gradient(180deg, #1a2538, #15202f);
+  border: 1px solid #2c3950;
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.onevsone-invite-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: #ffd75e;
+}
+.onevsone-invite-hint {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.onevsone-invite-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.onevsone-invite-actions .onevsone-invite-make {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.onevsone-invite-result {
+  font-size: 12px;
+  word-break: break-all;
+  background: rgba(110, 167, 255, 0.07);
+  border: 1px solid #2c3950;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.onevsone-challenge-form .ov-link {
+  background: #2a3140;
+  border: 1px solid #3a4258;
+  color: #e7eef9;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.onevsone-challenge-form .ov-link:hover { background: #354158; }
+.onevsone-challenge-form .ov-link-hint {
+  font-size: 12px;
+  word-break: break-all;
+  margin-top: 4px;
+}
+
+/* ========================================================================
+   Responsive polish — phones (≤ 540px)
+   ------------------------------------------------------------------------
+   Targets that need extra love on the narrowest portraits: the new
+   invite-link UI, the 1v1 challenge form, the eval bar, and any flex
+   row that previously left controls hanging off the side of the
+   viewport. The existing @media (max-width: 768px) block handles the
+   broad reflow; this is a finishing pass for the smallest screens.
+   ======================================================================== */
+@media (max-width: 540px) {
+  .party-header h2 { font-size: 16px; }
+  .party-invite-link-row {
+    gap: 6px;
+  }
+  .party-invite-link-btn { width: 100%; }
+  .party-invite-link-hint { font-size: 11px; flex: 1 1 100%; }
+
+  .onevsone-invite-card { padding: 10px; }
+  .onevsone-invite-card .ov-times,
+  .onevsone-invite-card .ov-colors {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .onevsone-invite-card .ov-times button,
+  .onevsone-invite-card .ov-colors button {
+    flex: 1 1 calc(33.333% - 4px);
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+  .onevsone-invite-actions .onevsone-invite-make { width: 100%; }
+
+  .onevsone-challenge-form .ov-actions {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .onevsone-challenge-form .ov-actions button { flex: 1 1 calc(50% - 2px); }
+  .onevsone-challenge-form .ov-actions .primary { flex: 1 1 100%; }
+
+  /* Eval bar — keep it visible but narrower so the board next to it
+     gets more real estate on tiny phones. */
+  .eval-bar { width: 14px; }
+  .eval-bar-label { font-size: 9px; padding: 1px 3px; }
+
+  /* Topbar: stack mode tabs onto their own row + drop the brand glyph
+     so the burger / sound / settings icons get room to breathe. */
+  .topbar { padding: 6px 8px; }
+  .topbar-actions { width: 100%; justify-content: space-between; }
+  .view-tabs {
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .view-tabs::-webkit-scrollbar { display: none; }
+  .view-tab { flex: 0 0 auto; }
+  .view-tab span { display: none; }
+  .view-tab-svg { width: 24px; height: 24px; }
+
+  /* 1 vs 1 online list — pack rows tighter so 3-4 fit above the fold. */
+  .onevsone-online-list { gap: 4px; }
+  .onevsone-online-row { padding: 6px 8px; }
+  .ov-nick-line { font-size: 13px; }
+  .ov-meta { font-size: 11px; }
+
+  /* Battle scoreboard — sit it under the board, not next to it. */
+  .party-side-panel {
+    position: static;
+    width: 100%;
+    max-height: none;
+    margin-top: 12px;
+  }
+}
+
+/* Improve tap-target hit-area on touch devices without bloating the
+   buttons on desktop. Anything inside an interactive control gets
+   manipulation hint so the browser drops the 300ms click delay. */
+@media (hover: none) and (pointer: coarse) {
+  button, .puzzle-primary, .puzzle-ghost, .view-tab, .mode-btn,
+  .onevsone-online-row, .party-member,
+  .onevsone-invite-make, .party-invite-link-btn {
+    touch-action: manipulation;
+  }
+}

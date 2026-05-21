@@ -392,6 +392,142 @@ async def create_challenge(
     return ch
 
 
+async def create_open_challenge(
+    *,
+    challenger_id: str,
+    challenger_nickname: str,
+    challenger_avatar: str,
+    time_seconds: int,
+    increment_seconds: int = 0,
+    challenger_color: str = "random",
+) -> Challenge:
+    """Create a public, link-shareable 1v1 challenge with no specific target.
+
+    The first visitor who hits ``accept_open_challenge`` with a different
+    ``client_id`` becomes the opponent. Used by the ngrok-friendly
+    invite-link flow: the challenger picks time + side, copies the
+    generated link, sends it via Telegram / etc.; the recipient opens it,
+    is auto-paired and the match starts.
+    """
+    time_seconds = max(10, min(int(time_seconds or 0), 60 * 60))
+    increment_seconds = max(0, min(int(increment_seconds or 0), 60))
+    cc = (challenger_color or "random").lower().strip()
+    if cc not in ("w", "b", "random"):
+        cc = "random"
+    async with _LOCK:
+        _reap()
+        ch = Challenge(
+            challenge_id=_new_id("ovl", _CHALLENGES),
+            challenger_id=challenger_id,
+            challenger_nickname=(challenger_nickname or "Гость")[:32],
+            challenger_avatar=notifications_db._norm_avatar(challenger_avatar),
+            target_id="",  # open — anyone with the link can accept
+            target_nickname="",
+            time_seconds=time_seconds,
+            increment_seconds=increment_seconds,
+            created_at=time.time(),
+            challenger_color=cc,
+        )
+        _CHALLENGES[ch.challenge_id] = ch
+    return ch
+
+
+async def accept_open_challenge(
+    challenge_id: str,
+    by_client_id: str,
+    by_nickname: str,
+    by_avatar: str,
+) -> tuple[Challenge, Match] | None:
+    """Accept a public (target-less) challenge.
+
+    Returns ``None`` if the challenge doesn't exist, is no longer pending,
+    or the caller is the challenger themselves (you can't play yourself).
+    On success the challenge is marked accepted, a Match is minted with
+    the colour the challenger picked, and an ``onevsone_match`` SSE
+    notification is pushed to both peers so each frontend can switch
+    into the live-game view.
+    """
+    async with _LOCK:
+        ch = _CHALLENGES.get(challenge_id)
+        if ch is None:
+            return None
+        # Open challenges have an empty target_id. Reject the legacy
+        # targeted ones here so callers can't bypass the regular
+        # ``accept_challenge`` permission check via this endpoint.
+        if ch.target_id != "":
+            return None
+        if ch.status != "pending":
+            return None
+        if by_client_id == ch.challenger_id:
+            # Self-accept would create a vs-yourself match.
+            return None
+        ch.status = "accepted"
+        # Stamp the accepter's id onto the record so post-match auditing
+        # / SSE delivery (next block) has somewhere to read from.
+        ch.target_id = by_client_id
+        ch.target_nickname = (by_nickname or "Гость")[:32] or "Гость"
+        if ch.challenger_color == "w":
+            challenger_white = True
+        elif ch.challenger_color == "b":
+            challenger_white = False
+        else:
+            challenger_white = secrets.choice([True, False])
+        if challenger_white:
+            white = Player(
+                client_id=ch.challenger_id,
+                nickname=ch.challenger_nickname,
+                avatar=ch.challenger_avatar,
+                color="w",
+                clock_remaining=float(ch.time_seconds),
+            )
+            black = Player(
+                client_id=by_client_id,
+                nickname=(by_nickname or "Гость")[:32] or "Гость",
+                avatar=notifications_db._norm_avatar(by_avatar),
+                color="b",
+                clock_remaining=float(ch.time_seconds),
+            )
+        else:
+            white = Player(
+                client_id=by_client_id,
+                nickname=(by_nickname or "Гость")[:32] or "Гость",
+                avatar=notifications_db._norm_avatar(by_avatar),
+                color="w",
+                clock_remaining=float(ch.time_seconds),
+            )
+            black = Player(
+                client_id=ch.challenger_id,
+                nickname=ch.challenger_nickname,
+                avatar=ch.challenger_avatar,
+                color="b",
+                clock_remaining=float(ch.time_seconds),
+            )
+        match = Match(
+            match_id=_new_id("ovm", _MATCHES),
+            white=white,
+            black=black,
+            time_seconds=ch.time_seconds,
+            increment_seconds=ch.increment_seconds,
+            created_at=time.time(),
+            last_move_at=time.time(),
+        )
+        _MATCHES[match.match_id] = match
+    await _persist()
+    payload_for_challenger = {
+        "type": "onevsone_match",
+        "challenge": ch.public(),
+        "match": match.public(ch.challenger_id),
+    }
+    payload_for_target = {
+        "type": "onevsone_match",
+        "challenge": ch.public(),
+        "match": match.public(by_client_id),
+    }
+    await notifications_db._push(ch.challenger_id, payload_for_challenger)
+    await notifications_db._push(by_client_id, payload_for_target)
+    return ch, match
+
+
 async def cancel_challenge(challenge_id: str, by_client_id: str) -> Challenge | None:
     async with _LOCK:
         ch = _CHALLENGES.get(challenge_id)

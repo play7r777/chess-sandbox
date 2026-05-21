@@ -176,6 +176,25 @@ class OneVsOneActionRequest(BaseModel):
     client_id: str = Field(..., min_length=4, max_length=64)
 
 
+class OneVsOneOpenChallengeRequest(BaseModel):
+    """Body for ``POST /api/onevsone/open`` — link-shareable challenge
+    with no specific target. The challenger only picks time + side; the
+    response carries the challenge id used to build the invite URL.
+    """
+    client_id: str = Field(..., min_length=4, max_length=64)
+    time_seconds: int = Field(..., ge=10, le=60 * 60)
+    increment_seconds: int = Field(default=0, ge=0, le=60)
+    challenger_color: str = Field(default="random", pattern="^(w|b|random)$")
+
+
+class OneVsOneOpenAcceptRequest(BaseModel):
+    """Body for ``POST /api/onevsone/open/{id}/accept`` — first visitor
+    with the link becomes the opponent and the match starts."""
+    client_id: str = Field(..., min_length=4, max_length=64)
+    nickname: str = Field(default="Гость", max_length=32)
+    avatar: str = Field(default="♟", max_length=256)
+
+
 def _print_puzzle_banner() -> None:
     """Print a one-line summary of the puzzle bank at startup.
 
@@ -1882,6 +1901,73 @@ async def onevsone_challenge_cancel(
     return {"challenge": ch.public()}
 
 
+@app.post("/api/onevsone/open")
+async def onevsone_open_challenge_create(
+    payload: OneVsOneOpenChallengeRequest,
+) -> dict[str, Any]:
+    """Create a link-shareable 1v1 challenge. The challenger picks time
+    and side; the response carries the challenge id used to build the
+    invite URL (e.g. ``<base>/?join_1v1=<id>``).
+    """
+    challenger = users_db.get_user(payload.client_id)
+    if challenger is None:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    try:
+        ch = await onevsone_room.create_open_challenge(
+            challenger_id=str(challenger.get("client_id") or payload.client_id),
+            challenger_nickname=str(challenger.get("nickname") or ""),
+            challenger_avatar=str(challenger.get("avatar") or ""),
+            time_seconds=payload.time_seconds,
+            increment_seconds=payload.increment_seconds,
+            challenger_color=payload.challenger_color,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"challenge": ch.public()}
+
+
+@app.get("/api/onevsone/open/{challenge_id}")
+async def onevsone_open_challenge_view(challenge_id: str) -> dict[str, Any]:
+    """Fetch metadata for a link-shareable challenge — used by the
+    recipient's frontend to show ``Sergey wants to play 5 min as White``
+    before they commit to accept.
+    """
+    ch = onevsone_room.get_challenge(challenge_id)
+    if ch is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found")
+    # Reject targeted challenges so the open-link UI never confuses
+    # them with a regular invite.
+    if ch.target_id != "":
+        raise HTTPException(status_code=404, detail="challenge_not_open")
+    return {"challenge": ch.public()}
+
+
+@app.post("/api/onevsone/open/{challenge_id}/accept")
+async def onevsone_open_challenge_accept(
+    challenge_id: str, payload: OneVsOneOpenAcceptRequest,
+) -> dict[str, Any]:
+    """Accept a link-shareable 1v1 challenge. The first visitor with the
+    link becomes the opponent — server-side pairing creates the Match
+    and fires ``onevsone_match`` to both peers via SSE.
+    """
+    user = users_db.get_user(payload.client_id)
+    nickname = payload.nickname
+    avatar = payload.avatar
+    if user is not None:
+        nickname = str(user.get("nickname") or nickname)
+        avatar = str(user.get("avatar") or avatar)
+    user_cid = str(
+        (user or {}).get("client_id") or payload.client_id,
+    )
+    result = await onevsone_room.accept_open_challenge(
+        challenge_id, user_cid, nickname, avatar,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="challenge_not_found_or_invalid")
+    ch, match = result
+    return {"challenge": ch.public(), "match": match.public(user_cid)}
+
+
 @app.get("/api/onevsone/match/{match_id}")
 async def onevsone_match_state(
     match_id: str,
@@ -2110,14 +2196,31 @@ async def onevsone_online_users(
 
 
 async def _onevsone_broadcast(match: onevsone_room.Match, payload: dict[str, Any]) -> None:
-    """Fan-out a payload to both peers' live WebSockets, ignoring closed sockets."""
-    for cid, sock in list(match.sockets.items()):
-        if sock is None:
-            continue
+    """Fan-out a payload to both peers' live WebSockets, ignoring closed sockets.
+
+    Each ``send_json`` runs concurrently with a 5-second hard timeout so a
+    hung mobile peer (NAT drop / backgrounded tab) can't block the move
+    relay for the other side. Sockets that timeout or error are dropped
+    from the match registration; the client will reconnect via the WS
+    onclose handler.
+    """
+    targets = [(cid, sock) for cid, sock in list(match.sockets.items()) if sock is not None]
+    if not targets:
+        return
+
+    async def _send(sock: Any) -> bool:
         try:
-            await sock.send_json(payload)
+            await asyncio.wait_for(sock.send_json(payload), timeout=5.0)
+            return True
         except Exception:
-            # Socket likely closed mid-send; drop the registration.
+            return False
+
+    results = await asyncio.gather(
+        *(_send(sock) for _cid, sock in targets),
+        return_exceptions=True,
+    )
+    for (cid, _sock), ok in zip(targets, results, strict=False):
+        if not ok or isinstance(ok, Exception):
             match.sockets.pop(cid, None)
 
 

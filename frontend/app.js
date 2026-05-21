@@ -553,6 +553,18 @@ const state = {
     // their reaction didn't show up).
     lastChatAt: 0,
     lastReactAt: 0,
+    // Live-connection bookkeeping for the auto-reconnect path. The
+    // party WS is the long-poll heartbeat for the puzzle relay —
+    // when a phone backgrounds the tab or the carrier NAT silently
+    // drops the socket, the client side previously had no way to
+    // recover and the board would freeze for everyone in the room.
+    // pingTimer fires `{type:"ping"}` every PARTY_WS_PING_MS so the
+    // server detects a dead client (and so middleboxes don't kill
+    // the socket on idle). wsRetry tracks reconnect attempts for
+    // exponential backoff.
+    pingTimer: null,
+    wsRetry: 0,
+    reconnectTimer: null,
   },
   // Spectator session (view-only, separate from `party`).
   spectator: {
@@ -4084,14 +4096,25 @@ function updateEvalBar(cpWhitePov, _moverSide) {
   const label = document.getElementById("eval-bar-label");
   if (!bar || !label) return;
   const frac = cpToWhiteFrac(cpWhitePov);
-  // The white block always represents white's share of the bar and the
-  // black block always represents black's share. To make the bar match
-  // the board orientation when it is flipped, the eval-bar element itself
-  // uses flex-direction: column-reverse via the .flipped class, swapping
-  // their visual order without inverting the meaning of the values.
-  const flipped = state.flipped;
+  // The bar is rendered as a single white overlay over a black container:
+  //   - container background = black (= black's share)
+  //   - .eval-bar-white      = white's share, absolutely positioned and
+  //                            anchored to white's side of the board.
+  //
+  // Anchoring via `.flipped` class is what keeps the bar oriented to the
+  // board: when state.flipped is false the player has white at the bottom,
+  // so white fills from the BOTTOM of the bar upwards; when flipped (black
+  // at the bottom), white fills from the TOP. This is a single source of
+  // truth — there is no flex-direction swap that can leave the bar
+  // half-rotated between renders, which is what made the analysis eval
+  // bar appear to "flip" inconsistently when clicking through moves.
+  const flipped = !!state.flipped;
   const whiteBottom = !flipped;
   bar.classList.toggle("flipped", flipped);
+  // .eval-bar-black is rendered as part of the container background now
+  // (see style.css). We keep --eval-black for callers that still read it
+  // from the DOM (e.g. screenshots / external instrumentation) but the
+  // actual paint is driven purely by --eval-white.
   bar.style.setProperty("--eval-white", `${(frac * 100).toFixed(2)}%`);
   bar.style.setProperty("--eval-black", `${((1 - frac) * 100).toFixed(2)}%`);
   // Pretty number.
@@ -6630,6 +6653,10 @@ document.getElementById("btn-onboarding-save")?.addEventListener("click", async 
   _saveLocalUser();
   await syncUserProfile();
   hideOnboarding();
+  // First-visit via invite link: a pending join was stashed because we
+  // couldn't fire it without a registered profile. Now that the user
+  // has a nickname + a synced backend record, kick the join off.
+  try { _runPendingInvite(); } catch (_) { /* ignore */ }
 });
 
 // Hamburger menu (Profile / Leaderboard).
@@ -7050,6 +7077,12 @@ async function _bootUser() {
     state.user.client_id = _uuidv4();
     showOnboarding();
   }
+  // Pull invite-link params off the URL. We do this *after* the user has
+  // a client_id so the join handlers can authenticate immediately. If
+  // the visitor still has the onboarding modal open we stash the pending
+  // invite — the modal's save handler kicks it off once the profile is
+  // synced. See `_consumeInviteLinkParams`.
+  try { _consumeInviteLinkParams(); } catch (_) { /* ignore — invite UX is best-effort */ }
   // Heartbeat every 30s so the backend "online" flag stays accurate
   // (window is 90s — see users.py::_summarize). Frontend leaderboards
   // and the 1 vs 1 / Battle online lists all read this single flag, so
@@ -7658,34 +7691,308 @@ async function partyJoin(code) {
   partyConnect(code);
 }
 
-function partyConnect(code) {
-  if (state.party.ws) {
-    try { state.party.ws.close(); } catch (_) {}
+// Build a shareable URL pointing at this same deployment. We keep any
+// pre-existing `token` / `host_token` style query params off the share
+// link — the auth proxy issues a cookie on the first hit so a fresh
+// visitor only needs the base URL + the join param. Callers can append
+// their own param via ``params``.
+function _buildShareableUrl(params) {
+  try {
+    const u = new URL(location.href);
+    // Strip everything that's either auth-sensitive (host_token) or
+    // pollution from a previous invite, then layer the requested
+    // params on top.
+    const drop = new Set([
+      "host_token", "join_party", "party", "join_1v1", "ovo",
+    ]);
+    for (const key of Array.from(u.searchParams.keys())) {
+      if (drop.has(key)) u.searchParams.delete(key);
+    }
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v == null || v === "") continue;
+      u.searchParams.set(k, String(v));
+    }
+    // Wipe the hash — invites should land on the default view, the
+    // setView call inside _runPendingInvite picks the right tab.
+    u.hash = "";
+    return u.toString();
+  } catch (_) {
+    // Fall back to a relative URL — better than throwing because the
+    // user can still hand-copy it out of the clipboard toast.
+    const qs = Object.entries(params || {})
+      .filter(([_, v]) => v != null && v !== "")
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join("&");
+    return location.origin + (qs ? `?${qs}` : "");
   }
+}
+
+function _buildPartyInviteLink(code) {
+  return _buildShareableUrl({ join_party: code });
+}
+
+function _buildOnevsoneInviteLink(challengeId) {
+  return _buildShareableUrl({ join_1v1: challengeId });
+}
+
+async function _copyTextToClipboard(text) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* fall through to legacy path */ }
+  // Legacy fallback: hidden textarea + execCommand. Required for
+  // Safari and any non-secure context (ngrok deploys behind HTTPS are
+  // fine but in-app webviews sometimes lack the async API).
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+// ---------- Invite via link ----------
+//
+// Two flavours of invite link, both designed to play nicely with the
+// ngrok-based public-URL flow described in `scripts/start-public.sh`:
+//
+//   ?join_party=<CODE>       — drop straight into a Battle Puzzle lobby
+//   ?join_1v1=<CHALLENGE_ID> — auto-accept a link-shareable 1v1 challenge
+//
+// We strip the param off the URL the moment we read it so a refresh
+// doesn't endlessly re-trigger the join (and so the URL bar stays clean
+// for screenshots / sharing back to a different friend).
+let _pendingInvite = null;
+
+function _readInviteLinkParams() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const partyCode = (params.get("join_party") || params.get("party") || "").trim();
+    const onevsoneId = (params.get("join_1v1") || params.get("ovo") || "").trim();
+    if (partyCode) return { kind: "party", code: partyCode.toUpperCase().slice(0, 16) };
+    if (onevsoneId) return { kind: "onevsone", challengeId: onevsoneId.slice(0, 64) };
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+function _scrubInviteParamsFromUrl() {
+  try {
+    const url = new URL(location.href);
+    let touched = false;
+    for (const key of ["join_party", "party", "join_1v1", "ovo"]) {
+      if (url.searchParams.has(key)) {
+        url.searchParams.delete(key);
+        touched = true;
+      }
+    }
+    if (touched) {
+      const next = url.pathname + (url.searchParams.toString() ? `?${url.searchParams}` : "") + url.hash;
+      history.replaceState(null, "", next);
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function _consumeInviteLinkParams() {
+  const invite = _readInviteLinkParams();
+  if (!invite) return;
+  _scrubInviteParamsFromUrl();
+  _pendingInvite = invite;
+  // If onboarding is still open the user hasn't picked a nickname yet —
+  // defer until they hit "Save". Otherwise run immediately.
+  const modal = document.getElementById("onboarding-modal");
+  if (modal && !modal.hidden) return;
+  _runPendingInvite();
+}
+
+async function _runPendingInvite() {
+  if (!_pendingInvite) return;
+  const inv = _pendingInvite;
+  _pendingInvite = null;
+  if (!state.user.client_id) return;
+  try {
+    if (inv.kind === "party") {
+      try { setView("battle"); } catch (_) { /* ignore */ }
+      await partyJoin(inv.code);
+      _showInfoToast(`Зашли в пати по ссылке · ${inv.code}`);
+    } else if (inv.kind === "onevsone") {
+      try { setView("onevsone"); } catch (_) { /* ignore */ }
+      await _onevsoneAcceptOpenChallenge(inv.challengeId);
+    }
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    _showInfoToast(`Не удалось зайти по ссылке: ${msg}`);
+  }
+}
+
+async function _onevsoneAcceptOpenChallenge(challengeId) {
+  if (!challengeId || !state.user.client_id) return;
+  // Peek at the metadata first so we can give the user a meaningful
+  // toast ("Sergey wants to play 5 min · accepting…") and bail cleanly
+  // if the link was already consumed by someone else.
+  let meta = null;
+  try {
+    meta = await api(`/api/onevsone/open/${encodeURIComponent(challengeId)}`);
+  } catch (e) {
+    throw new Error("Ссылка устарела или уже использована");
+  }
+  const ch = meta && meta.challenge;
+  if (!ch) throw new Error("Ссылка устарела или уже использована");
+  if (ch.challenger_id === state.user.client_id) {
+    // You can't accept your own challenge — just keep them on the
+    // 1v1 view; they'll see their own outgoing card.
+    _showInfoToast("Это твоя собственная ссылка — отправь её другу");
+    return;
+  }
+  const r = await api(`/api/onevsone/open/${encodeURIComponent(challengeId)}/accept`, {
+    method: "POST",
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      nickname: state.user.nickname || "Гость",
+      avatar: state.user.avatar || "♟",
+    }),
+  });
+  if (r && r.match) {
+    state.onevsone.match = r.match;
+    try { _renderOnevsoneMatchUi(); } catch (_) { /* ignore */ }
+    try { _onevsoneEnsureWs(); } catch (_) { /* ignore */ }
+    _showInfoToast(`Игра началась · ${ch.challenger_nickname || "Гость"}`);
+  }
+}
+
+// Application-level WS heartbeat. Anything under ~20s is enough to keep
+// most mobile carrier NATs from killing the socket on idle, and lets us
+// detect a half-open connection via send-failure between ticks.
+const PARTY_WS_PING_MS = 15_000;
+// Cap for the reconnect backoff so we don't end up waiting a full
+// minute after a brief network blip.
+const PARTY_WS_MAX_BACKOFF_MS = 8_000;
+
+function _partyClearPingTimer() {
+  if (state.party.pingTimer) {
+    clearInterval(state.party.pingTimer);
+    state.party.pingTimer = null;
+  }
+}
+
+function _partyClearReconnectTimer() {
+  if (state.party.reconnectTimer) {
+    clearTimeout(state.party.reconnectTimer);
+    state.party.reconnectTimer = null;
+  }
+}
+
+function _partyShouldReconnect() {
+  // Only auto-reconnect while the user has an active room — leaving the
+  // view (state.view !== "battle") or finishing the match drops us back
+  // to the regular lobby flow.
+  return state.party.active
+    && state.party.code
+    && state.party.status !== "finished"
+    && state.view === "battle";
+}
+
+function _partyScheduleReconnect() {
+  if (!_partyShouldReconnect()) return;
+  _partyClearReconnectTimer();
+  const attempt = state.party.wsRetry++;
+  const delay = Math.min(
+    PARTY_WS_MAX_BACKOFF_MS,
+    500 * Math.pow(2, attempt),
+  );
+  state.party.reconnectTimer = setTimeout(() => {
+    state.party.reconnectTimer = null;
+    if (!_partyShouldReconnect()) return;
+    try {
+      partyConnect(state.party.code, /* isReconnect= */ true);
+    } catch (_) { /* ignore — onclose will reschedule */ }
+  }, delay);
+}
+
+function partyConnect(code, isReconnect) {
+  if (state.party.ws) {
+    try {
+      // Defang the previous socket so a stale onclose can't race the new
+      // one we're about to install and tear down the freshly-attached
+      // ping interval / reconnect bookkeeping.
+      state.party.ws.onclose = null;
+      state.party.ws.onerror = null;
+      state.party.ws.onmessage = null;
+      state.party.ws.close();
+    } catch (_) {}
+  }
+  _partyClearPingTimer();
+  _partyClearReconnectTimer();
   // Party owns the live broadcast channel — drop the solo presence
   // socket so spectator messages don't get duplicated across both.
   try { presenceDisconnect(); } catch (_) { /* ignore */ }
   state.party.code = code;
   state.party.active = true;
-  state.party.status = "lobby";
-  state.party.finalResults = null;
-  state.party.finalMeta = null;
-  state.party.scoreboard = [];
-  state.party.members = [];
-  // Match length is fixed at 3 min (chess.com Puzzle Battle style);
-  // the duration selector is gone but we keep the field around so
-  // legacy code paths reading state.party.durationSec still work.
-  state.party.durationSec = 180;
-  state.party.allowedDurations = [180];
+  if (!isReconnect) {
+    state.party.status = "lobby";
+    state.party.finalResults = null;
+    state.party.finalMeta = null;
+    state.party.scoreboard = [];
+    state.party.members = [];
+    // Match length is fixed at 3 min (chess.com Puzzle Battle style);
+    // the duration selector is gone but we keep the field around so
+    // legacy code paths reading state.party.durationSec still work.
+    state.party.durationSec = 180;
+    state.party.allowedDurations = [180];
+  }
   const ws = new WebSocket(_partyWsUrl(code));
   state.party.ws = ws;
+  ws.onopen = () => {
+    // Successful handshake clears the backoff counter so the next
+    // disconnect doesn't immediately bake in the previous attempt's
+    // delay.
+    state.party.wsRetry = 0;
+    // Application-layer keepalive so middleboxes don't silently kill
+    // the socket on idle and the server's per-connection ping/pong
+    // can prune dead phones in <=PING_INTERVAL + send_timeout.
+    _partyClearPingTimer();
+    state.party.pingTimer = setInterval(() => {
+      try {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: "ping", t: Date.now() }));
+      } catch (_) {
+        // Send failed — let onclose handle the reconnect path.
+      }
+    }, PARTY_WS_PING_MS);
+  };
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     handlePartyMessage(msg);
   };
-  ws.onerror = () => _partyShowError(new Error("Соединение потеряно"));
+  ws.onerror = () => {
+    // We surface the error only when there's no active session to
+    // resume into — the reconnect path is preferred over a hard
+    // user-facing alert because the room is still alive on the
+    // server and we'll fold back in on the next attempt.
+    if (!_partyShouldReconnect()) {
+      _partyShowError(new Error("Соединение потеряно"));
+    }
+  };
   ws.onclose = () => {
+    _partyClearPingTimer();
+    // If we still want to be in the room, auto-reconnect — server-side
+    // state is preserved across short disconnects (Party._mark_disconnect
+    // grants ~30s grace before kicking the member).
+    if (_partyShouldReconnect()) {
+      _partyScheduleReconnect();
+      return;
+    }
     if (state.party.active && state.party.status !== "finished") {
       // Disconnected before match end — surface as finished and keep board.
       state.party.active = false;
@@ -8460,6 +8767,10 @@ function renderPartyLobby() {
     <header class="party-header">
       <h2><span class="battle-h-icon" aria-hidden="true">${BATTLE_SWORDS_SVG}</span>Puzzle Battle — лобби</h2>
       <p class="muted">Код для приглашения: <code class="party-code-pill">${escapeHtml(m.code || "")}</code> ${avgRatingPill}</p>
+      <div class="party-invite-link-row">
+        <button id="btn-party-copy-link" type="button" class="puzzle-ghost party-invite-link-btn" title="Скопировать ссылку — открой её на телефоне друга, чтобы он зашёл в пати">🔗 Скопировать ссылку для друга</button>
+        <span id="party-invite-link-hint" class="muted party-invite-link-hint" hidden></span>
+      </div>
     </header>
     ${isHost ? `
     <section class="party-kind-section">
@@ -8547,6 +8858,21 @@ function renderPartyLobby() {
   _wirePartyChatInput(body);
   body.querySelector("#btn-party-leave")?.addEventListener("click", () => {
     leaveParty();
+  });
+  body.querySelector("#btn-party-copy-link")?.addEventListener("click", async () => {
+    const code = state.party.code || m.code;
+    if (!code) return;
+    const link = _buildPartyInviteLink(code);
+    const hint = body.querySelector("#party-invite-link-hint");
+    const ok = await _copyTextToClipboard(link);
+    if (hint) {
+      hint.hidden = false;
+      hint.textContent = ok
+        ? `Готово · ${link}`
+        : `Скопируй вручную: ${link}`;
+      // Auto-hide so the lobby doesn't permanently show a long URL.
+      setTimeout(() => { if (hint) hint.hidden = true; }, 12000);
+    }
   });
   if (isHost) {
     _renderFriendPicker(m.code).catch(() => {});
@@ -8642,11 +8968,17 @@ function renderPartyLobby() {
 }
 
 function leaveParty() {
+  // Mark the session inactive BEFORE closing the WS so the onclose
+  // handler doesn't kick off a reconnect for a room we're explicitly
+  // bailing out of.
+  state.party.active = false;
   if (state.party.ws) {
     try { state.party.ws.send(JSON.stringify({ type: "leave" })); } catch (_) {}
     try { state.party.ws.close(); } catch (_) {}
   }
-  state.party.active = false;
+  _partyClearPingTimer();
+  _partyClearReconnectTimer();
+  state.party.wsRetry = 0;
   state.party.ws = null;
   state.party.status = "lobby";
   if (state.party.countdownInterval) {
@@ -11459,9 +11791,11 @@ function _renderOnevsoneLobby() {
       <h2>1 vs 1</h2>
       <span class="onevsone-sub">Сыграй легальную партию против живого соперника</span>
     </div>
+    <div id="onevsone-invite-link" class="onevsone-invite-link"></div>
     <div id="onevsone-online" class="onevsone-online-list"></div>
     <div id="onevsone-form-host"></div>
   `;
+  _renderOnevsoneInviteLinkPanel();
   _renderOnevsoneOnlineList();
   // If the user clicked "Челлендж" from a popover before the lobby
   // finished loading, restore the challenge form for the stashed
@@ -11470,6 +11804,76 @@ function _renderOnevsoneLobby() {
   state.onevsone.pendingChallenge = null;
   _renderOnevsoneChallengeForm(pending || null);
   renderGlobalLeaderboard();
+}
+
+// Standalone "create invite link" panel rendered at the top of the
+// 1v1 lobby. Lets the host pick time + side and copy a shareable URL
+// in one click — no need to wait for the friend to appear in the
+// online list. The user requirement was: "1v1 — only after picking
+// time and side, then the invite link becomes available".
+function _renderOnevsoneInviteLinkPanel() {
+  const host = document.getElementById("onevsone-invite-link");
+  if (!host) return;
+  const sel = state.onevsone.selectedTime || 300;
+  const selColor = state.onevsone.selectedColor || "random";
+  const buttons = ONEVSONE_TIME_OPTIONS.map((o) => {
+    const active = o.sec === sel ? " is-active" : "";
+    return `<button type="button" data-sec="${o.sec}" class="${active}">${o.label}</button>`;
+  }).join("");
+  const colorOpts = [
+    { v: "w", label: "⛪ Белые" },
+    { v: "random", label: "🎲 Случайно" },
+    { v: "b", label: "♚ Черные" },
+  ];
+  const colorButtons = colorOpts.map((o) => {
+    const active = o.v === selColor ? " is-active" : "";
+    return `<button type="button" data-color="${o.v}" class="${active}">${o.label}</button>`;
+  }).join("");
+  host.innerHTML = `
+    <div class="onevsone-invite-card">
+      <div class="onevsone-invite-title">🔗 Пригласить друга по ссылке</div>
+      <div class="onevsone-invite-hint muted">Выбери время и сторону — получишь ссылку, которую можно отправить в Telegram / WhatsApp. Друг откроет — и сразу начнётся партия.</div>
+      <div class="ov-times">${buttons}</div>
+      <div class="ov-colors">${colorButtons}</div>
+      <div class="onevsone-invite-actions">
+        <button type="button" class="primary onevsone-invite-make">Сделать ссылку</button>
+      </div>
+      <div class="onevsone-invite-result muted" hidden></div>
+    </div>
+  `;
+  host.querySelectorAll(".ov-times button").forEach((b) => {
+    b.onclick = () => {
+      state.onevsone.selectedTime = parseInt(b.dataset.sec, 10) || 300;
+      _renderOnevsoneInviteLinkPanel();
+      // Keep the per-target challenge form (if open) in sync with the
+      // shared time/side selection.
+      _renderOnevsoneChallengeForm(state.onevsone.pendingChallenge || null);
+    };
+  });
+  host.querySelectorAll(".ov-colors button").forEach((b) => {
+    b.onclick = () => {
+      const v = b.dataset.color;
+      state.onevsone.selectedColor = (v === "w" || v === "b") ? v : "random";
+      _renderOnevsoneInviteLinkPanel();
+      _renderOnevsoneChallengeForm(state.onevsone.pendingChallenge || null);
+    };
+  });
+  host.querySelector(".onevsone-invite-make").onclick = async () => {
+    const result = host.querySelector(".onevsone-invite-result");
+    try {
+      const link = await _onevsoneCreateInviteLink();
+      const ok = await _copyTextToClipboard(link);
+      if (result) {
+        result.hidden = false;
+        result.textContent = ok
+          ? `Ссылка скопирована · ${link}`
+          : `Скопируй вручную: ${link}`;
+      }
+      _showInfoToast(ok ? "Ссылка скопирована — отправь её другу" : "Не удалось скопировать ссылку");
+    } catch (e) {
+      _showInfoToast(`Ошибка: ${(e && e.message) || e}`);
+    }
+  };
 }
 
 function _renderOnevsoneOnlineList() {
@@ -11556,8 +11960,10 @@ function _renderOnevsoneChallengeForm(target) {
       <div class="ov-colors">${colorButtons}</div>
       <div class="ov-actions">
         <button type="button" class="ov-cancel">Отмена</button>
+        <button type="button" class="ov-link" title="Сгенерировать ссылку и скопировать в буфер — отправь её другу в Telegram / WhatsApp">🔗 Ссылкой</button>
         <button type="button" class="primary ov-send">Отправить вызов</button>
       </div>
+      <div class="ov-link-hint muted" hidden></div>
     </div>
   `;
   host.querySelectorAll(".ov-times button").forEach((b) => {
@@ -11583,6 +11989,45 @@ function _renderOnevsoneChallengeForm(target) {
       _showInfoToast(`Ошибка: ${(e && e.message) || e}`);
     }
   };
+  host.querySelector(".ov-link").onclick = async () => {
+    try {
+      const link = await _onevsoneCreateInviteLink();
+      const hint = host.querySelector(".ov-link-hint");
+      const ok = await _copyTextToClipboard(link);
+      if (hint) {
+        hint.hidden = false;
+        hint.textContent = ok
+          ? `Ссылка скопирована · ${link}`
+          : `Скопируй вручную: ${link}`;
+      }
+      _showInfoToast(ok ? "Ссылка скопирована — отправь её другу" : "Не удалось скопировать ссылку");
+    } catch (e) {
+      _showInfoToast(`Ошибка: ${(e && e.message) || e}`);
+    }
+  };
+}
+
+// Create a link-shareable 1v1 challenge using whatever time + side the
+// user picked in the challenge form, and return a URL the recipient can
+// open. Used by both the per-target challenge form and the standalone
+// "Ссылкой" lobby button so a host can invite a friend who isn't on
+// the online list yet.
+async function _onevsoneCreateInviteLink() {
+  if (!state.user.client_id) throw new Error("Нет клиентского ID");
+  const sec = state.onevsone.selectedTime || 300;
+  const color = state.onevsone.selectedColor || "random";
+  const r = await api("/api/onevsone/open", {
+    method: "POST",
+    body: JSON.stringify({
+      client_id: state.user.client_id,
+      time_seconds: sec,
+      challenger_color: color,
+    }),
+  });
+  if (!r || !r.challenge || !r.challenge.id) {
+    throw new Error("Сервер не вернул ссылку");
+  }
+  return _buildOnevsoneInviteLink(r.challenge.id);
 }
 
 async function _onevsoneSendChallenge(targetId, targetNickname) {

@@ -111,9 +111,34 @@ _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _PARTIES: dict[str, Party] = {}
 _LOCK = asyncio.Lock()
 
+# Maximum time a single ws.send_json may block before we consider the
+# socket dead. Mobile WebSockets routinely freeze when the carrier NAT
+# silently drops an idle connection or the phone backgrounds the tab —
+# the TCP socket reports as open but every write hangs until the OS
+# eventually times out (~5 min). Without this guard, a single frozen
+# phone WS would block the broadcast fan-out for everybody else in the
+# party ("board lagged / froze for the whole room after a while").
+WS_SEND_TIMEOUT_SEC = 5.0
+
 _HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 _SQUARE_RE = re.compile(r"^[a-h][1-8]$")
 _PIECE_RE = re.compile(r"^[wb][KQRBNP]$")
+
+
+async def _safe_send(ws: WebSocket, payload: dict[str, Any]) -> bool:
+    """Send ``payload`` over ``ws`` with a hard timeout.
+
+    Returns ``True`` on success, ``False`` on any error or timeout.
+    Used by the broadcast fan-out so a single hung WebSocket can't
+    block the whole room.
+    """
+    try:
+        await asyncio.wait_for(ws.send_json(payload), timeout=WS_SEND_TIMEOUT_SEC)
+        return True
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return False
+    except Exception:
+        return False
 
 
 def _norm_avatar(s: Any) -> str:
@@ -619,33 +644,39 @@ class Party:
                 m.team = None
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
-        """Send to every connected member AND spectator."""
-        dead_members: list[str] = []
-        for cid, m in self.members.items():
-            if m.ws is None:
-                continue
-            try:
-                await m.ws.send_json(payload)
-            except Exception:
-                dead_members.append(cid)
-        for cid in dead_members:
-            await self._mark_disconnect(cid)
+        """Send to every connected member AND spectator.
+
+        Fan-out runs in parallel with a per-socket timeout so a single
+        hung phone WebSocket (mobile NAT drop, app backgrounded) cannot
+        block the broadcast loop for every other player in the room —
+        which was the root cause of the "board froze / lagged after a
+        few minutes" Battle Puzzle bug.
+        """
+        targets = [(cid, m.ws) for cid, m in self.members.items() if m.ws is not None]
+        if targets:
+            results = await asyncio.gather(
+                *(_safe_send(ws, payload) for _cid, ws in targets),
+                return_exceptions=True,
+            )
+            for (cid, _ws), ok in zip(targets, results, strict=False):
+                if not ok or isinstance(ok, Exception):
+                    await self._mark_disconnect(cid)
         await self.broadcast_spectators(payload)
 
     async def broadcast_spectators(self, payload: dict[str, Any]) -> None:
-        dead_specs: list[str] = []
-        for cid, s in self.spectators.items():
-            if s.ws is None:
-                continue
-            try:
-                await s.ws.send_json(payload)
-            except Exception:
-                dead_specs.append(cid)
-        for cid in dead_specs:
-            sp = self.spectators.get(cid)
-            if sp:
-                sp.ws = None
-                sp.disconnected_at = time.time()
+        targets = [(cid, s.ws) for cid, s in self.spectators.items() if s.ws is not None]
+        if not targets:
+            return
+        results = await asyncio.gather(
+            *(_safe_send(ws, payload) for _cid, ws in targets),
+            return_exceptions=True,
+        )
+        for (cid, _ws), ok in zip(targets, results, strict=False):
+            if not ok or isinstance(ok, Exception):
+                sp = self.spectators.get(cid)
+                if sp:
+                    sp.ws = None
+                    sp.disconnected_at = time.time()
 
     def _append_chat_log(self, entry: dict[str, Any]) -> None:
         """Push an entry into the bounded ring buffer, dropping the
@@ -738,18 +769,14 @@ class Party:
         m = self.members.get(cid)
         if not m or m.ws is None:
             return
-        try:
-            await m.ws.send_json(payload)
-        except Exception:
+        if not await _safe_send(m.ws, payload):
             await self._mark_disconnect(cid)
 
     async def _send_spectator(self, cid: str, payload: dict[str, Any]) -> None:
         s = self.spectators.get(cid)
         if not s or s.ws is None:
             return
-        try:
-            await s.ws.send_json(payload)
-        except Exception:
+        if not await _safe_send(s.ws, payload):
             s.ws = None
             s.disconnected_at = time.time()
 

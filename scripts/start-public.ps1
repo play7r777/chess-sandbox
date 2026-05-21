@@ -87,8 +87,12 @@ if ([string]::IsNullOrEmpty($env:CHESS_HOST_TOKEN)) {
 }
 
 Write-Host "-> Starting server on 0.0.0.0:$Port ..." -ForegroundColor Cyan
+# --ws-ping-interval / --ws-ping-timeout keep WebSocket connections
+# alive across mobile NAT/carrier idle timeouts and let the server
+# detect a silently-dead phone within ~15s so Battle Puzzle / 1v1
+# clients can reconnect automatically.
 $server = Start-Process -PassThru -FilePath $pythonExe `
-    -ArgumentList "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "$Port" `
+    -ArgumentList "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "$Port", "--ws-ping-interval", "15", "--ws-ping-timeout", "15" `
     -NoNewWindow
 
 # Give uvicorn a moment to bind.

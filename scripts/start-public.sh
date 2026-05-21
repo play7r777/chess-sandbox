@@ -79,7 +79,13 @@ if [[ -z "${CHESS_HOST_TOKEN:-}" ]]; then
 fi
 
 echo "→ Старт сервера на 0.0.0.0:$PORT ..."
-"$PY" -m uvicorn backend.main:app --host 0.0.0.0 --port "$PORT" &
+# Tighter WebSocket ping window so a phone that silently dropped the
+# connection (NAT timeout / backgrounded tab) is detected within ~15
+# seconds instead of the default ~40s + OS TCP keepalive. Battle
+# Puzzle / 1v1 clients reconnect automatically once the close lands.
+"$PY" -m uvicorn backend.main:app \
+    --host 0.0.0.0 --port "$PORT" \
+    --ws-ping-interval 15 --ws-ping-timeout 15 &
 SERVER_PID=$!
 
 cleanup() {
